@@ -639,6 +639,48 @@ def design_column_and_pm_curve(
 # Interactive CAD Modeling, Boundary Control & Equilibrium Engine
 # ============================================================================
 
+def check_duplicate_column(
+    x: float,
+    y: float,
+    b_m: float,
+    h_m: float,
+    existing_columns: List[Dict[str, Any]],
+    ignore_id: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    Verifies if a new or moved column at (x, y) with dimensions (b_m, h_m)
+    collides with or duplicates an existing column.
+    Rejects overlapping column positions with an informative error message.
+    """
+    for col in existing_columns:
+        cid = str(col.get("id", ""))
+        if ignore_id and cid == str(ignore_id):
+            continue
+        if not col.get("active", True):
+            continue
+        cx = float(col.get("x", 0.0))
+        cy = float(col.get("y", 0.0))
+        cb = float(col.get("b_m", 0.20))
+        ch = float(col.get("h_m", 0.40))
+
+        dx = abs(x - cx)
+        dy = abs(y - cy)
+        dist = (dx * dx + dy * dy) ** 0.5
+
+        # Check collision: center distance smaller than 75% of minimum column dimension
+        min_dim = min(b_m, h_m, cb, ch)
+        if dist < min_dim * 0.75:
+            return False, f"Duplicate Column Rejected: Position ({x:.2f}, {y:.2f}) coincides with existing column {cid}."
+
+        # Or heavy bounding box overlap
+        overlap_x = max(0.0, (b_m + cb) / 2.0 - dx)
+        overlap_y = max(0.0, (h_m + ch) / 2.0 - dy)
+        if overlap_x > 0.6 * min(b_m, cb) and overlap_y > 0.6 * min(h_m, ch):
+            return False, f"Duplicate Column Rejected: Column at ({x:.2f}, {y:.2f}) heavily overlaps with existing column {cid}."
+
+    return True, ""
+
+
 def clamp_or_expand_column_boundary(
     col_x: float,
     col_y: float,
@@ -699,6 +741,58 @@ def clamp_or_expand_column_boundary(
     was_modified = (abs(clamped_x - col_x) > 1e-4 or abs(clamped_y - col_y) > 1e-4)
 
     return round(clamped_x, 3), round(clamped_y, 3), slab_edge_polygon, was_modified
+
+
+def rotate_column_90_deg(
+    col_id: str,
+    story: Dict[str, Any],
+    rule: str = "clamp",
+) -> Tuple[bool, str]:
+    """
+    Rotates a selected column by 90 degrees by swapping b_m and h_m,
+    then re-clamps it flush inside the slab boundary.
+    """
+    columns = story.get("columns", [])
+    target_col = None
+    for col in columns:
+        if str(col.get("id")) == str(col_id):
+            target_col = col
+            break
+
+    if not target_col:
+        return False, f"Column {col_id} not found in story."
+
+    old_b = float(target_col.get("b_m", 0.20))
+    old_h = float(target_col.get("h_m", 0.40))
+    new_b = old_h
+    new_h = old_b
+
+    edge = story.get("slab_edge_polygon", [])
+    final_x, final_y, updated_poly, was_mod = clamp_or_expand_column_boundary(
+        float(target_col["x"]), float(target_col["y"]), new_b, new_h, edge, rule=rule
+    )
+
+    # Check duplicate collision with other columns
+    dup_ok, dup_msg = check_duplicate_column(final_x, final_y, new_b, new_h, columns, ignore_id=col_id)
+    if not dup_ok:
+        return False, dup_msg
+
+    target_col["b_m"] = round(new_b, 3)
+    target_col["h_m"] = round(new_h, 3)
+    target_col["x"] = final_x
+    target_col["y"] = final_y
+    if updated_poly != edge:
+        story["slab_edge_polygon"] = updated_poly
+
+    # Update supports on connected beams
+    for bm in story.get("beams", []):
+        for sup in bm.get("supports", []):
+            if str(sup.get("target_id")) == str(col_id):
+                sup["width_m"] = new_b
+                sup["x"] = final_x
+                sup["y"] = final_y
+
+    return True, f"Column {col_id} rotated 90° to {new_b:.2f}x{new_h:.2f} m at ({final_x:.2f}, {final_y:.2f})."
 
 
 def validate_beam_cantilevers_and_boundary(
@@ -812,6 +906,190 @@ def validate_beam_cantilevers_and_boundary(
     return True, "Beam geometry and cantilever overhangs are valid."
 
 
+def check_duplicate_beam(
+    sx: float,
+    sy: float,
+    ex: float,
+    ey: float,
+    existing_beams: List[Dict[str, Any]],
+    ignore_id: Optional[str] = None,
+    tol: float = 0.15,
+) -> Tuple[bool, str]:
+    """
+    Checks if a proposed beam between (sx, sy) and (ex, ey) overlaps or duplicates
+    an existing beam along the same axis.
+    """
+    b_len = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+    if b_len < 0.05:
+        return False, "Beam length must be at least 0.20 m."
+
+    b_line = LineString([(sx, sy), (ex, ey)]) if LineString is not None else None
+
+    for ob in existing_beams:
+        oid = str(ob.get("id", ""))
+        if ignore_id and oid == str(ignore_id):
+            continue
+        osx = float(ob.get("start_x", 0.0))
+        osy = float(ob.get("start_y", 0.0))
+        oex = float(ob.get("end_x", 0.0))
+        oey = float(ob.get("end_y", 0.0))
+
+        # Check endpoints match in forward direction
+        d_sf = ((sx - osx) ** 2 + (sy - osy) ** 2) ** 0.5
+        d_ef = ((ex - oex) ** 2 + (ey - oey) ** 2) ** 0.5
+        if d_sf <= tol and d_ef <= tol:
+            return False, f"Duplicate Beam Rejected: Axis coincides with existing beam {oid}."
+
+        # Check endpoints match in reverse direction
+        d_sr = ((sx - oex) ** 2 + (sy - oey) ** 2) ** 0.5
+        d_er = ((ex - osx) ** 2 + (ey - osy) ** 2) ** 0.5
+        if d_sr <= tol and d_er <= tol:
+            return False, f"Duplicate Beam Rejected: Axis coincides with existing beam {oid}."
+
+        # Collinear overlap
+        if b_line is not None:
+            ob_line = LineString([(osx, osy), (oex, oey)])
+            dist_s = ob_line.distance(Point(sx, sy))
+            dist_e = ob_line.distance(Point(ex, ey))
+            if dist_s <= tol and dist_e <= tol:
+                return False, f"Duplicate Beam Rejected: Beam lies entirely along existing beam {oid}."
+            dist_os = b_line.distance(Point(osx, osy))
+            dist_oe = b_line.distance(Point(oex, oey))
+            if dist_os <= tol and dist_oe <= tol:
+                return False, f"Duplicate Beam Rejected: Axis overlaps existing beam {oid}."
+
+    return True, ""
+
+
+def validate_and_build_beam_with_cantilevers(
+    start_pt: Tuple[float, float],
+    end_pt: Tuple[float, float],
+    b_kind: str,
+    width_m: float,
+    depth_m: float,
+    story: Dict[str, Any],
+    beam_id: Optional[str] = None,
+    ignore_id: Optional[str] = None,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """
+    Validates geometry, rejects duplicate beams along the same axis, clamps flush inside boundary,
+    detects all intermediate columns and supporting beams along the axis, and subdivides
+    into consecutive spans for continuous beam modeling.
+    """
+    edge = story.get("slab_edge_polygon", [])
+    cols = story.get("columns", [])
+    existing_beams = story.get("beams", [])
+    openings = story.get("openings", [])
+
+    sx, sy = start_pt
+    ex, ey = end_pt
+
+    # 1. Check duplicate beam
+    dup_ok, dup_msg = check_duplicate_beam(sx, sy, ex, ey, existing_beams, ignore_id=ignore_id)
+    if not dup_ok:
+        return False, dup_msg, None
+
+    if beam_id is None:
+        beam_id = f"B{len(existing_beams) + 1}"
+
+    temp_beam = {
+        "id": beam_id,
+        "beam_kind": b_kind,
+        "width_m": width_m,
+        "depth_m": depth_m,
+        "start_x": sx,
+        "start_y": sy,
+        "end_x": ex,
+        "end_y": ey,
+    }
+
+    # 2. Auto-clamp beam centerline inward if protruding outside building edge
+    temp_beam, was_clamped = clamp_beam_inside_boundary(temp_beam, edge)
+
+    # 3. Validate cantilevers & boundary
+    valid_geom, geom_err = validate_beam_cantilevers_and_boundary(
+        temp_beam, cols, existing_beams, edge, openings=openings
+    )
+    if not valid_geom:
+        return False, geom_err, None
+
+    bx1, by1 = temp_beam["start_x"], temp_beam["start_y"]
+    bx2, by2 = temp_beam["end_x"], temp_beam["end_y"]
+    beam_line = LineString([(bx1, by1), (bx2, by2)]) if LineString is not None else None
+    beam_len = ((bx2 - bx1) ** 2 + (by2 - by1) ** 2) ** 0.5
+
+    # 4. Detect all intermediate supports along this continuous beam line
+    sup_list = []
+    if beam_line is not None:
+        for c in cols:
+            if not c.get("active", True):
+                continue
+            c_pt = Point(float(c["x"]), float(c["y"]))
+            c_reach = max(float(c.get("b_m", 0.20)), float(c.get("h_m", 0.40))) / 1.5 + width_m / 2.0
+            if beam_line.distance(c_pt) <= c_reach:
+                proj = beam_line.project(c_pt)
+                sup_list.append((proj, "column", c))
+
+        # Detect intermediate intersecting/supporting beams
+        for ob in existing_beams:
+            if ignore_id and str(ob.get("id", "")) == str(ignore_id):
+                continue
+            osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
+            oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
+            ob_line = LineString([(osx, osy), (oex, oey)])
+            inter = beam_line.intersection(ob_line)
+            if inter and not inter.is_empty:
+                if inter.geom_type == "Point":
+                    ipt = inter
+                elif hasattr(inter, "geoms") and len(inter.geoms) > 0:
+                    ipt = inter.geoms[0]
+                else:
+                    continue
+                proj = beam_line.project(ipt)
+                if not any(abs(proj - s[0]) < 0.35 for s in sup_list):
+                    sup_list.append((proj, "beam", {
+                        "id": ob.get("id", "Bm"),
+                        "x": ipt.x,
+                        "y": ipt.y,
+                        "width_m": float(ob.get("width_m", 0.20)),
+                    }))
+
+    sup_list.sort(key=lambda s: s[0])
+
+    supports = []
+    spans = []
+    if sup_list:
+        for s_i, (proj, stype, sobj) in enumerate(sup_list):
+            supports.append({
+                "support_index": s_i + 1,
+                "kind": stype,
+                "target_id": sobj["id"],
+                "width_m": float(sobj.get("width_m", sobj.get("b_m", 0.20))),
+                "x": float(sobj["x"]),
+                "y": float(sobj["y"]),
+            })
+        if len(supports) >= 2:
+            for s_i in range(len(supports) - 1):
+                p1 = (supports[s_i]["x"], supports[s_i]["y"])
+                p2 = (supports[s_i + 1]["x"], supports[s_i + 1]["y"])
+                spans.append(round(((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2) ** 0.5, 2))
+        else:
+            spans = [round(beam_len, 2)]
+    else:
+        spans = [round(beam_len, 2)]
+
+    c_left = round(sup_list[0][0], 2) if (sup_list and sup_list[0][0] > 0.05) else 0.0
+    c_right = round(beam_len - sup_list[-1][0], 2) if (sup_list and (beam_len - sup_list[-1][0]) > 0.05) else 0.0
+
+    temp_beam["supports"] = supports
+    temp_beam["spans"] = spans
+    temp_beam["cantilever_left_m"] = c_left
+    temp_beam["cantilever_right_m"] = c_right
+    temp_beam["loads"] = [{"type": "dist", "x1": 0.0, "x2": round(beam_len, 2), "val": 30.0}]
+
+    return True, "Beam built successfully", temp_beam
+
+
 def detect_bays_and_determine_ribs(
     slab_edge_polygon: List[List[float]],
     beams: List[Dict[str, Any]],
@@ -845,16 +1123,32 @@ def detect_bays_and_determine_ribs(
         ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
         if ((sx - ex) ** 2 + (sy - ey) ** 2) ** 0.5 > 0.10:
             bl = LineString([(sx, sy), (ex, ey)])
-            beam_lines.append(bl)
             beam_objs.append((bm.get("id", "B"), bl, bm))
+
+            # Merge perimeter beams within max(0.45, width_m + 0.15) of boundary
+            b_w = float(bm.get("width_m", 0.20))
+            snap_dist = max(0.45, b_w + 0.15)
+            mid_pt = bl.interpolate(0.5, normalized=True)
+            if (
+                edge_poly.exterior.distance(Point(sx, sy)) <= snap_dist
+                and edge_poly.exterior.distance(Point(ex, ey)) <= snap_dist
+                and edge_poly.exterior.distance(mid_pt) <= snap_dist
+            ):
+                continue
+            beam_lines.append(bl)
 
     all_network = unary_union(edge_lines + beam_lines)
     raw_bays = list(polygonize(all_network))
 
-    # Keep only bays strictly inside edge_poly
+    # Keep only valid structural bays: inside edge_poly, excluding sliver bays (< 0.85m)
     valid_bays = []
     for b in raw_bays:
         if edge_poly.contains(b.centroid) and b.area > 0.05:
+            minx, miny, maxx, maxy = b.bounds
+            lx = round(maxx - minx, 2)
+            ly = round(maxy - miny, 2)
+            if lx < 0.85 or ly < 0.85 or b.area < (0.85 * 0.85):
+                continue
             valid_bays.append(b)
 
     valid_bays.sort(key=lambda p: (-p.centroid.y, p.centroid.x))
@@ -887,7 +1181,8 @@ def detect_bays_and_determine_ribs(
 
             hit_beam_id = None
             for bid, bline, bdict in beam_objs:
-                if bline.distance(mid) <= 0.15:
+                hit_tol = max(0.45, float(bdict.get("width_m", 0.20)) + 0.15)
+                if bline.distance(mid) <= hit_tol:
                     hit_beam_id = bid
                     break
 
@@ -964,6 +1259,198 @@ def detect_bays_and_determine_ribs(
         })
 
     return result_bays
+
+
+def detect_story_grid_bays(story: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Subdivides the story floor bounded by slab_edge_polygon and beams into structural bays.
+    Perimeter beams within max(0.45, width_m + 0.15) are merged with the outer boundary,
+    and sliver bays with lx < 0.85m or ly < 0.85m are excluded.
+    """
+    edge = story.get("slab_edge_polygon", [])
+    beams = story.get("beams", [])
+    slabs = story.get("slabs", [])
+    openings = story.get("openings", [])
+    return detect_bays_and_determine_ribs(edge, beams, slabs, openings)
+
+
+def reconcile_and_split_slabs_after_beam_change(story: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Reconciles existing slabs after a beam is added, moved, or deleted.
+    If a new beam cuts an existing slab bay into multiple sub-bays, the old slab is
+    automatically split into independent sub-slabs supported by the new beam.
+    Updates ACI 318 thickness evaluation immediately.
+    """
+    new_bays = detect_story_grid_bays(story)
+    existing_slabs = list(story.get("slabs", []))
+
+    if not existing_slabs or not new_bays:
+        return existing_slabs
+
+    assigned_bay_ids = set()
+    result_slabs: List[Dict[str, Any]] = []
+
+    for old_slab in existing_slabs:
+        old_poly = Polygon(old_slab.get("polygon", [])) if old_slab.get("polygon") else None
+        old_cx = float(old_slab.get("center_x", 0.0))
+        old_cy = float(old_slab.get("center_y", 0.0))
+        old_pt = Point(old_cx, old_cy)
+
+        matching_bays = []
+        for bay in new_bays:
+            if bay["id"] in assigned_bay_ids:
+                continue
+            b_poly = Polygon(bay["polygon"]) if bay.get("polygon") else None
+            if b_poly is None:
+                continue
+            b_center = Point(bay["center"][0], bay["center"][1])
+            is_match = False
+            if old_poly and (old_poly.contains(b_center) or old_poly.intersection(b_poly).area > 0.40 * b_poly.area):
+                is_match = True
+            elif ((b_center.x - old_cx) ** 2 + (b_center.y - old_cy) ** 2) ** 0.5 < 0.40:
+                is_match = True
+
+            if is_match:
+                matching_bays.append(bay)
+
+        if len(matching_bays) >= 2:
+            # Smart Slab Splitting: old slab was divided into 2+ sub-bays by a new beam!
+            for s_idx, mb in enumerate(matching_bays):
+                assigned_bay_ids.add(mb["id"])
+                sub_id = f"{old_slab['id']}_{s_idx + 1}" if s_idx > 0 else old_slab["id"]
+                sub_slab = {
+                    "id": sub_id,
+                    "polygon": mb["polygon"],
+                    "center_x": mb["center"][0],
+                    "center_y": mb["center"][1],
+                    "lx": mb["lx"],
+                    "ly": mb["ly"],
+                    "axis_span_m": mb["lx"] if mb["default_rib_direction_deg"] == 0.0 else mb["ly"],
+                    "rib_direction_deg": mb["default_rib_direction_deg"],
+                    "bay_type": mb["bay_type"],
+                    "carrying_beam_id": mb.get("carrying_beam_id"),
+                    "is_cantilever": False,
+                    "is_opening": False,
+                    "supports_cantilever_for": None,
+                }
+                result_slabs.append(sub_slab)
+        elif len(matching_bays) == 1:
+            mb = matching_bays[0]
+            assigned_bay_ids.add(mb["id"])
+            updated_slab = dict(old_slab)
+            updated_slab["polygon"] = mb["polygon"]
+            updated_slab["center_x"] = mb["center"][0]
+            updated_slab["center_y"] = mb["center"][1]
+            updated_slab["lx"] = mb["lx"]
+            updated_slab["ly"] = mb["ly"]
+            updated_slab["bay_type"] = mb["bay_type"]
+            updated_slab["carrying_beam_id"] = mb.get("carrying_beam_id")
+            if "rib_direction_deg" not in updated_slab:
+                updated_slab["rib_direction_deg"] = mb["default_rib_direction_deg"]
+            updated_slab["axis_span_m"] = mb["lx"] if updated_slab["rib_direction_deg"] == 0.0 else mb["ly"]
+            result_slabs.append(updated_slab)
+        else:
+            for bay in new_bays:
+                if bay["id"] in assigned_bay_ids:
+                    continue
+                b_poly = Polygon(bay["polygon"]) if bay.get("polygon") else None
+                if b_poly and b_poly.contains(old_pt):
+                    assigned_bay_ids.add(bay["id"])
+                    updated_slab = dict(old_slab)
+                    updated_slab["polygon"] = bay["polygon"]
+                    updated_slab["center_x"] = bay["center"][0]
+                    updated_slab["center_y"] = bay["center"][1]
+                    updated_slab["lx"] = bay["lx"]
+                    updated_slab["ly"] = bay["ly"]
+                    updated_slab["axis_span_m"] = bay["lx"] if updated_slab.get("rib_direction_deg", 0.0) == 0.0 else bay["ly"]
+                    result_slabs.append(updated_slab)
+                    break
+
+    # Ensure clean sequential/unique IDs
+    seen_ids = set()
+    for s in result_slabs:
+        sid = s.get("id", "S1")
+        if sid in seen_ids:
+            new_id = f"S{len(seen_ids) + 1}"
+            s["id"] = new_id
+        seen_ids.add(s["id"])
+
+    story["slabs"] = result_slabs
+    evaluate_story_thickness_and_optimization(story)
+    return result_slabs
+
+
+def auto_fill_all_story_slabs(story: Dict[str, Any]) -> Tuple[int, str]:
+    """
+    Detects all closed bays bounded by beams and outer boundary,
+    and populates every non-opening bay with a solid hollow-block slab
+    with code-compliant default rib directions in one click.
+    """
+    bays = detect_story_grid_bays(story)
+    if not bays:
+        return 0, "No closed beam bays detected to fill."
+
+    openings = story.get("openings", [])
+    existing_slabs = story.get("slabs", [])
+    existing_by_center = {}
+    for s in existing_slabs:
+        cx = float(s.get("center_x", -999))
+        cy = float(s.get("center_y", -999))
+        existing_by_center[(round(cx, 2), round(cy, 2))] = s
+
+    new_slabs: List[Dict[str, Any]] = []
+    count_added = 0
+
+    for idx, bay in enumerate(bays):
+        bc = (round(bay["center"][0], 2), round(bay["center"][1], 2))
+        pt = Point(bay["center"][0], bay["center"][1])
+
+        # Skip if bay is an opening
+        is_op = False
+        for op in openings:
+            op_poly = Polygon(op.get("polygon", [])) if op.get("polygon") else None
+            if op_poly and op_poly.contains(pt):
+                is_op = True
+                break
+        if is_op:
+            continue
+
+        matched = None
+        for (ex, ey), s in existing_by_center.items():
+            if ((ex - bc[0]) ** 2 + (ey - bc[1]) ** 2) ** 0.5 < 0.40:
+                matched = s
+                break
+
+        if matched:
+            matched["polygon"] = bay["polygon"]
+            matched["center_x"] = bay["center"][0]
+            matched["center_y"] = bay["center"][1]
+            matched["lx"] = bay["lx"]
+            matched["ly"] = bay["ly"]
+            matched["bay_type"] = bay["bay_type"]
+            matched["carrying_beam_id"] = bay.get("carrying_beam_id")
+            new_slabs.append(matched)
+        else:
+            slab_id = f"S{len(new_slabs) + 1}"
+            new_slabs.append({
+                "id": slab_id,
+                "polygon": bay["polygon"],
+                "center_x": bay["center"][0],
+                "center_y": bay["center"][1],
+                "lx": bay["lx"],
+                "ly": bay["ly"],
+                "axis_span_m": bay["lx"] if bay["default_rib_direction_deg"] == 0.0 else bay["ly"],
+                "rib_direction_deg": bay["default_rib_direction_deg"],
+                "bay_type": bay["bay_type"],
+                "carrying_beam_id": bay.get("carrying_beam_id"),
+                "is_cantilever": False,
+                "is_opening": False,
+            })
+            count_added += 1
+
+    story["slabs"] = new_slabs
+    evaluate_story_thickness_and_optimization(story)
+    return count_added, f"Auto-filled {count_added} new slab bays (Total: {len(new_slabs)} active slabs)."
 
 
 def pick_area_slab(
@@ -1427,7 +1914,7 @@ def clamp_beam_inside_boundary(
     ey = float(updated_beam.get("end_y", 0.0))
 
     b_kind = updated_beam.get("beam_kind", "hidden")
-    def_w = 0.60 if b_kind == "hidden" else 0.20
+    def_w = 0.40 if b_kind == "hidden" else 0.20
     width_m = float(updated_beam.get("width_m", def_w))
     half_w = width_m / 2.0
 

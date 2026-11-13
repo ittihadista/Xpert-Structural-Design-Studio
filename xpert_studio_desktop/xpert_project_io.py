@@ -27,7 +27,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.0.0-studio-foundation"
+STUDIO_VERSION = "v1.3.0-smart-cad-intelligence"
 
 STANDARD_LAYERS = [
     ("00-XD-EDGE", 4, "Continuous"),       # Cyan: Outer Slab Boundary
@@ -40,6 +40,134 @@ STANDARD_LAYERS = [
     ("00-XD-TAG-BEAM", 30, "Continuous"),  # Bright Orange: Beam Tags (B1..Bm)
     ("00-XD-ARCH-REF", 8, "Continuous"),   # Gray: Imported Architectural Underlay
 ]
+
+
+def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
+    """
+    Imports an architectural 2D plan from a .DXF file to serve as a locked reference block.
+    Extracts LINE, LWPOLYLINE, POLYLINE, and CIRCLE entities and builds snap points
+    (endpoints, midpoints, circle centers) for interactive CAD OSNAP.
+    """
+    if not os.path.isfile(dxf_file_path):
+        raise FileNotFoundError(f"Architectural DXF file not found: {dxf_file_path}")
+
+    segments: List[List[float]] = []
+    circles: List[List[float]] = []
+    snap_set = set()
+
+    def add_snap_point(x: float, y: float) -> None:
+        snap_set.add((round(x, 3), round(y, 3)))
+
+    if ezdxf is not None:
+        try:
+            doc = ezdxf.readfile(dxf_file_path)
+            msp = doc.modelspace()
+            for entity in msp:
+                dxftype = entity.dxftype()
+                if dxftype == "LINE":
+                    sx, sy = float(entity.dxf.start.x), float(entity.dxf.start.y)
+                    ex, ey = float(entity.dxf.end.x), float(entity.dxf.end.y)
+                    segments.append([round(sx, 3), round(sy, 3), round(ex, 3), round(ey, 3)])
+                    add_snap_point(sx, sy)
+                    add_snap_point(ex, ey)
+                    add_snap_point((sx + ex) / 2.0, (sy + ey) / 2.0)
+                elif dxftype in ("LWPOLYLINE", "POLYLINE"):
+                    try:
+                        pts = [(float(p[0]), float(p[1])) for p in entity.get_points(format="xy")]
+                    except Exception:
+                        pts = [(float(p.dxf.location.x), float(p.dxf.location.y)) for p in getattr(entity, "vertices", [])]
+                    if len(pts) >= 2:
+                        is_closed = getattr(entity, "is_closed", False) or getattr(entity, "closed", False)
+                        cnt = len(pts)
+                        limit = cnt if is_closed else cnt - 1
+                        for i in range(limit):
+                            p1 = pts[i]
+                            p2 = pts[(i + 1) % cnt]
+                            segments.append([round(p1[0], 3), round(p1[1], 3), round(p2[0], 3), round(p2[1], 3)])
+                            add_snap_point(p1[0], p1[1])
+                            add_snap_point(p2[0], p2[1])
+                            add_snap_point((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
+                elif dxftype == "CIRCLE":
+                    cx, cy = float(entity.dxf.center.x), float(entity.dxf.center.y)
+                    rad = float(entity.dxf.radius)
+                    circles.append([round(cx, 3), round(cy, 3), round(rad, 3)])
+                    add_snap_point(cx, cy)
+                    add_snap_point(cx + rad, cy)
+                    add_snap_point(cx - rad, cy)
+                    add_snap_point(cx, cy + rad)
+                    add_snap_point(cx, cy - rad)
+                elif dxftype == "ARC":
+                    cx, cy = float(entity.dxf.center.x), float(entity.dxf.center.y)
+                    add_snap_point(cx, cy)
+                    try:
+                        sp = entity.start_point
+                        ep = entity.end_point
+                        segments.append([round(sp.x, 3), round(sp.y, 3), round(ep.x, 3), round(ep.y, 3)])
+                        add_snap_point(sp.x, sp.y)
+                        add_snap_point(ep.x, ep.y)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # If ezdxf is None or extracted 0 entities, run robust ASCII fallback reader
+    if not segments and not circles:
+        try:
+            with open(dxf_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = [line.strip() for line in f]
+            idx = 0
+            n = len(lines)
+            while idx < n - 1:
+                if lines[idx] == "0" and lines[idx + 1] == "LINE":
+                    idx += 2
+                    coords = {}
+                    while idx < n - 1 and lines[idx] != "0":
+                        code = lines[idx]
+                        val = lines[idx + 1]
+                        if code in ("10", "20", "11", "21"):
+                            try:
+                                coords[code] = float(val)
+                            except ValueError:
+                                pass
+                        idx += 2
+                    if all(k in coords for k in ("10", "20", "11", "21")):
+                        sx, sy, ex, ey = coords["10"], coords["20"], coords["11"], coords["21"]
+                        segments.append([round(sx, 3), round(sy, 3), round(ex, 3), round(ey, 3)])
+                        add_snap_point(sx, sy)
+                        add_snap_point(ex, ey)
+                        add_snap_point((sx + ex) / 2.0, (sy + ey) / 2.0)
+                    continue
+                elif lines[idx] == "0" and lines[idx + 1] == "CIRCLE":
+                    idx += 2
+                    coords = {}
+                    while idx < n - 1 and lines[idx] != "0":
+                        code = lines[idx]
+                        val = lines[idx + 1]
+                        if code in ("10", "20", "40"):
+                            try:
+                                coords[code] = float(val)
+                            except ValueError:
+                                pass
+                        idx += 2
+                    if all(k in coords for k in ("10", "20", "40")):
+                        cx, cy, r = coords["10"], coords["20"], coords["40"]
+                        circles.append([round(cx, 3), round(cy, 3), round(r, 3)])
+                        add_snap_point(cx, cy)
+                    continue
+                idx += 1
+        except Exception:
+            pass
+
+    snap_points = [[p[0], p[1]] for p in sorted(list(snap_set))]
+
+    return {
+        "file_name": os.path.basename(dxf_file_path),
+        "file_path": os.path.abspath(dxf_file_path),
+        "visible": True,
+        "segments": segments,
+        "circles": circles,
+        "snap_points": snap_points,
+    }
 
 
 def validate_project_name(name: str) -> Tuple[bool, str, str, str]:
@@ -274,7 +402,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             "finish_load_kn_m2": float(config.get("finish_load_kn_m2", 2.0)),
             "live_load_kn_m2": float(config.get("live_load_kn_m2", 2.0)),
             "rib_width_cm": float(config.get("rib_width_cm", 15.0)),
-            "hidden_beam_min_width_cm": float(config.get("hidden_beam_min_width_cm", 30.0)),
+            "hidden_beam_min_width_cm": float(config.get("hidden_beam_min_width_cm", 40.0)),
             "drop_beam_width_cm": float(config.get("drop_beam_width_cm", 20.0)),
             "drop_beam_min_depth_cm": float(config.get("drop_beam_min_depth_cm", 40.0)),
             "wall_width_cm": float(config.get("wall_width_cm", 20.0)),
@@ -452,7 +580,7 @@ def compute_smart_beam_tag_position(
     rot_deg = 90.0 if is_vertical else 0.0
 
     b_kind = beam.get("beam_kind", "hidden")
-    default_w = 0.60 if b_kind == "hidden" else 0.20
+    default_w = 0.40 if b_kind == "hidden" else 0.20
     width_m = float(beam.get("width_m", default_w))
     offset = width_m / 2.0 + 0.12
 
@@ -607,7 +735,7 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
         ex = float(bm.get("end_x", 5.0))
         ey = float(bm.get("end_y", 0.0))
         b_kind = bm.get("beam_kind", "hidden")
-        b_width = float(bm.get("width_m", 0.30 if b_kind == "hidden" else 0.20))
+        b_width = float(bm.get("width_m", 0.40 if b_kind == "hidden" else 0.20))
         layer = "00-XD-BEAM-HID" if b_kind == "hidden" else "00-XD-BEAM-DROP"
         color = 2 if b_kind == "hidden" else 3
 
@@ -629,6 +757,24 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
                 "insert": (tx, ty, 0.0),
             },
         )
+
+    # 4. Architectural Underlay Block (00-XD-ARCH-REF)
+    arch_block = story_data.get("arch_underlay_block")
+    if arch_block and arch_block.get("visible", True):
+        for seg in arch_block.get("segments", []):
+            if len(seg) >= 4:
+                msp.add_line(
+                    (float(seg[0]), float(seg[1])),
+                    (float(seg[2]), float(seg[3])),
+                    dxfattribs={"layer": "00-XD-ARCH-REF", "color": 8},
+                )
+        for circ in arch_block.get("circles", []):
+            if len(circ) >= 3:
+                msp.add_circle(
+                    (float(circ[0]), float(circ[1])),
+                    float(circ[2]),
+                    dxfattribs={"layer": "00-XD-ARCH-REF", "color": 8},
+                )
 
     doc.saveas(dxf_path)
 

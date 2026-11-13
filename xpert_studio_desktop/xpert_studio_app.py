@@ -68,14 +68,21 @@ from xpert_project_io import (
     sync_story_to_dxf,
     validate_project_name,
     compute_smart_beam_tag_position,
+    import_arch_dxf_underlay,
 )
 from xpert_structural_engine import (
     analyze_all_story_beams_and_columns,
     evaluate_story_thickness_and_optimization,
+    check_duplicate_column,
     clamp_or_expand_column_boundary,
+    rotate_column_90_deg,
     clamp_beam_inside_boundary,
     validate_beam_cantilevers_and_boundary,
+    validate_and_build_beam_with_cantilevers,
     detect_bays_and_determine_ribs,
+    detect_story_grid_bays,
+    reconcile_and_split_slabs_after_beam_change,
+    auto_fill_all_story_slabs,
     pick_area_slab,
     flip_rib_direction_with_equilibrium,
     toggle_bay_slab_or_opening,
@@ -307,7 +314,7 @@ class StructuralCadCanvas2D(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
         self.active_tool = "SELECT"
         self.osnap_enabled = True
@@ -409,36 +416,47 @@ class StructuralCadCanvas2D(QGraphicsView):
         beams = story.get("beams", [])
         edge = story.get("slab_edge_polygon", [])
 
-        # Priority 1: Columns (Center & Corners)
-        for col in columns:
-            if not col.get("active", True):
-                continue
-            cx, cy = float(col["x"]), float(col["y"])
-            b, h = float(col.get("b_m", 0.20)), float(col.get("h_m", 0.40))
-            if ((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5 <= tol:
-                return {"type": f"Column Center [{col['id']}]", "x": cx, "y": cy}
-            for dx, dy in [(-b/2, -h/2), (b/2, -h/2), (b/2, h/2), (-b/2, h/2)]:
-                cor_x, cor_y = cx + dx, cy + dy
-                if ((mx - cor_x) ** 2 + (my - cor_y) ** 2) ** 0.5 <= tol:
-                    return {"type": f"Column Corner [{col['id']}]", "x": cor_x, "y": cor_y}
+        # Priority 0: Architectural Underlay Snap Points (when Arch DXF layer is visible)
+        if self.studio.is_layer_visible("arch"):
+            arch_block = story.get("arch_underlay_block")
+            if arch_block and arch_block.get("visible", True):
+                for pt in arch_block.get("snap_points", []):
+                    px, py = float(pt[0]), float(pt[1])
+                    if ((mx - px) ** 2 + (my - py) ** 2) ** 0.5 <= tol:
+                        return {"type": "Arch DXF Snap", "x": px, "y": py}
 
-        # Priority 2: Beams (Endpoints, Supports, Midpoints)
-        for bm in beams:
-            bid = str(bm.get("id", "B"))
-            sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
-            ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
-            if ((mx - sx) ** 2 + (my - sy) ** 2) ** 0.5 <= tol:
-                return {"type": f"Beam Endpoint [{bid}]", "x": sx, "y": sy}
-            if ((mx - ex) ** 2 + (my - ey) ** 2) ** 0.5 <= tol:
-                return {"type": f"Beam Endpoint [{bid}]", "x": ex, "y": ey}
-            for sup in bm.get("supports", []):
-                if "x" in sup and "y" in sup:
-                    spx, spy = float(sup["x"]), float(sup["y"])
-                    if ((mx - spx) ** 2 + (my - spy) ** 2) ** 0.5 <= tol:
-                        return {"type": f"Beam Support [{sup.get('target_id', 'Sup')}]", "x": spx, "y": spy}
-            mid_x, mid_y = (sx + ex) / 2.0, (sy + ey) / 2.0
-            if ((mx - mid_x) ** 2 + (my - mid_y) ** 2) ** 0.5 <= tol:
-                return {"type": f"Beam Midpoint [{bid}]", "x": mid_x, "y": mid_y}
+        # Priority 1: Columns (Center & Corners) - when Columns layer visible
+        if self.studio.is_layer_visible("columns"):
+            for col in columns:
+                if not col.get("active", True):
+                    continue
+                cx, cy = float(col["x"]), float(col["y"])
+                b, h = float(col.get("b_m", 0.20)), float(col.get("h_m", 0.40))
+                if ((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5 <= tol:
+                    return {"type": f"Column Center [{col['id']}]", "x": cx, "y": cy}
+                for dx, dy in [(-b/2, -h/2), (b/2, -h/2), (b/2, h/2), (-b/2, h/2)]:
+                    cor_x, cor_y = cx + dx, cy + dy
+                    if ((mx - cor_x) ** 2 + (my - cor_y) ** 2) ** 0.5 <= tol:
+                        return {"type": f"Column Corner [{col['id']}]", "x": cor_x, "y": cor_y}
+
+        # Priority 2: Beams (Endpoints, Supports, Midpoints) - when Beams layer visible
+        if self.studio.is_layer_visible("beams"):
+            for bm in beams:
+                bid = str(bm.get("id", "B"))
+                sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+                if ((mx - sx) ** 2 + (my - sy) ** 2) ** 0.5 <= tol:
+                    return {"type": f"Beam Endpoint [{bid}]", "x": sx, "y": sy}
+                if ((mx - ex) ** 2 + (my - ey) ** 2) ** 0.5 <= tol:
+                    return {"type": f"Beam Endpoint [{bid}]", "x": ex, "y": ey}
+                for sup in bm.get("supports", []):
+                    if "x" in sup and "y" in sup:
+                        spx, spy = float(sup["x"]), float(sup["y"])
+                        if ((mx - spx) ** 2 + (my - spy) ** 2) ** 0.5 <= tol:
+                            return {"type": f"Beam Support [{sup.get('target_id', 'Sup')}]", "x": spx, "y": spy}
+                mid_x, mid_y = (sx + ex) / 2.0, (sy + ey) / 2.0
+                if ((mx - mid_x) ** 2 + (my - mid_y) ** 2) ** 0.5 <= tol:
+                    return {"type": f"Beam Midpoint [{bid}]", "x": mid_x, "y": mid_y}
 
         # Priority 3: Slab Boundary Corners & Edges
         if edge and len(edge) >= 3:
@@ -550,26 +568,28 @@ class StructuralCadCanvas2D(QGraphicsView):
             raw_x = sp.x() / self.scale_px
             raw_y = -sp.y() / self.scale_px
 
-            # 1-Click Rib Label Toggle: Check if click is directly on any bay rib label
-            for badge in self.cached_bay_badges:
-                bx, by = badge["center"]
-                if ((raw_x - bx) ** 2 + (raw_y - by) ** 2) ** 0.5 <= 0.85:
-                    edge = self.studio.current_story_data.get("slab_edge_polygon", [])
-                    beams = self.studio.current_story_data.get("beams", [])
-                    slabs = self.studio.current_story_data.get("slabs", [])
-                    openings = self.studio.current_story_data.get("openings", [])
-                    ok, msg, new_slabs = flip_rib_direction_with_equilibrium(
-                        badge["center"], edge, beams, slabs, openings
-                    )
-                    if ok:
-                        self.studio.current_story_data["slabs"] = new_slabs
-                        self.studio.save_and_sync_current_story()
-                        self.studio.refresh_story_ui()
-                        self.studio.statusBar().showMessage(f"1-Click Rib Toggle: {msg}")
-                    else:
-                        QMessageBox.warning(self.studio, "Cantilever Equilibrium Warning", msg)
-                    event.accept()
-                    return
+            # 1-Click Rib Label Toggle: STRICT ISOLATION!
+            # Only allowed when active tool is SELECT or PICK_FLIP_RIB and Slabs layer is visible
+            if self.active_tool in ("SELECT", "PICK_FLIP_RIB") and self.studio.is_layer_visible("slabs"):
+                for badge in self.cached_bay_badges:
+                    bx, by = badge["center"]
+                    if ((raw_x - bx) ** 2 + (raw_y - by) ** 2) ** 0.5 <= 0.85:
+                        edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                        beams = self.studio.current_story_data.get("beams", [])
+                        slabs = self.studio.current_story_data.get("slabs", [])
+                        openings = self.studio.current_story_data.get("openings", [])
+                        ok, msg, new_slabs = flip_rib_direction_with_equilibrium(
+                            badge["center"], edge, beams, slabs, openings
+                        )
+                        if ok:
+                            self.studio.current_story_data["slabs"] = new_slabs
+                            self.studio.save_and_sync_current_story()
+                            self.studio.refresh_story_ui()
+                            self.studio.statusBar().showMessage(f"1-Click Rib Toggle: {msg}")
+                        else:
+                            QMessageBox.warning(self.studio, "Cantilever Equilibrium Warning", msg)
+                        event.accept()
+                        return
 
             snap = self.find_snap_candidate(raw_x, raw_y)
             cx = snap["x"] if snap else round(raw_x * 10.0) / 10.0
@@ -606,10 +626,17 @@ class StructuralCadCanvas2D(QGraphicsView):
                 final_x, final_y, updated_poly, _ = clamp_or_expand_column_boundary(
                     cx, cy, b_m, h_m, edge, rule=rule
                 )
+
+                cols = self.studio.current_story_data.get("columns", [])
+                dup_ok, dup_msg = check_duplicate_column(final_x, final_y, b_m, h_m, cols)
+                if not dup_ok:
+                    QMessageBox.warning(self.studio, "Duplicate Column Rejected", dup_msg)
+                    event.accept()
+                    return
+
                 if updated_poly != edge:
                     self.studio.current_story_data["slab_edge_polygon"] = updated_poly
 
-                cols = self.studio.current_story_data.get("columns", [])
                 col_id = f"C{len(cols) + 1}"
                 cols.append({
                     "id": col_id,
@@ -628,7 +655,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 event.accept()
                 return
 
-            # Step 3: Draw Hidden / Drop Beam (Full-Width with Inward Boundary Clamping)
+            # Step 3: Draw Hidden / Drop Beam (Multi-Span Continuous Beam with Smart Reconcile)
             if self.active_tool in ("ADD_HID_BEAM", "ADD_DROP_BEAM"):
                 b_kind = "hidden" if self.active_tool == "ADD_HID_BEAM" else "drop"
                 if self.draw_start_pt is None:
@@ -643,93 +670,32 @@ class StructuralCadCanvas2D(QGraphicsView):
                         self.hide_rubber_band()
                         return
 
-                    edge = self.studio.current_story_data.get("slab_edge_polygon", [])
-                    cols = self.studio.current_story_data.get("columns", [])
-                    beams = self.studio.current_story_data.get("beams", [])
-                    openings = self.studio.current_story_data.get("openings", [])
-
-                    bid = f"B{len(beams) + 1}"
-                    width_m = 0.60 if b_kind == "hidden" else 0.20
+                    width_m = 0.40 if b_kind == "hidden" else 0.20
                     depth_m = 0.30 if b_kind == "hidden" else 0.50
 
-                    temp_beam = {
-                        "id": bid,
-                        "beam_kind": b_kind,
-                        "width_m": width_m,
-                        "depth_m": depth_m,
-                        "start_x": x1,
-                        "start_y": y1,
-                        "end_x": x2,
-                        "end_y": y2,
-                    }
-
-                    # Auto-clamp beam centerline inward if protruding outside building edge
-                    temp_beam, was_clamped = clamp_beam_inside_boundary(temp_beam, edge)
-
-                    ok, err_msg = validate_beam_cantilevers_and_boundary(
-                        temp_beam, cols, beams, edge, openings=openings
+                    ok, msg, new_beam = validate_and_build_beam_with_cantilevers(
+                        (x1, y1), (x2, y2), b_kind, width_m, depth_m, self.studio.current_story_data
                     )
                     if not ok:
-                        QMessageBox.warning(self.studio, "Invalid Beam Geometry", err_msg)
+                        QMessageBox.warning(self.studio, "Cannot Add Beam", msg)
                         self.draw_start_pt = None
                         self.hide_rubber_band()
                         return
 
-                    bx1, by1 = temp_beam["start_x"], temp_beam["start_y"]
-                    bx2, by2 = temp_beam["end_x"], temp_beam["end_y"]
-                    beam_line = LineString([(bx1, by1), (bx2, by2)])
-                    sup_list = []
-                    for c in cols:
-                        if not c.get("active", True):
-                            continue
-                        c_pt = Point(float(c["x"]), float(c["y"]))
-                        c_reach = max(float(c.get("b_m", 0.20)), float(c.get("h_m", 0.40))) / 1.5 + width_m / 2.0
-                        if beam_line.distance(c_pt) <= c_reach:
-                            proj = beam_line.project(c_pt)
-                            sup_list.append((proj, c))
-                    sup_list.sort(key=lambda s: s[0])
-
-                    supports = []
-                    spans = []
-                    if sup_list:
-                        for s_i, (proj, c) in enumerate(sup_list):
-                            supports.append({
-                                "support_index": s_i + 1,
-                                "kind": "column",
-                                "target_id": c["id"],
-                                "width_m": float(c.get("b_m", 0.20)),
-                                "x": float(c["x"]),
-                                "y": float(c["y"]),
-                            })
-                        if len(supports) >= 2:
-                            for s_i in range(len(supports) - 1):
-                                p1 = (supports[s_i]["x"], supports[s_i]["y"])
-                                p2 = (supports[s_i + 1]["x"], supports[s_i + 1]["y"])
-                                spans.append(round(((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)**0.5, 2))
-                        else:
-                            spans = [round(beam_line.length, 2)]
-                    else:
-                        spans = [round(beam_line.length, 2)]
-
-                    c_left = round(sup_list[0][0], 2) if (sup_list and sup_list[0][0] > 0.05) else 0.0
-                    c_right = round(beam_line.length - sup_list[-1][0], 2) if (sup_list and (beam_line.length - sup_list[-1][0]) > 0.05) else 0.0
-
-                    temp_beam["supports"] = supports
-                    temp_beam["spans"] = spans
-                    temp_beam["cantilever_left_m"] = c_left
-                    temp_beam["cantilever_right_m"] = c_right
-                    temp_beam["loads"] = [{"type": "dist", "x1": 0.0, "x2": round(beam_line.length, 2), "val": 30.0}]
-
-                    beams.append(temp_beam)
-                    self.studio.current_story_data["beams"] = beams
+                    self.studio.current_story_data.setdefault("beams", []).append(new_beam)
                     self.draw_start_pt = None
                     self.hide_rubber_band()
+
+                    # Smart Automatic Slab Splitting when new beam cuts through existing slabs
+                    reconcile_and_split_slabs_after_beam_change(self.studio.current_story_data)
+
                     self.studio.save_and_sync_current_story()
                     self.studio.refresh_story_ui()
-                    clamp_msg = " [Auto-Clamped Flush Inside Boundary]" if was_clamped else ""
                     self.studio.statusBar().showMessage(
-                        f"Added Beam {bid} ({b_kind}) with {len(spans)} span(s){clamp_msg}."
+                        f"Added Beam {new_beam['id']} ({b_kind}) with {len(new_beam.get('spans', []))} span(s)."
                     )
+                event.accept()
+                return
                 event.accept()
                 return
 
@@ -997,7 +963,12 @@ class StructuralCadCanvas2D(QGraphicsView):
             if getattr(self, "is_panning", False):
                 self.is_panning = False
                 self.pan_last_pos = None
-                self.setCursor(Qt.CursorShape.CrossCursor)
+                if self.active_tool == "PAN":
+                    self.setCursor(Qt.CursorShape.OpenHandCursor)
+                elif self.active_tool == "SELECT":
+                    self.setCursor(Qt.CursorShape.ArrowCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.CrossCursor)
                 event.accept()
                 return
         super().mouseReleaseEvent(event)
@@ -1005,6 +976,10 @@ class StructuralCadCanvas2D(QGraphicsView):
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.delete_selected()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_R:
+            self.studio.rotate_selected_column()
             event.accept()
             return
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_C):
@@ -1057,8 +1032,29 @@ class StructuralCadCanvas2D(QGraphicsView):
         for gy in range(min_gy, max_gy + 1):
             self.scene_2d.addLine(min_gx * s, -gy * s, max_gx * s, -gy * s, grid_pen)
 
+        # 0. Architectural DXF Reference Underlay Block (00-XD-ARCH-REF in quiet gray #64748B)
+        arch_block = story_data.get("arch_underlay_block")
+        if arch_block and self.studio.is_layer_visible("arch") and arch_block.get("visible", True):
+            arch_pen = QPen(QColor("#64748B"), 1.2, Qt.PenStyle.SolidLine)
+            for seg in arch_block.get("segments", []):
+                if len(seg) >= 4:
+                    self.scene_2d.addLine(
+                        float(seg[0]) * s, -float(seg[1]) * s,
+                        float(seg[2]) * s, -float(seg[3]) * s,
+                        arch_pen,
+                    )
+            for circ in arch_block.get("circles", []):
+                if len(circ) >= 3:
+                    cx, cy, r = float(circ[0]), float(circ[1]), float(circ[2])
+                    self.scene_2d.addEllipse(
+                        (cx - r) * s, -(cy + r) * s,
+                        2 * r * s, 2 * r * s,
+                        arch_pen,
+                        QBrush(Qt.BrushStyle.NoBrush),
+                    )
+
         # 1. Slab Bays & Openings (00-XD-SLAB & 00-XD-OPEN)
-        if edge and len(edge) >= 3:
+        if edge and len(edge) >= 3 and self.studio.is_layer_visible("slabs"):
             detected_bays = detect_bays_and_determine_ribs(edge, beams, slabs, openings)
             for bay in detected_bays:
                 poly = QPolygonF([QPointF(float(p[0]) * s, -float(p[1]) * s) for p in bay["polygon"]])
@@ -1068,9 +1064,10 @@ class StructuralCadCanvas2D(QGraphicsView):
                     bds = bay["bounds"]
                     self.scene_2d.addLine(bds[0] * s, -bds[1] * s, bds[2] * s, -bds[3] * s, QPen(QColor("#D946EF"), 1, Qt.PenStyle.DotLine))
                     self.scene_2d.addLine(bds[0] * s, -bds[3] * s, bds[2] * s, -bds[1] * s, QPen(QColor("#D946EF"), 1, Qt.PenStyle.DotLine))
-                    txt_op = self.scene_2d.addText("OPENING\n[00-XD-OPEN]", QFont("Arial", 8, QFont.Weight.Bold))
-                    txt_op.setDefaultTextColor(QColor("#D946EF"))
-                    txt_op.setPos(bay["center"][0] * s - 30, -bay["center"][1] * s - 12)
+                    if self.studio.is_layer_visible("labels"):
+                        txt_op = self.scene_2d.addText("OPENING\n[00-XD-OPEN]", QFont("Arial", 8, QFont.Weight.Bold))
+                        txt_op.setDefaultTextColor(QColor("#D946EF"))
+                        txt_op.setPos(bay["center"][0] * s - 30, -bay["center"][1] * s - 12)
                 else:
                     # Solid Slab
                     self.scene_2d.addPolygon(poly, QPen(QColor("#1E293B"), 1), QBrush(QColor(15, 36, 58, 110)))
@@ -1096,12 +1093,13 @@ class StructuralCadCanvas2D(QGraphicsView):
                         "rib_deg": rib_deg,
                     })
 
-                    badge = f"{bay['id']} ({bay['lx']:.1f}x{bay['ly']:.1f}m | {rib_deg:.0f}°)"
-                    if bay.get("is_cantilever"):
-                        badge += "\n[CANTILEVER]"
-                    txt_s = self.scene_2d.addText(badge, QFont("Arial", 8, QFont.Weight.Bold))
-                    txt_s.setDefaultTextColor(QColor("#FBBF24"))
-                    txt_s.setPos(bay["center"][0] * s - 35, -bay["center"][1] * s - 12)
+                    if self.studio.is_layer_visible("labels"):
+                        badge = f"{bay['id']} ({bay['lx']:.1f}x{bay['ly']:.1f}m | {rib_deg:.0f}°)"
+                        if bay.get("is_cantilever"):
+                            badge += "\n[CANTILEVER]"
+                        txt_s = self.scene_2d.addText(badge, QFont("Arial", 8, QFont.Weight.Bold))
+                        txt_s.setDefaultTextColor(QColor("#FBBF24"))
+                        txt_s.setPos(bay["center"][0] * s - 35, -bay["center"][1] * s - 12)
 
                 # Selection highlight on slab
                 if self.selected_element and self.selected_element.get("type") == "slab" and self.selected_element.get("id") == bay["id"]:
@@ -1129,80 +1127,84 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self.scene_2d.addRect(QRectF(p[0] * s - 4, -p[1] * s - 4, 8, 8), QPen(color, 2), QBrush(color))
 
         # 3. Beams: Full-Width Hatched Rectangles & Non-Overlapping Orange Beam Tags
-        placed_tags = []
-        for col in columns:
-            if col.get("active", True):
-                placed_tags.append((float(col["x"]) + 0.25, float(col["y"]) + 0.25))
+        if self.studio.is_layer_visible("beams"):
+            placed_tags = []
+            for col in columns:
+                if col.get("active", True):
+                    placed_tags.append((float(col["x"]) + 0.25, float(col["y"]) + 0.25))
 
-        for bm in beams:
-            sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
-            ex, ey = float(bm.get("end_x", 5.0)), float(bm.get("end_y", 0.0))
-            b_kind = bm.get("beam_kind", "hidden")
-            def_w = 0.60 if b_kind == "hidden" else 0.20
-            width_m = float(bm.get("width_m", def_w))
-            half_w = width_m / 2.0
+            for bm in beams:
+                sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                ex, ey = float(bm.get("end_x", 5.0)), float(bm.get("end_y", 0.0))
+                b_kind = bm.get("beam_kind", "hidden")
+                def_w = 0.40 if b_kind == "hidden" else 0.20
+                width_m = float(bm.get("width_m", def_w))
+                half_w = width_m / 2.0
 
-            dx = ex - sx
-            dy = ey - sy
-            length = max(0.01, (dx * dx + dy * dy) ** 0.5)
-            ux = dx / length
-            uy = dy / length
-            nx = -uy
-            ny = ux
+                dx = ex - sx
+                dy = ey - sy
+                length = max(0.01, (dx * dx + dy * dy) ** 0.5)
+                ux = dx / length
+                uy = dy / length
+                nx = -uy
+                ny = ux
 
-            p1 = (sx - nx * half_w, sy - ny * half_w)
-            p2 = (ex - nx * half_w, ey - ny * half_w)
-            p3 = (ex + nx * half_w, ey + ny * half_w)
-            p4 = (sx + nx * half_w, sy + ny * half_w)
+                p1 = (sx - nx * half_w, sy - ny * half_w)
+                p2 = (ex - nx * half_w, ey - ny * half_w)
+                p3 = (ex + nx * half_w, ey + ny * half_w)
+                p4 = (sx + nx * half_w, sy + ny * half_w)
 
-            poly = QPolygonF([
-                QPointF(p1[0] * s, -p1[1] * s),
-                QPointF(p2[0] * s, -p2[1] * s),
-                QPointF(p3[0] * s, -p3[1] * s),
-                QPointF(p4[0] * s, -p4[1] * s),
-            ])
+                poly = QPolygonF([
+                    QPointF(p1[0] * s, -p1[1] * s),
+                    QPointF(p2[0] * s, -p2[1] * s),
+                    QPointF(p3[0] * s, -p3[1] * s),
+                    QPointF(p4[0] * s, -p4[1] * s),
+                ])
 
-            if b_kind == "hidden":
-                pen = QPen(QColor("#EAB308"), 2, Qt.PenStyle.DashLine)
-                brush = QBrush(QColor(234, 179, 8, 80), Qt.BrushStyle.DiagCrossPattern)
-            else:
-                pen = QPen(QColor("#10B981"), 2, Qt.PenStyle.SolidLine)
-                brush = QBrush(QColor(16, 185, 129, 90), Qt.BrushStyle.BDiagPattern)
+                if b_kind == "hidden":
+                    pen = QPen(QColor("#EAB308"), 2, Qt.PenStyle.DashLine)
+                    brush = QBrush(QColor(234, 179, 8, 80), Qt.BrushStyle.DiagCrossPattern)
+                else:
+                    pen = QPen(QColor("#10B981"), 2, Qt.PenStyle.SolidLine)
+                    brush = QBrush(QColor(16, 185, 129, 90), Qt.BrushStyle.BDiagPattern)
 
-            self.scene_2d.addPolygon(poly, pen, brush)
+                self.scene_2d.addPolygon(poly, pen, brush)
 
-            # Centerline subtle guide line
-            self.scene_2d.addLine(sx * s, -sy * s, ex * s, -ey * s, QPen(QColor(255, 255, 255, 50), 1, Qt.PenStyle.DashDotLine))
+                # Centerline subtle guide line
+                self.scene_2d.addLine(sx * s, -sy * s, ex * s, -ey * s, QPen(QColor(255, 255, 255, 50), 1, Qt.PenStyle.DashDotLine))
 
-            # Selection highlight on beam
-            if self.selected_element and self.selected_element.get("type") == "beam" and self.selected_element.get("id") == bm.get("id"):
-                self.scene_2d.addPolygon(poly, QPen(QColor("#38BDF8"), 3, Qt.PenStyle.SolidLine), QBrush(Qt.BrushStyle.NoBrush))
+                # Selection highlight on beam
+                if self.selected_element and self.selected_element.get("type") == "beam" and self.selected_element.get("id") == bm.get("id"):
+                    self.scene_2d.addPolygon(poly, QPen(QColor("#38BDF8"), 3, Qt.PenStyle.SolidLine), QBrush(Qt.BrushStyle.NoBrush))
 
-            # Smart beam tag raised above upper face
-            tx, ty, _ = compute_smart_beam_tag_position(bm, columns, placed_tags)
-            txt = self.scene_2d.addText(f"{bm['id']}", QFont("Arial", 9, QFont.Weight.Bold))
-            txt.setDefaultTextColor(QColor("#FB923C"))  # Bright Orange
-            txt.setPos(tx * s - 10, -ty * s - 12)
+                # Smart beam tag raised above upper face
+                if self.studio.is_layer_visible("labels"):
+                    tx, ty, _ = compute_smart_beam_tag_position(bm, columns, placed_tags)
+                    txt = self.scene_2d.addText(f"{bm['id']}", QFont("Arial", 9, QFont.Weight.Bold))
+                    txt.setDefaultTextColor(QColor("#FB923C"))  # Bright Orange
+                    txt.setPos(tx * s - 10, -ty * s - 12)
 
         # 4. Columns & Bright Green Column Tags Outside Corner
-        for col in columns:
-            if not col.get("active", True):
-                continue
-            cx, cy = float(col["x"]), float(col["y"])
-            b = float(col.get("b_m", 0.20))
-            h = float(col.get("h_m", 0.40))
-            rect = QRectF((cx - b / 2.0) * s, -(cy + h / 2.0) * s, b * s, h * s)
-            self.scene_2d.addRect(rect, QPen(QColor("#EF4444"), 2), QBrush(QColor(239, 68, 68, 90)))
+        if self.studio.is_layer_visible("columns"):
+            for col in columns:
+                if not col.get("active", True):
+                    continue
+                cx, cy = float(col["x"]), float(col["y"])
+                b = float(col.get("b_m", 0.20))
+                h = float(col.get("h_m", 0.40))
+                rect = QRectF((cx - b / 2.0) * s, -(cy + h / 2.0) * s, b * s, h * s)
+                self.scene_2d.addRect(rect, QPen(QColor("#EF4444"), 2), QBrush(QColor(239, 68, 68, 90)))
 
-            # Selection highlight on column
-            if self.selected_element and self.selected_element.get("type") == "column" and self.selected_element.get("id") == col.get("id"):
-                self.scene_2d.addRect(rect.adjusted(-2, -2, 2, 2), QPen(QColor("#38BDF8"), 3), QBrush(Qt.BrushStyle.NoBrush))
+                # Selection highlight on column
+                if self.selected_element and self.selected_element.get("type") == "column" and self.selected_element.get("id") == col.get("id"):
+                    self.scene_2d.addRect(rect.adjusted(-2, -2, 2, 2), QPen(QColor("#38BDF8"), 3), QBrush(Qt.BrushStyle.NoBrush))
 
-            tag_x = cx + b / 2.0 + 0.12
-            tag_y = cy + h / 2.0 + 0.12
-            ctxt = self.scene_2d.addText(str(col["id"]), QFont("Arial", 9, QFont.Weight.Bold))
-            ctxt.setDefaultTextColor(QColor("#4ADE80"))  # Bright Green
-            ctxt.setPos(tag_x * s, -tag_y * s - 10)
+                if self.studio.is_layer_visible("labels"):
+                    tag_x = cx + b / 2.0 + 0.12
+                    tag_y = cy + h / 2.0 + 0.12
+                    ctxt = self.scene_2d.addText(str(col["id"]), QFont("Arial", 9, QFont.Weight.Bold))
+                    ctxt.setDefaultTextColor(QColor("#4ADE80"))  # Bright Green
+                    ctxt.setPos(tag_x * s, -tag_y * s - 10)
 
 
 class XpertStudioMainWindow(QMainWindow):
@@ -1253,6 +1255,11 @@ class XpertStudioMainWindow(QMainWindow):
         act_save.triggered.connect(self.save_and_sync_current_story)
         m_file.addAction(act_save)
 
+        act_import_arch = QAction("&Import Architectural Underlay (.DXF)...", self)
+        act_import_arch.setStatusTip("Import architectural DXF reference underlay for the active story")
+        act_import_arch.triggered.connect(self.import_arch_dxf_dialog)
+        m_file.addAction(act_import_arch)
+
         m_file.addSeparator()
         act_exit = QAction("E&xit", self)
         act_exit.setShortcut("Ctrl+Q")
@@ -1299,6 +1306,9 @@ class XpertStudioMainWindow(QMainWindow):
             ("4A. Pick Area: Slab [00-XD-SLAB]", "PICK_SLAB"),
             ("4B. Pick: Flip Rib Direction", "PICK_FLIP_RIB"),
             ("4C. Pick: Toggle Slab <-> Opening [00-XD-OPEN]", "PICK_OPENING"),
+            ("---", None),
+            ("Rotate Column 90° (R)", "ROTATE_COL"),
+            ("Auto-Fill All Slabs", "AUTO_FILL_SLABS"),
             ("---", None),
             ("Select / Pick Element", "SELECT"),
             ("Delete Selected Element (Del)", "DELETE_SELECTED"),
@@ -1348,6 +1358,12 @@ class XpertStudioMainWindow(QMainWindow):
         btn_save = QPushButton("Save && Sync .DXF (Ctrl+S)")
         btn_save.clicked.connect(self.save_and_sync_current_story)
         top_tb.addWidget(btn_save)
+
+        btn_import_arch = QPushButton("Import Arch .DXF")
+        btn_import_arch.setStyleSheet("background-color: #334155; color: white; font-weight: bold;")
+        btn_import_arch.setStatusTip("Import architectural DXF reference underlay for the active story")
+        btn_import_arch.clicked.connect(self.import_arch_dxf_dialog)
+        top_tb.addWidget(btn_import_arch)
         top_tb.addSeparator()
 
         top_tb.addWidget(QLabel("  Active Story: "))
@@ -1418,6 +1434,9 @@ class XpertStudioMainWindow(QMainWindow):
             ("4B. Pick: Flip Rib", "PICK_FLIP_RIB"),
             ("4C. Pick: Opening", "PICK_OPENING"),
             ("---", None),
+            ("Rotate Col 90° (R)", "ROTATE_COL"),
+            ("Auto-Fill All Slabs", "AUTO_FILL_SLABS"),
+            ("---", None),
             ("Select", "SELECT"),
             ("Delete Selected (Del)", "DELETE_SELECTED"),
             ("Move Col / Beam", "MOVE"),
@@ -1470,6 +1489,45 @@ class XpertStudioMainWindow(QMainWindow):
         thick_row.addWidget(self.sp_adopted_thick)
         thick_row.addWidget(btn_apply_thick)
         vbox.addWidget(thick_frame)
+
+        # Layer Visibility & Freeze Control Bar
+        layer_frame = QFrame()
+        layer_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        layer_frame.setStyleSheet("background-color: #1E293B; border-radius: 4px; padding: 2px;")
+        layer_row = QHBoxLayout(layer_frame)
+        layer_row.setContentsMargins(8, 2, 8, 2)
+
+        layer_lbl = QLabel("Layer Visibility & Freeze:")
+        layer_lbl.setStyleSheet("font-weight: bold; color: #38BDF8; font-size: 11px;")
+        layer_row.addWidget(layer_lbl)
+
+        self.chk_lay_arch = QCheckBox("Arch DXF Block")
+        self.chk_lay_arch.setChecked(True)
+        self.chk_lay_arch.toggled.connect(self._on_layer_toggled)
+        layer_row.addWidget(self.chk_lay_arch)
+
+        self.chk_lay_cols = QCheckBox("Columns")
+        self.chk_lay_cols.setChecked(True)
+        self.chk_lay_cols.toggled.connect(self._on_layer_toggled)
+        layer_row.addWidget(self.chk_lay_cols)
+
+        self.chk_lay_beams = QCheckBox("Beams")
+        self.chk_lay_beams.setChecked(True)
+        self.chk_lay_beams.toggled.connect(self._on_layer_toggled)
+        layer_row.addWidget(self.chk_lay_beams)
+
+        self.chk_lay_slabs = QCheckBox("Slabs & Ribs")
+        self.chk_lay_slabs.setChecked(True)
+        self.chk_lay_slabs.toggled.connect(self._on_layer_toggled)
+        layer_row.addWidget(self.chk_lay_slabs)
+
+        self.chk_lay_labels = QCheckBox("Labels")
+        self.chk_lay_labels.setChecked(True)
+        self.chk_lay_labels.toggled.connect(self._on_layer_toggled)
+        layer_row.addWidget(self.chk_lay_labels)
+
+        layer_row.addStretch(1)
+        vbox.addWidget(layer_frame)
 
         # Stacked Modes
         self.stack = QStackedWidget()
@@ -1642,6 +1700,14 @@ class XpertStudioMainWindow(QMainWindow):
             self.cad_canvas.delete_selected()
             return
 
+        if tool_id == "ROTATE_COL":
+            self.rotate_selected_column()
+            return
+
+        if tool_id == "AUTO_FILL_SLABS":
+            self.auto_fill_all_slabs_action()
+            return
+
         # Strict 4-step sequence enforcement:
         if tool_id in ["ADD_COL", "ADD_HID_BEAM", "ADD_DROP_BEAM", "PICK_SLAB", "PICK_FLIP_RIB", "PICK_OPENING"]:
             edge = self.current_story_data.get("slab_edge_polygon", [])
@@ -1662,43 +1728,44 @@ class XpertStudioMainWindow(QMainWindow):
 
         if tool_id == "LOAD_TEMPLATE":
             self.current_story_data["slab_edge_polygon"] = [[0, 0], [10.0, 0], [10.0, 8.5], [0, 8.5]]
+            # Ensure every column is 100% inside boundary: x in [0.10, 9.90], y in [0.20, 8.30]
             self.current_story_data["columns"] = [
-                {"id": "C1", "x": 0.0, "y": 8.5, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C2", "x": 5.2, "y": 8.5, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C3", "x": 10.0, "y": 8.5, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C4", "x": 0.0, "y": 4.2, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C5", "x": 5.2, "y": 4.2, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C6", "x": 10.0, "y": 4.2, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C7", "x": 0.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C8", "x": 5.2, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
-                {"id": "C9", "x": 10.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C1", "x": 0.10, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 5.00, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 9.90, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.10, "y": 4.25, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 5.00, "y": 4.25, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C6", "x": 9.90, "y": 4.25, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C7", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C8", "x": 5.00, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C9", "x": 9.90, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
             ]
             self.current_story_data["beams"] = [
                 {
                     "id": "B1", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.50,
-                    "start_x": 0.0, "start_y": 8.40, "end_x": 10.0, "end_y": 8.40,
-                    "spans": [5.2, 4.8],
+                    "start_x": 0.10, "start_y": 8.30, "end_x": 9.90, "end_y": 8.30,
+                    "spans": [4.90, 4.90],
                     "supports": [
-                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.20, "x": 0.0, "y": 8.5},
-                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.20, "x": 5.2, "y": 8.5},
-                        {"support_index": 3, "kind": "column", "target_id": "C3", "width_m": 0.20, "x": 10.0, "y": 8.5},
+                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.20, "x": 0.10, "y": 8.30},
+                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.20, "x": 5.00, "y": 8.30},
+                        {"support_index": 3, "kind": "column", "target_id": "C3", "width_m": 0.20, "x": 9.90, "y": 8.30},
                     ],
-                    "loads": [{"type": "dist", "x1": 0.0, "x2": 10.0, "val": 28.5}],
+                    "loads": [{"type": "dist", "x1": 0.0, "x2": 9.80, "val": 28.5}],
                 },
                 {
-                    "id": "B2", "beam_kind": "hidden", "width_m": 0.60, "depth_m": 0.30,
-                    "start_x": 0.0, "start_y": 4.2, "end_x": 10.0, "end_y": 4.2,
-                    "spans": [5.2, 4.8],
+                    "id": "B2", "beam_kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
+                    "start_x": 0.10, "start_y": 4.25, "end_x": 9.90, "end_y": 4.25,
+                    "spans": [4.90, 4.90],
                     "supports": [
-                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.20, "x": 0.0, "y": 4.2},
-                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.20, "x": 5.2, "y": 4.2},
-                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.20, "x": 10.0, "y": 4.2},
+                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.20, "x": 0.10, "y": 4.25},
+                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.20, "x": 5.00, "y": 4.25},
+                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.20, "x": 9.90, "y": 4.25},
                     ],
-                    "loads": [{"type": "dist", "x1": 0.0, "x2": 10.0, "val": 36.2}],
+                    "loads": [{"type": "dist", "x1": 0.0, "x2": 9.80, "val": 36.2}],
                 },
             ]
             self.current_story_data["slabs"] = [
-                {"id": "S1", "axis_span_m": 4.3, "left_support_w_m": 0.60, "right_support_w_m": 0.20, "rib_direction_deg": 0.0},
+                {"id": "S1", "axis_span_m": 4.05, "left_support_w_m": 0.40, "right_support_w_m": 0.20, "rib_direction_deg": 0.0},
             ]
             self.current_story_data["openings"] = []
             self.save_and_sync_current_story()
@@ -1713,7 +1780,79 @@ class XpertStudioMainWindow(QMainWindow):
         self.cad_canvas.active_tool = tool_id
         self.cad_canvas.draw_start_pt = None
         self.cad_canvas.move_element = None
+
+        if tool_id == "SELECT":
+            self.cad_canvas.setCursor(Qt.CursorShape.ArrowCursor)
+        elif tool_id == "PAN":
+            self.cad_canvas.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.cad_canvas.setCursor(Qt.CursorShape.CrossCursor)
+
         self.statusBar().showMessage(f"Active Tool: {tool_id}")
+
+    def _on_layer_toggled(self) -> None:
+        self.refresh_story_ui()
+
+    def is_layer_visible(self, name: str) -> bool:
+        k = name.lower()
+        if "arch" in k:
+            return self.chk_lay_arch.isChecked() if hasattr(self, "chk_lay_arch") else True
+        if "col" in k:
+            return self.chk_lay_cols.isChecked() if hasattr(self, "chk_lay_cols") else True
+        if "beam" in k:
+            return self.chk_lay_beams.isChecked() if hasattr(self, "chk_lay_beams") else True
+        if "slab" in k or "rib" in k:
+            return self.chk_lay_slabs.isChecked() if hasattr(self, "chk_lay_slabs") else True
+        if "label" in k or "tag" in k:
+            return self.chk_lay_labels.isChecked() if hasattr(self, "chk_lay_labels") else True
+        return True
+
+    def import_arch_dxf_dialog(self) -> None:
+        if not self.master_project or not self.current_story_data:
+            QMessageBox.warning(self, "No Active Story", "Please open or create a project first before importing architectural DXF.")
+            return
+        dxf_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Architectural DXF for Active Story",
+            "",
+            "AutoCAD DXF (*.dxf);;All Files (*)",
+        )
+        if not dxf_path:
+            return
+        try:
+            underlay_data = import_arch_dxf_underlay(dxf_path)
+            self.current_story_data["arch_underlay_block"] = underlay_data
+            self.save_and_sync_current_story()
+            self.refresh_story_ui()
+            self.cad_canvas.zoom_extents()
+            self.statusBar().showMessage(
+                f"Arch DXF '{underlay_data['file_name']}' imported ({len(underlay_data['segments'])} segments, {len(underlay_data['snap_points'])} snap points)."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to import architectural DXF:\n{e}")
+
+    def rotate_selected_column(self) -> None:
+        sel = self.cad_canvas.selected_element
+        if not sel or sel.get("type") != "column":
+            self.statusBar().showMessage("Please select a column first (using Select tool) to rotate.")
+            return
+        col_id = sel.get("id")
+        rule = self.get_column_boundary_rule()
+        ok, msg = rotate_column_90_deg(col_id, self.current_story_data, rule=rule)
+        if ok:
+            self.save_and_sync_current_story()
+            self.refresh_story_ui()
+            self.statusBar().showMessage(msg)
+        else:
+            QMessageBox.warning(self, "Cannot Rotate Column", msg)
+
+    def auto_fill_all_slabs_action(self) -> None:
+        if not self.master_project or not self.current_story_data:
+            return
+        count, msg = auto_fill_all_story_slabs(self.current_story_data)
+        self.save_and_sync_current_story()
+        self.refresh_story_ui()
+        self.statusBar().showMessage(msg)
 
     def get_column_boundary_rule(self) -> str:
         if hasattr(self, "cb_col_rule") and self.cb_col_rule.currentIndex() == 1:

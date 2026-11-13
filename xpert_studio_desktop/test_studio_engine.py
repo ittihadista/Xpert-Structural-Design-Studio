@@ -11,14 +11,22 @@ from xpert_project_io import (
     initialize_studio_project,
     load_studio_project_from_master_file,
     compute_smart_beam_tag_position,
+    import_arch_dxf_underlay,
 )
 from xpert_structural_engine import (
     evaluate_story_thickness_and_optimization,
     analyze_all_story_beams_and_columns,
+    check_duplicate_column,
+    check_duplicate_beam,
     clamp_or_expand_column_boundary,
+    rotate_column_90_deg,
     clamp_beam_inside_boundary,
     validate_beam_cantilevers_and_boundary,
+    validate_and_build_beam_with_cantilevers,
     detect_bays_and_determine_ribs,
+    detect_story_grid_bays,
+    reconcile_and_split_slabs_after_beam_change,
+    auto_fill_all_story_slabs,
     pick_area_slab,
     flip_rib_direction_with_equilibrium,
     toggle_bay_slab_or_opening,
@@ -392,6 +400,184 @@ class TestXpertStudioEngine(unittest.TestCase):
         cx_h, cy_h, _, _ = clamp_or_expand_column_boundary(10.0, 5.0, 0.40, 0.20, edge, rule="clamp")
         self.assertEqual(cx_h, 9.80)  # 10.0 - 0.40 / 2
         self.assertEqual(cy_h, 5.0)
+
+    def test_import_arch_dxf_underlay(self):
+        import ezdxf
+        test_dxf_path = os.path.join(self.tmp_dir, "Arch_Test_Plan.dxf")
+        doc = ezdxf.new("R2018")
+        msp = doc.modelspace()
+        msp.add_line((0, 0), (12.0, 0))
+        msp.add_line((12.0, 0), (12.0, 8.0))
+        msp.add_lwpolyline([(0, 0), (0, 8.0), (12.0, 8.0)])
+        msp.add_circle((6.0, 4.0), radius=1.5)
+        doc.saveas(test_dxf_path)
+
+        res = import_arch_dxf_underlay(test_dxf_path)
+        self.assertEqual(res["file_name"], "Arch_Test_Plan.dxf")
+        self.assertTrue(res["visible"])
+        self.assertGreater(len(res["segments"]), 0)
+        self.assertEqual(len(res["circles"]), 1)
+        self.assertEqual(res["circles"][0], [6.0, 4.0, 1.5])
+        self.assertGreater(len(res["snap_points"]), 4)
+
+    def test_check_duplicate_column_and_beam(self):
+        cols = [
+            {"id": "C1", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        # Duplicate column at nearly identical coordinate
+        ok_c, msg_c = check_duplicate_column(5.02, 4.98, 0.20, 0.40, cols)
+        self.assertFalse(ok_c)
+        self.assertIn("Duplicate Column Rejected", msg_c)
+
+        # Non-duplicate column far away
+        ok_c2, _ = check_duplicate_column(1.0, 1.0, 0.20, 0.40, cols)
+        self.assertTrue(ok_c2)
+
+        # Duplicate beam along same axis
+        bms = [
+            {"id": "B1", "start_x": 0.0, "start_y": 5.0, "end_x": 10.0, "end_y": 5.0, "width_m": 0.40}
+        ]
+        ok_b, msg_b = check_duplicate_beam(0.0, 5.0, 10.0, 5.0, bms)
+        self.assertFalse(ok_b)
+        self.assertIn("Duplicate Beam Rejected", msg_b)
+
+        # Reverse axis duplicate
+        ok_b_rev, _ = check_duplicate_beam(10.0, 5.0, 0.0, 5.0, bms)
+        self.assertFalse(ok_b_rev)
+
+        # Non-duplicate beam
+        ok_b_new, _ = check_duplicate_beam(0.0, 8.0, 10.0, 8.0, bms)
+        self.assertTrue(ok_b_new)
+
+    def test_multi_span_beam_automatic_column_detection(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [12.0, 0.0], [12.0, 8.0], [0.0, 8.0]],
+            "columns": [
+                {"id": "C1", "x": 0.0, "y": 4.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 5.0, "y": 4.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 12.0, "y": 4.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [],
+            "openings": [],
+        }
+        ok, msg, bm = validate_and_build_beam_with_cantilevers(
+            (0.0, 4.0), (12.0, 4.0), "hidden", 0.40, 0.30, story
+        )
+        self.assertTrue(ok)
+        self.assertIsNotNone(bm)
+        self.assertEqual(len(bm["supports"]), 3)
+        self.assertEqual(bm["supports"][1]["target_id"], "C2")
+        self.assertEqual(bm["spans"], [5.0, 7.0])
+
+    def test_zero_sliver_bays_under_85cm(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]],
+            "beams": [
+                {"id": "B_top", "beam_kind": "drop", "width_m": 0.20, "start_x": 0.0, "start_y": 7.85, "end_x": 10.0, "end_y": 7.85},
+                {"id": "B_bot", "beam_kind": "drop", "width_m": 0.20, "start_x": 0.0, "start_y": 0.15, "end_x": 10.0, "end_y": 0.15},
+                {"id": "B_mid", "beam_kind": "hidden", "width_m": 0.40, "start_x": 5.0, "start_y": 0.0, "end_x": 5.0, "end_y": 8.0},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+        bays = detect_story_grid_bays(story)
+        self.assertGreaterEqual(len(bays), 2)
+        for b in bays:
+            self.assertGreaterEqual(b["lx"], 0.85)
+            self.assertGreaterEqual(b["ly"], 0.85)
+
+    def test_reconcile_and_split_slabs_after_beam_change(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [12.0, 0.0], [12.0, 6.0], [0.0, 6.0]],
+            "columns": [],
+            "beams": [
+                {"id": "B_left", "beam_kind": "drop", "width_m": 0.20, "start_x": 0.0, "start_y": 0.0, "end_x": 0.0, "end_y": 6.0},
+                {"id": "B_right", "beam_kind": "drop", "width_m": 0.20, "start_x": 12.0, "start_y": 0.0, "end_x": 12.0, "end_y": 6.0},
+            ],
+            "slabs": [
+                {
+                    "id": "S1",
+                    "polygon": [[0.0, 0.0], [12.0, 0.0], [12.0, 6.0], [0.0, 6.0]],
+                    "center_x": 6.0,
+                    "center_y": 3.0,
+                    "axis_span_m": 6.0,
+                    "rib_direction_deg": 90.0,
+                }
+            ],
+            "openings": [],
+        }
+        story["beams"].append({
+            "id": "B_mid",
+            "beam_kind": "hidden",
+            "width_m": 0.40,
+            "start_x": 6.0,
+            "start_y": 0.0,
+            "end_x": 6.0,
+            "end_y": 6.0,
+        })
+        split_slabs = reconcile_and_split_slabs_after_beam_change(story)
+        self.assertEqual(len(split_slabs), 2)
+        self.assertAlmostEqual(split_slabs[0]["lx"], 6.0, delta=0.2)
+        self.assertAlmostEqual(split_slabs[1]["lx"], 6.0, delta=0.2)
+
+    def test_rotate_column_90_deg(self):
+        edge = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        story = {
+            "slab_edge_polygon": edge,
+            "columns": [
+                {"id": "C1", "x": 9.90, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [],
+        }
+        ok, msg = rotate_column_90_deg("C1", story, rule="clamp")
+        self.assertTrue(ok)
+        c1 = story["columns"][0]
+        self.assertEqual(c1["b_m"], 0.40)
+        self.assertEqual(c1["h_m"], 0.20)
+        self.assertEqual(c1["x"], 9.80)
+        self.assertEqual(c1["y"], 5.0)
+
+    def test_auto_fill_all_story_slabs(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]],
+            "beams": [
+                {"id": "B1", "start_x": 0.0, "start_y": 0.0, "end_x": 10.0, "end_y": 0.0, "width_m": 0.20},
+                {"id": "B2", "start_x": 0.0, "start_y": 6.0, "end_x": 10.0, "end_y": 6.0, "width_m": 0.20},
+                {"id": "B3", "start_x": 0.0, "start_y": 0.0, "end_x": 0.0, "end_y": 6.0, "width_m": 0.20},
+                {"id": "B4", "start_x": 10.0, "start_y": 0.0, "end_x": 10.0, "end_y": 6.0, "width_m": 0.20},
+                {"id": "B_mid", "start_x": 5.0, "start_y": 0.0, "end_x": 5.0, "end_y": 6.0, "width_m": 0.40},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+        count, msg = auto_fill_all_story_slabs(story)
+        self.assertEqual(count, 2)
+        self.assertEqual(len(story["slabs"]), 2)
+        for s in story["slabs"]:
+            self.assertIn(s["rib_direction_deg"], (0.0, 90.0))
+
+    def test_demo_layout_column_full_containment(self):
+        min_x, max_x = 0.0, 10.0
+        min_y, max_y = 0.0, 8.5
+        demo_cols = [
+            {"id": "C1", "x": 0.10, "y": 8.30, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C2", "x": 5.00, "y": 8.30, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C3", "x": 9.90, "y": 8.30, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C4", "x": 0.10, "y": 4.25, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C5", "x": 5.00, "y": 4.25, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C6", "x": 9.90, "y": 4.25, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C7", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C8", "x": 5.00, "y": 0.20, "b_m": 0.20, "h_m": 0.40},
+            {"id": "C9", "x": 9.90, "y": 0.20, "b_m": 0.20, "h_m": 0.40},
+        ]
+        for col in demo_cols:
+            cx, cy = col["x"], col["y"]
+            hb = col["b_m"] / 2.0
+            hh = col["h_m"] / 2.0
+            self.assertGreaterEqual(cx - hb, min_x - 1e-4, f"{col['id']} left edge out of bounds")
+            self.assertLessEqual(cx + hb, max_x + 1e-4, f"{col['id']} right edge out of bounds")
+            self.assertGreaterEqual(cy - hh, min_y - 1e-4, f"{col['id']} bottom edge out of bounds")
+            self.assertLessEqual(cy + hh, max_y + 1e-4, f"{col['id']} top edge out of bounds")
 
 
 if __name__ == "__main__":
