@@ -116,7 +116,7 @@ def cleanup_unprefixed_duplicates(project_dir: str, clean_project_name: str) -> 
         if not os.path.isdir(target_dir):
             continue
         for fname in os.listdir(target_dir):
-            if fname.endswith((".dxf", ".json")) and not fname.startswith(prefix):
+            if fname.endswith((".dxf", ".json", ".xpert")) and not fname.startswith(prefix):
                 full_p = os.path.join(target_dir, fname)
                 try:
                     os.remove(full_p)
@@ -124,10 +124,41 @@ def cleanup_unprefixed_duplicates(project_dir: str, clean_project_name: str) -> 
                     pass
 
 
+MASTER_FILE_EXT = ".xpert"
+
+
+def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
+    """
+    Loads an existing project from its custom `<ProjectName>-00_Project_Master.xpert`
+    (or `.json`) file and resolves relative story paths if the project folder was moved.
+    """
+    abs_path = os.path.abspath(master_path)
+    if not os.path.isfile(abs_path):
+        raise FileNotFoundError(f"Master project file not found: {abs_path}")
+
+    with open(abs_path, "r", encoding="utf-8") as f:
+        master_payload = json.load(f)
+
+    project_dir = os.path.dirname(abs_path)
+    master_payload["project_dir"] = project_dir
+    master_payload["master_file"] = abs_path
+
+    clean_name = master_payload.get("project_name", "Project")
+    stories_dir = os.path.join(project_dir, "Stories_Data")
+    cad_dir = os.path.join(project_dir, "CAD_Drawings")
+
+    for sm in master_payload.get("stories", []):
+        sid = sm["story_id"]
+        sm["json_file"] = os.path.join(stories_dir, f"{clean_name}-{sid}.json")
+        sm["dxf_file"] = os.path.join(cad_dir, f"{clean_name}-{sid}.dxf")
+
+    return master_payload
+
+
 def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Creates Stractural-<ProjectName> and generates all <ProjectName>- prefixed
-    JSON and DXF files with sequential story numbering.
+    Creates Stractural-<ProjectName> and generates the custom `<ProjectName>-00_Project_Master.xpert`
+    master file along with all `<ProjectName>-` prefixed JSON and DXF files.
     """
     raw_name = config.get("project_name", "NewProject")
     ok, clean_name, folder_name, err = validate_project_name(raw_name)
@@ -249,12 +280,17 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         live_load_kn_m2=float(config.get("live_load_kn_m2", 2.0)),
     )
 
+    master_xpert_file = os.path.join(project_dir, f"{clean_name}-00_Project_Master{MASTER_FILE_EXT}")
+    master_json_file = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
+
     master_payload = {
         "studio_version": STUDIO_VERSION,
+        "file_format": "XPERT_STRUCTURAL_PROJECT_MASTER",
         "project_uuid": f"XPERT-{uuid.uuid4().hex[:8].upper()}",
         "project_name": clean_name,
         "folder_name": folder_name,
         "project_dir": project_dir,
+        "master_file": master_xpert_file,
         "mandatory_start_story_id": "02_Ground_Floor",
         "materials_and_soil": {
             "fc_mpa": float(config.get("fc_mpa", 20.0)),
@@ -271,6 +307,8 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         },
         "loads_and_defaults": {
             "default_slab_thickness_cm": 30.0,
+            "default_column_b_m": 0.20,
+            "default_column_h_m": 0.40,
             "finish_load_kn_m2": float(config.get("finish_load_kn_m2", 2.0)),
             "live_load_kn_m2": float(config.get("live_load_kn_m2", 2.0)),
             "rib_width_cm": float(config.get("rib_width_cm", 15.0)),
@@ -315,14 +353,16 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
         sync_story_to_dxf(story_data, dxf_path, role="STORY_EXTRACTION")
 
-    # Root Master & Output JSON files
-    master_file = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
+    # Root Master (.xpert and .json) & Output JSON files
     takedown_file = os.path.join(project_dir, f"{clean_name}-Columns_Load_Takedown.json")
     foundations_file = os.path.join(project_dir, f"{clean_name}-Foundations_Design.json")
     boq_file = os.path.join(project_dir, f"{clean_name}-BOQ_Quantities.json")
     foundations_dxf = os.path.join(cad_dir, f"{clean_name}-Foundations_And_Axes.dxf")
 
-    with open(master_file, "w", encoding="utf-8") as f:
+    with open(master_xpert_file, "w", encoding="utf-8") as f:
+        json.dump(master_payload, f, indent=2)
+
+    with open(master_json_file, "w", encoding="utf-8") as f:
         json.dump(master_payload, f, indent=2)
 
     with open(takedown_file, "w", encoding="utf-8") as f:
@@ -351,15 +391,15 @@ def compute_smart_beam_tag_position(
 ) -> Tuple[float, float, float]:
     """
     Computes a non-overlapping label position (x, y, rotation_deg) for a beam B#:
-    - Places the label at the midpoint of the FIRST CLEAR SPAN between two supports
-      (strictly avoiding intermediate columns!).
-    - Rotates 0 deg for horizontal beams, 90 deg for vertical beams.
-    - Offsets +0.24m perpendicular to the beam axis.
+    - Places the label near the midpoint of the beam (or midpoint of its first clear span
+      if a column sits directly at the overall midpoint), and slightly ABOVE the top face
+      of the full-width beam rectangle (offset = width_m / 2.0 + 0.12 m).
     """
     sx = float(beam.get("start_x", 0.0))
     sy = float(beam.get("start_y", 0.0))
     ex = float(beam.get("end_x", 5.0))
     ey = float(beam.get("end_y", 0.0))
+    b_width = float(beam.get("width_m", 0.30))
 
     dx = ex - sx
     dy = ey - sy
@@ -373,31 +413,30 @@ def compute_smart_beam_tag_position(
     is_vertical = abs(dy) > abs(dx)
     rot_deg = 90.0 if is_vertical else 0.0
 
-    # Find columns along this beam to locate the first clear span midpoint
+    # Offset slightly above the outer face of the full-width beam rectangle
+    perp_offset = (b_width / 2.0) + 0.12
+
+    # Prefer near the beam midpoint; if an intermediate column is at the exact midpoint,
+    # shift slightly toward the first clear span midpoint so it never sits on a column
+    mid_dist = length * 0.50
     spans = beam.get("spans", [])
-    if spans and len(spans) >= 1:
-        first_span_len = float(spans[0])
-        # Midpoint of first span is at 0.5 * first_span_len from start support
-        dist_along = min(length * 0.5, max(0.6, first_span_len * 0.5))
-    else:
-        dist_along = length * 0.35
+    first_span_mid = float(spans[0]) * 0.50 if spans else length * 0.45
 
-    cand_x = sx + ux * dist_along + nx * 0.24
-    cand_y = sy + uy * dist_along + ny * 0.24
+    cand_x = sx + ux * mid_dist + nx * perp_offset
+    cand_y = sy + uy * mid_dist + ny * perp_offset
 
-    # Ensure it doesn't collide with any column center or already placed tag
-    for shift_try in [0.0, 0.55, -0.55, 1.1, -1.1]:
-        tx = cand_x + ux * shift_try
-        ty = cand_y + uy * shift_try
+    for shift_try in [0.0, first_span_mid - mid_dist, 0.50, -0.50, 0.95, -0.95]:
+        tx = sx + ux * (mid_dist + shift_try) + nx * perp_offset
+        ty = sy + uy * (mid_dist + shift_try) + ny * perp_offset
         collision = False
         for col in columns:
             cx, cy = float(col.get("x", 0.0)), float(col.get("y", 0.0))
-            if ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5 < 0.45:
+            if ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5 < 0.42:
                 collision = True
                 break
         if not collision:
             for px, py in placed_positions:
-                if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 < 0.45:
+                if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 < 0.40:
                     collision = True
                     break
         if not collision:
@@ -587,3 +626,90 @@ def propagate_ground_columns_to_all_stories(master_payload: Dict[str, Any], grou
             json.dump(sdata, f, indent=2)
         if dpath:
             sync_story_to_dxf(sdata, dpath)
+
+
+def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
+    """
+    Imports an external Architectural .DXF file for a single story as a unified,
+    locked reference block (`arch_underlay_block`) containing clean 2D line segments
+    and candidate architectural column rectangles so they never mix with structural entities.
+    """
+    if not os.path.isfile(dxf_file_path):
+        raise FileNotFoundError(f"Architectural DXF file not found: {dxf_file_path}")
+
+    segments: List[List[float]] = []  # [[x1, y1, x2, y2], ...]
+    closed_rects: List[Dict[str, float]] = []
+
+    if ezdxf is not None:
+        doc = ezdxf.readfile(dxf_file_path)
+        msp = doc.modelspace()
+        for ent in msp:
+            etype = ent.dxftype()
+            if etype == "LINE":
+                s = ent.dxf.start
+                e = ent.dxf.end
+                segments.append([round(float(s.x), 3), round(float(s.y), 3), round(float(e.x), 3), round(float(e.y), 3)])
+            elif etype in ("LWPOLYLINE", "POLYLINE"):
+                pts = []
+                if etype == "LWPOLYLINE":
+                    pts = [(float(p[0]), float(p[1])) for p in ent.get_points("xy")]
+                    is_closed = bool(ent.closed)
+                else:
+                    pts = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in ent.vertices]
+                    is_closed = bool(ent.is_closed)
+                if len(pts) >= 2:
+                    for idx in range(len(pts) - 1):
+                        segments.append([
+                            round(pts[idx][0], 3), round(pts[idx][1], 3),
+                            round(pts[idx + 1][0], 3), round(pts[idx + 1][1], 3),
+                        ])
+                    if is_closed or (len(pts) >= 4 and pts[0] == pts[-1]):
+                        segments.append([
+                            round(pts[-1][0], 3), round(pts[-1][1], 3),
+                            round(pts[0][0], 3), round(pts[0][1], 3),
+                        ])
+                        xs = [p[0] for p in pts]
+                        ys = [p[1] for p in pts]
+                        bw = round(max(xs) - min(xs), 3)
+                        bh = round(max(ys) - min(ys), 3)
+                        if 0.15 <= bw <= 1.20 and 0.15 <= bh <= 1.20:
+                            closed_rects.append({
+                                "x": round((min(xs) + max(xs)) / 2.0, 3),
+                                "y": round((min(ys) + max(ys)) / 2.0, 3),
+                                "b_m": bw,
+                                "h_m": bh,
+                            })
+    else:
+        # Lightweight ASCII DXF LINE parser fallback
+        with open(dxf_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw_lines = [line.strip() for line in f.readlines()]
+        idx = 0
+        n = len(raw_lines)
+        while idx < n - 1:
+            if raw_lines[idx] == "0" and raw_lines[idx + 1] == "LINE":
+                idx += 2
+                x1 = y1 = x2 = y2 = 0.0
+                while idx < n - 1 and raw_lines[idx] != "0":
+                    code = raw_lines[idx]
+                    val = raw_lines[idx + 1]
+                    if code == "10":
+                        x1 = float(val)
+                    elif code == "20":
+                        y1 = float(val)
+                    elif code == "11":
+                        x2 = float(val)
+                    elif code == "21":
+                        y2 = float(val)
+                    idx += 2
+                segments.append([round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3)])
+            else:
+                idx += 2
+
+    return {
+        "source_file": os.path.basename(dxf_file_path),
+        "visible": True,
+        "locked": True,
+        "segments": segments,
+        "candidate_columns": closed_rects,
+    }
+
