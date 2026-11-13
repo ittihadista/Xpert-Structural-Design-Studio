@@ -16,9 +16,15 @@ UI Architecture:
 
 from __future__ import annotations
 import json
+import math
 import os
 import sys
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+
+try:
+    from shapely.geometry import Point, LineString, Polygon
+except ImportError:
+    Point = LineString = Polygon = None
 
 from PyQt6.QtCore import Qt, QPointF, QRectF
 from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QBrush, QPolygonF, QIcon
@@ -65,6 +71,14 @@ from xpert_project_io import (
 from xpert_structural_engine import (
     analyze_all_story_beams_and_columns,
     evaluate_story_thickness_and_optimization,
+    clamp_or_expand_column_boundary,
+    validate_beam_cantilevers_and_boundary,
+    detect_bays_and_determine_ribs,
+    pick_area_slab,
+    flip_rib_direction_with_equilibrium,
+    toggle_bay_slab_or_opening,
+    move_column_and_update_connected_beams,
+    move_beam_and_update,
 )
 
 
@@ -241,9 +255,13 @@ class NewProjectSetupDialog(QDialog):
 class StructuralCadCanvas2D(QGraphicsView):
     """
     Built-in 2D Interactive Structural CAD Canvas with dark CAD theme,
-    wheel zoom, middle-click pan, OSNAP, and color-coded non-overlapping tags:
-    - Columns (C1..Cn): Bright Green (#22C55E) outside top-right corner.
-    - Beams (B1..Bm): Bright Orange (#F97316) at clear-span midpoint.
+    wheel zoom, middle-click pan, magnetic OSNAP (F3), Ortho lock (F8),
+    and color-coded non-overlapping tags:
+    - Columns (C1..Cn): Bright Green (#4ADE80) outside top-right corner.
+    - Beams (B1..Bm): Bright Orange (#FB923C) at clear-span midpoint.
+    - Slabs (00-XD-SLAB): Dark navy fill with Gold one-way ribs and badges.
+    - Openings (00-XD-OPEN): Magenta dashed outline with diagonal X.
+    - Slab Boundary (00-XD-EDGE): Cyan polygon with corner vertex markers.
     """
 
     def __init__(self, parent_studio: "XpertStudioMainWindow"):
@@ -254,38 +272,630 @@ class StructuralCadCanvas2D(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setBackgroundBrush(QBrush(QColor("#0D1117")))
         self.scale_px = 45.0  # 1m = 45px
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
         self.active_tool = "SELECT"
-        self.beam_start_col: Optional[Dict[str, Any]] = None
+        self.osnap_enabled = True
+        self.ortho_enabled = False
+        self.is_panning = False
+        self.pan_last_pos: Optional[QPointF] = None
+        self.draw_start_pt: Optional[Tuple[float, float]] = None
+        self.current_snap: Optional[Dict[str, Any]] = None
+        self.move_element: Optional[Dict[str, Any]] = None
+
+        self.snap_marker_item = None
+        self.rubber_band_item = None
+
+    def toggle_osnap(self, state: Optional[bool] = None) -> None:
+        if state is None:
+            self.osnap_enabled = not self.osnap_enabled
+        else:
+            self.osnap_enabled = state
+        if not self.osnap_enabled:
+            self.hide_snap_marker()
+        if hasattr(self.studio, "btn_osnap"):
+            self.studio.btn_osnap.setChecked(self.osnap_enabled)
+            self.studio.btn_osnap.setText(f"OSNAP [F3]: {'ON' if self.osnap_enabled else 'OFF'}")
+
+    def toggle_ortho(self, state: Optional[bool] = None) -> None:
+        if state is None:
+            self.ortho_enabled = not self.ortho_enabled
+        else:
+            self.ortho_enabled = state
+        if hasattr(self.studio, "btn_ortho"):
+            self.studio.btn_ortho.setChecked(self.ortho_enabled)
+            self.studio.btn_ortho.setText(f"ORTHO [F8]: {'ON' if self.ortho_enabled else 'OFF'}")
+
+    def zoom_extents(self) -> None:
+        rect = self.scene_2d.itemsBoundingRect()
+        if not rect.isEmpty():
+            self.fitInView(rect.adjusted(-25, -25, 25, 25), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def cancel_current_operation(self) -> None:
+        self.draw_start_pt = None
+        self.move_element = None
+        self.hide_rubber_band()
+        self.hide_snap_marker()
+        self.studio.statusBar().showMessage("Current operation cancelled. Crosshair active.")
+
+    def find_snap_candidate(self, mx: float, my: float) -> Optional[Dict[str, Any]]:
+        if not self.osnap_enabled:
+            return None
+
+        tol = 14.0 / self.scale_px
+        story = self.studio.current_story_data
+        columns = story.get("columns", [])
+        beams = story.get("beams", [])
+        edge = story.get("slab_edge_polygon", [])
+
+        # Priority 1: Columns (Center & Corners)
+        for col in columns:
+            if not col.get("active", True):
+                continue
+            cx, cy = float(col["x"]), float(col["y"])
+            b, h = float(col.get("b_m", 0.25)), float(col.get("h_m", 0.50))
+            if ((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5 <= tol:
+                return {"type": f"Column Center [{col['id']}]", "x": cx, "y": cy}
+            for dx, dy in [(-b/2, -h/2), (b/2, -h/2), (b/2, h/2), (-b/2, h/2)]:
+                cor_x, cor_y = cx + dx, cy + dy
+                if ((mx - cor_x) ** 2 + (my - cor_y) ** 2) ** 0.5 <= tol:
+                    return {"type": f"Column Corner [{col['id']}]", "x": cor_x, "y": cor_y}
+
+        # Priority 2: Beams (Endpoints, Supports, Midpoints)
+        for bm in beams:
+            bid = str(bm.get("id", "B"))
+            sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+            ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+            if ((mx - sx) ** 2 + (my - sy) ** 2) ** 0.5 <= tol:
+                return {"type": f"Beam Endpoint [{bid}]", "x": sx, "y": sy}
+            if ((mx - ex) ** 2 + (my - ey) ** 2) ** 0.5 <= tol:
+                return {"type": f"Beam Endpoint [{bid}]", "x": ex, "y": ey}
+            for sup in bm.get("supports", []):
+                if "x" in sup and "y" in sup:
+                    spx, spy = float(sup["x"]), float(sup["y"])
+                    if ((mx - spx) ** 2 + (my - spy) ** 2) ** 0.5 <= tol:
+                        return {"type": f"Beam Support [{sup.get('target_id', 'Sup')}]", "x": spx, "y": spy}
+            mid_x, mid_y = (sx + ex) / 2.0, (sy + ey) / 2.0
+            if ((mx - mid_x) ** 2 + (my - mid_y) ** 2) ** 0.5 <= tol:
+                return {"type": f"Beam Midpoint [{bid}]", "x": mid_x, "y": mid_y}
+
+        # Priority 3: Slab Boundary Corners & Edges
+        if edge and len(edge) >= 3:
+            for idx, pt in enumerate(edge):
+                px, py = float(pt[0]), float(pt[1])
+                if ((mx - px) ** 2 + (my - py) ** 2) ** 0.5 <= tol:
+                    return {"type": f"Slab Boundary Corner [{idx+1}]", "x": px, "y": py}
+            for idx in range(len(edge)):
+                p1, p2 = edge[idx], edge[(idx + 1) % len(edge)]
+                x1, y1 = float(p1[0]), float(p1[1])
+                x2, y2 = float(p2[0]), float(p2[1])
+                dx, dy = x2 - x1, y2 - y1
+                l2 = dx * dx + dy * dy
+                if l2 > 1e-6:
+                    t = max(0.0, min(1.0, ((mx - x1) * dx + (my - y1) * dy) / l2))
+                    proj_x = x1 + t * dx
+                    proj_y = y1 + t * dy
+                    if ((mx - proj_x) ** 2 + (my - proj_y) ** 2) ** 0.5 <= tol:
+                        return {"type": "Slab Boundary Edge", "x": round(proj_x, 2), "y": round(proj_y, 2)}
+
+        # Priority 4: 0.10m Grid Snap
+        gx = round(mx * 10.0) / 10.0
+        gy = round(my * 10.0) / 10.0
+        if ((mx - gx) ** 2 + (my - gy) ** 2) ** 0.5 <= tol:
+            return {"type": "0.10m Grid Snap", "x": gx, "y": gy}
+
+        return None
+
+    def apply_ortho(self, x: float, y: float, origin: Optional[Tuple[float, float]]) -> Tuple[float, float]:
+        if not self.ortho_enabled or origin is None:
+            return x, y
+        ox, oy = origin
+        if abs(x - ox) >= abs(y - oy):
+            return x, oy
+        return ox, y
+
+    def update_snap_marker(self, sx: float, sy: float) -> None:
+        s = self.scale_px
+        sc_x = sx * s
+        sc_y = -sy * s
+        if self.snap_marker_item is None:
+            pen = QPen(QColor("#FACC15"), 2)
+            self.snap_marker_item = self.scene_2d.addRect(QRectF(-7, -7, 14, 14), pen, QBrush(Qt.BrushStyle.NoBrush))
+            self.snap_marker_item.setZValue(100)
+        self.snap_marker_item.setPos(sc_x, sc_y)
+        self.snap_marker_item.setVisible(True)
+
+    def hide_snap_marker(self) -> None:
+        if self.snap_marker_item:
+            self.snap_marker_item.setVisible(False)
+
+    def update_rubber_band(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        s = self.scale_px
+        if self.rubber_band_item:
+            self.scene_2d.removeItem(self.rubber_band_item)
+            self.rubber_band_item = None
+
+        if self.active_tool == "DRAW_SLAB_EDGE":
+            minx, maxx = min(x1, x2), max(x1, x2)
+            miny, maxy = min(y1, y2), max(y1, y2)
+            poly = QPolygonF([
+                QPointF(minx * s, -miny * s),
+                QPointF(maxx * s, -miny * s),
+                QPointF(maxx * s, -maxy * s),
+                QPointF(minx * s, -maxy * s),
+            ])
+            pen = QPen(QColor("#06B6D4"), 2, Qt.PenStyle.DashLine)
+            self.rubber_band_item = self.scene_2d.addPolygon(poly, pen, QBrush(QColor(6, 182, 212, 35)))
+            self.rubber_band_item.setZValue(90)
+        elif self.active_tool in ("ADD_HID_BEAM", "ADD_DROP_BEAM"):
+            color = QColor("#EAB308") if self.active_tool == "ADD_HID_BEAM" else QColor("#10B981")
+            pen = QPen(color, 3, Qt.PenStyle.DashDotLine)
+            self.rubber_band_item = self.scene_2d.addLine(x1 * s, -y1 * s, x2 * s, -y2 * s, pen)
+            self.rubber_band_item.setZValue(90)
+
+    def hide_rubber_band(self) -> None:
+        if self.rubber_band_item:
+            self.scene_2d.removeItem(self.rubber_band_item)
+            self.rubber_band_item = None
 
     def wheelEvent(self, event) -> None:
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         self.scale(factor, factor)
 
+    def mousePressEvent(self, event) -> None:
+        # Middle click Pan
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self.is_panning = True
+            self.pan_last_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        # Left click
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.active_tool == "PAN":
+                self.is_panning = True
+                self.pan_last_pos = event.pos()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+
+            sp = self.mapToScene(event.pos())
+            raw_x = sp.x() / self.scale_px
+            raw_y = -sp.y() / self.scale_px
+
+            snap = self.find_snap_candidate(raw_x, raw_y)
+            cx = snap["x"] if snap else round(raw_x * 10.0) / 10.0
+            cy = snap["y"] if snap else round(raw_y * 10.0) / 10.0
+
+            # Step 1: Draw Slab Boundary
+            if self.active_tool == "DRAW_SLAB_EDGE":
+                if self.draw_start_pt is None:
+                    self.draw_start_pt = (cx, cy)
+                    self.studio.statusBar().showMessage(f"Slab Boundary: Corner 1 at ({cx:.2f}, {cy:.2f}). Click opposite corner.")
+                else:
+                    x1, y1 = self.draw_start_pt
+                    x2, y2 = cx, cy
+                    min_x, max_x = min(x1, x2), max(x1, x2)
+                    min_y, max_y = min(y1, y2), max(y1, y2)
+                    if (max_x - min_x) < 0.5 or (max_y - min_y) < 0.5:
+                        QMessageBox.warning(self.studio, "Invalid Boundary", "Slab boundary dimensions must be at least 0.50 m.")
+                        self.draw_start_pt = None
+                        return
+                    new_poly = [
+                        [round(min_x, 2), round(min_y, 2)],
+                        [round(max_x, 2), round(min_y, 2)],
+                        [round(max_x, 2), round(max_y, 2)],
+                        [round(min_x, 2), round(max_y, 2)],
+                    ]
+                    self.studio.current_story_data["slab_edge_polygon"] = new_poly
+                    self.draw_start_pt = None
+                    self.hide_rubber_band()
+                    self.studio.save_and_sync_current_story()
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(
+                        f"Outer Slab Boundary created ({max_x - min_x:.2f}m x {max_y - min_y:.2f}m). Ready for Step 2: Place Columns."
+                    )
+                    self.studio.activate_cad_tool("ADD_COL")
+                return
+
+            # Step 2: Place Column
+            if self.active_tool == "ADD_COL":
+                rule = self.studio.get_column_boundary_rule()
+                b_m = 0.25
+                h_m = 0.50
+                edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                final_x, final_y, updated_poly, _ = clamp_or_expand_column_boundary(
+                    cx, cy, b_m, h_m, edge, rule=rule
+                )
+                if updated_poly != edge:
+                    self.studio.current_story_data["slab_edge_polygon"] = updated_poly
+
+                cols = self.studio.current_story_data.get("columns", [])
+                col_id = f"C{len(cols) + 1}"
+                cols.append({
+                    "id": col_id,
+                    "x": final_x,
+                    "y": final_y,
+                    "b_m": b_m,
+                    "h_m": h_m,
+                    "active": True,
+                })
+                self.studio.current_story_data["columns"] = cols
+                self.studio.save_and_sync_current_story()
+                self.studio.refresh_story_ui()
+                self.studio.statusBar().showMessage(f"Placed Column {col_id} at ({final_x:.2f}, {final_y:.2f}) m.")
+                return
+
+            # Step 3: Draw Hidden / Drop Beam
+            if self.active_tool in ("ADD_HID_BEAM", "ADD_DROP_BEAM"):
+                b_kind = "hidden" if self.active_tool == "ADD_HID_BEAM" else "drop"
+                if self.draw_start_pt is None:
+                    self.draw_start_pt = (cx, cy)
+                    self.studio.statusBar().showMessage(f"Beam Start at ({cx:.2f}, {cy:.2f}). Click beam end point.")
+                else:
+                    x1, y1 = self.draw_start_pt
+                    x2, y2 = self.apply_ortho(cx, cy, (x1, y1))
+                    if ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 < 0.20:
+                        QMessageBox.warning(self.studio, "Invalid Beam", "Beam length must be at least 0.20 m.")
+                        self.draw_start_pt = None
+                        self.hide_rubber_band()
+                        return
+
+                    edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                    cols = self.studio.current_story_data.get("columns", [])
+                    beams = self.studio.current_story_data.get("beams", [])
+                    openings = self.studio.current_story_data.get("openings", [])
+
+                    bid = f"B{len(beams) + 1}"
+                    width_m = 0.60 if b_kind == "hidden" else 0.20
+                    depth_m = 0.30 if b_kind == "hidden" else 0.50
+
+                    temp_beam = {
+                        "id": bid,
+                        "beam_kind": b_kind,
+                        "width_m": width_m,
+                        "depth_m": depth_m,
+                        "start_x": x1,
+                        "start_y": y1,
+                        "end_x": x2,
+                        "end_y": y2,
+                    }
+
+                    ok, err_msg = validate_beam_cantilevers_and_boundary(
+                        temp_beam, cols, beams, edge, openings=openings
+                    )
+                    if not ok:
+                        QMessageBox.warning(self.studio, "Invalid Beam Geometry", err_msg)
+                        self.draw_start_pt = None
+                        self.hide_rubber_band()
+                        return
+
+                    # Detect supporting columns along line
+                    beam_line = LineString([(x1, y1), (x2, y2)])
+                    sup_list = []
+                    for c in cols:
+                        if not c.get("active", True):
+                            continue
+                        c_pt = Point(float(c["x"]), float(c["y"]))
+                        if beam_line.distance(c_pt) <= max(float(c.get("b_m", 0.25)), float(c.get("h_m", 0.50))) / 1.5:
+                            proj = beam_line.project(c_pt)
+                            sup_list.append((proj, c))
+                    sup_list.sort(key=lambda s: s[0])
+
+                    supports = []
+                    spans = []
+                    if sup_list:
+                        for s_i, (proj, c) in enumerate(sup_list):
+                            supports.append({
+                                "support_index": s_i + 1,
+                                "kind": "column",
+                                "target_id": c["id"],
+                                "width_m": float(c.get("b_m", 0.25)),
+                                "x": float(c["x"]),
+                                "y": float(c["y"]),
+                            })
+                        if len(supports) >= 2:
+                            for s_i in range(len(supports) - 1):
+                                p1 = (supports[s_i]["x"], supports[s_i]["y"])
+                                p2 = (supports[s_i + 1]["x"], supports[s_i + 1]["y"])
+                                spans.append(round(((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)**0.5, 2))
+                        else:
+                            spans = [round(beam_line.length, 2)]
+                    else:
+                        spans = [round(beam_line.length, 2)]
+
+                    c_left = round(sup_list[0][0], 2) if (sup_list and sup_list[0][0] > 0.05) else 0.0
+                    c_right = round(beam_line.length - sup_list[-1][0], 2) if (sup_list and (beam_line.length - sup_list[-1][0]) > 0.05) else 0.0
+
+                    temp_beam["supports"] = supports
+                    temp_beam["spans"] = spans
+                    temp_beam["cantilever_left_m"] = c_left
+                    temp_beam["cantilever_right_m"] = c_right
+                    temp_beam["loads"] = [{"type": "dist", "x1": 0.0, "x2": round(beam_line.length, 2), "val": 30.0}]
+
+                    beams.append(temp_beam)
+                    self.studio.current_story_data["beams"] = beams
+                    self.draw_start_pt = None
+                    self.hide_rubber_band()
+                    self.studio.save_and_sync_current_story()
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(f"Added Beam {bid} ({b_kind}) with {len(spans)} span(s).")
+                return
+
+            # Step 4A: Pick Area: Slab
+            if self.active_tool == "PICK_SLAB":
+                edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                beams = self.studio.current_story_data.get("beams", [])
+                slabs = self.studio.current_story_data.get("slabs", [])
+                openings = self.studio.current_story_data.get("openings", [])
+                ok, msg, new_slabs, new_ops = pick_area_slab((cx, cy), edge, beams, slabs, openings)
+                if ok:
+                    self.studio.current_story_data["slabs"] = new_slabs
+                    self.studio.current_story_data["openings"] = new_ops
+                    self.studio.save_and_sync_current_story()
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(msg)
+                else:
+                    QMessageBox.warning(self.studio, "Pick Area Failed", msg)
+                return
+
+            # Step 4B: Pick: Flip Rib Direction
+            if self.active_tool == "PICK_FLIP_RIB":
+                edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                beams = self.studio.current_story_data.get("beams", [])
+                slabs = self.studio.current_story_data.get("slabs", [])
+                openings = self.studio.current_story_data.get("openings", [])
+                ok, msg, new_slabs = flip_rib_direction_with_equilibrium((cx, cy), edge, beams, slabs, openings)
+                if ok:
+                    self.studio.current_story_data["slabs"] = new_slabs
+                    self.studio.save_and_sync_current_story()
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(msg)
+                else:
+                    QMessageBox.warning(self.studio, "Cantilever Equilibrium Warning", msg)
+                return
+
+            # Step 4C: Pick: Toggle Opening
+            if self.active_tool == "PICK_OPENING":
+                edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                beams = self.studio.current_story_data.get("beams", [])
+                slabs = self.studio.current_story_data.get("slabs", [])
+                openings = self.studio.current_story_data.get("openings", [])
+                ok, msg, new_slabs, new_ops = toggle_bay_slab_or_opening((cx, cy), edge, beams, slabs, openings)
+                if ok:
+                    self.studio.current_story_data["slabs"] = new_slabs
+                    self.studio.current_story_data["openings"] = new_ops
+                    self.studio.save_and_sync_current_story()
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(msg)
+                else:
+                    QMessageBox.warning(self.studio, "Opening Protection Warning", msg)
+                return
+
+            # CAD Move Tool
+            if self.active_tool == "MOVE":
+                if self.move_element is None:
+                    cols = self.studio.current_story_data.get("columns", [])
+                    beams = self.studio.current_story_data.get("beams", [])
+                    hit_col = None
+                    for c in cols:
+                        if not c.get("active", True):
+                            continue
+                        if ((cx - float(c["x"]))**2 + (cy - float(c["y"]))**2)**0.5 <= 0.45:
+                            hit_col = c
+                            break
+                    if hit_col:
+                        self.move_element = {"kind": "column", "id": hit_col["id"], "start_pt": (float(hit_col["x"]), float(hit_col["y"]))}
+                        self.studio.statusBar().showMessage(f"Selected Column {hit_col['id']} to move. Click target destination.")
+                        return
+
+                    hit_beam = None
+                    for b in beams:
+                        bl = LineString([(float(b["start_x"]), float(b["start_y"])), (float(b["end_x"]), float(b["end_y"]))])
+                        if bl.distance(Point(cx, cy)) <= 0.35:
+                            hit_beam = b
+                            break
+                    if hit_beam:
+                        self.move_element = {"kind": "beam", "id": hit_beam["id"], "start_pt": (cx, cy)}
+                        self.studio.statusBar().showMessage(f"Selected Beam {hit_beam['id']} to move. Click destination point.")
+                        return
+
+                    self.studio.statusBar().showMessage("Move tool: Click directly on a Column or Beam to select it first.")
+                else:
+                    kind = self.move_element["kind"]
+                    elem_id = self.move_element["id"]
+                    cols = self.studio.current_story_data.get("columns", [])
+                    beams = self.studio.current_story_data.get("beams", [])
+                    edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                    rule = self.studio.get_column_boundary_rule()
+
+                    if kind == "column":
+                        ok, msg, new_cols, new_bms, new_poly = move_column_and_update_connected_beams(
+                            elem_id, cx, cy, cols, beams, edge, rule=rule
+                        )
+                        if ok:
+                            self.studio.current_story_data["columns"] = new_cols
+                            self.studio.current_story_data["beams"] = new_bms
+                            self.studio.current_story_data["slab_edge_polygon"] = new_poly
+                            self.studio.save_and_sync_current_story()
+                            self.studio.refresh_story_ui()
+                            self.studio.statusBar().showMessage(msg)
+                        else:
+                            QMessageBox.warning(self.studio, "Move Failed", msg)
+
+                    elif kind == "beam":
+                        ox, oy = self.move_element["start_pt"]
+                        dx = cx - ox
+                        dy = cy - oy
+                        ok, msg, new_bms = move_beam_and_update(elem_id, dx, dy, beams, edge)
+                        if ok:
+                            self.studio.current_story_data["beams"] = new_bms
+                            self.studio.save_and_sync_current_story()
+                            self.studio.refresh_story_ui()
+                            self.studio.statusBar().showMessage(msg)
+                        else:
+                            QMessageBox.warning(self.studio, "Move Failed", msg)
+
+                    self.move_element = None
+                return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if getattr(self, "is_panning", False) and self.pan_last_pos is not None:
+            delta = event.pos() - self.pan_last_pos
+            self.pan_last_pos = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            event.accept()
+            return
+
+        sp = self.mapToScene(event.pos())
+        raw_x = sp.x() / self.scale_px
+        raw_y = -sp.y() / self.scale_px
+
+        snap = self.find_snap_candidate(raw_x, raw_y)
+        snap_x = snap["x"] if snap else round(raw_x * 10.0) / 10.0
+        snap_y = snap["y"] if snap else round(raw_y * 10.0) / 10.0
+
+        if self.ortho_enabled and self.draw_start_pt is not None:
+            snap_x, snap_y = self.apply_ortho(snap_x, snap_y, self.draw_start_pt)
+
+        # Status Bar updates
+        snap_str = snap["type"] if snap else "Free Cursor"
+        osnap_str = "ON" if self.osnap_enabled else "OFF"
+        ortho_str = "ON" if self.ortho_enabled else "OFF"
+        self.studio.statusBar().showMessage(
+            f"Cursor: (X = {snap_x:.2f} m, Y = {snap_y:.2f} m) | Snap: {snap_str} | OSNAP [F3]: {osnap_str} | ORTHO [F8]: {ortho_str} | Tool: {self.active_tool}"
+        )
+
+        # Dynamic Snap Marker
+        if snap and snap["type"] != "0.10m Grid Snap":
+            self.update_snap_marker(snap_x, snap_y)
+        else:
+            self.hide_snap_marker()
+
+        # Dynamic Rubber-band Preview
+        if self.draw_start_pt is not None:
+            self.update_rubber_band(self.draw_start_pt[0], self.draw_start_pt[1], snap_x, snap_y)
+        else:
+            self.hide_rubber_band()
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton):
+            if getattr(self, "is_panning", False):
+                self.is_panning = False
+                self.pan_last_pos = None
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_F3:
+            self.toggle_osnap()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_F8:
+            self.toggle_ortho()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancel_current_operation()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def render_story(self, story_data: Dict[str, Any]) -> None:
         self.scene_2d.clear()
+        self.snap_marker_item = None
+        self.rubber_band_item = None
         s = self.scale_px
 
-        # Draw Subtle Coordinate Grid (1m spacing)
-        grid_pen = QPen(QColor("#161F2C"), 1, Qt.PenStyle.DotLine)
-        for gx in range(-2, 16):
-            self.scene_2d.addLine(gx * s, -2 * s, gx * s, 12 * s, grid_pen)
-        for gy in range(-2, 12):
-            self.scene_2d.addLine(-2 * s, -gy * s, 16 * s, -gy * s, grid_pen)
-
-        # 1. Slab Boundary (00-XD-EDGE in Cyan)
         edge = story_data.get("slab_edge_polygon", [])
+        columns = story_data.get("columns", [])
+        beams = story_data.get("beams", [])
+        slabs = story_data.get("slabs", [])
+        openings = story_data.get("openings", [])
+
+        # Determine bounds for Grid
+        all_xs = [-2.0, 16.0]
+        all_ys = [-2.0, 12.0]
+        if edge and len(edge) >= 3:
+            all_xs += [float(p[0]) for p in edge]
+            all_ys += [float(p[1]) for p in edge]
+        min_gx = int(math.floor(min(all_xs)) - 2)
+        max_gx = int(math.ceil(max(all_xs)) + 2)
+        min_gy = int(math.floor(min(all_ys)) - 2)
+        max_gy = int(math.ceil(max(all_ys)) + 2)
+
+        # Coordinate Grid (1m spacing)
+        grid_pen = QPen(QColor("#161F2C"), 1, Qt.PenStyle.DotLine)
+        for gx in range(min_gx, max_gx + 1):
+            self.scene_2d.addLine(gx * s, -min_gy * s, gx * s, -max_gy * s, grid_pen)
+        for gy in range(min_gy, max_gy + 1):
+            self.scene_2d.addLine(min_gx * s, -gy * s, max_gx * s, -gy * s, grid_pen)
+
+        # 1. Slab Bays & Openings (00-XD-SLAB & 00-XD-OPEN)
+        if edge and len(edge) >= 3:
+            detected_bays = detect_bays_and_determine_ribs(edge, beams, slabs, openings)
+            for bay in detected_bays:
+                poly = QPolygonF([QPointF(float(p[0]) * s, -float(p[1]) * s) for p in bay["polygon"]])
+                if bay.get("is_opening", False):
+                    # Void Opening
+                    self.scene_2d.addPolygon(poly, QPen(QColor("#D946EF"), 2, Qt.PenStyle.DashLine), QBrush(QColor(217, 70, 239, 30)))
+                    bds = bay["bounds"]
+                    self.scene_2d.addLine(bds[0] * s, -bds[1] * s, bds[2] * s, -bds[3] * s, QPen(QColor("#D946EF"), 1, Qt.PenStyle.DotLine))
+                    self.scene_2d.addLine(bds[0] * s, -bds[3] * s, bds[2] * s, -bds[1] * s, QPen(QColor("#D946EF"), 1, Qt.PenStyle.DotLine))
+                    txt_op = self.scene_2d.addText("OPENING\n[00-XD-OPEN]", QFont("Arial", 8, QFont.Weight.Bold))
+                    txt_op.setDefaultTextColor(QColor("#D946EF"))
+                    txt_op.setPos(bay["center"][0] * s - 30, -bay["center"][1] * s - 12)
+                else:
+                    # Solid Slab
+                    self.scene_2d.addPolygon(poly, QPen(QColor("#1E293B"), 1), QBrush(QColor(15, 36, 58, 110)))
+                    # Draw rib direction lines
+                    rib_pen = QPen(QColor(234, 179, 8, 80), 1, Qt.PenStyle.DashLine)
+                    bds = bay["bounds"]
+                    rib_deg = float(bay.get("rib_direction_deg", 0.0))
+                    if rib_deg == 0.0:
+                        curr_y = bds[1] + 0.55
+                        while curr_y < bds[3] - 0.20:
+                            self.scene_2d.addLine(bds[0] * s, -curr_y * s, bds[2] * s, -curr_y * s, rib_pen)
+                            curr_y += 0.55
+                    else:
+                        curr_x = bds[0] + 0.55
+                        while curr_x < bds[2] - 0.20:
+                            self.scene_2d.addLine(curr_x * s, -bds[1] * s, curr_x * s, -bds[3] * s, rib_pen)
+                            curr_x += 0.55
+
+                    badge = f"{bay['id']} ({bay['lx']:.1f}x{bay['ly']:.1f}m | {rib_deg:.0f}°)"
+                    if bay.get("is_cantilever"):
+                        badge += "\n[CANTILEVER]"
+                    txt_s = self.scene_2d.addText(badge, QFont("Arial", 8, QFont.Weight.Bold))
+                    txt_s.setDefaultTextColor(QColor("#FBBF24"))
+                    txt_s.setPos(bay["center"][0] * s - 35, -bay["center"][1] * s - 12)
+
+        # 2. Slab Boundary (00-XD-EDGE in Cyan)
         if len(edge) >= 3:
             poly = QPolygonF([QPointF(float(p[0]) * s, -float(p[1]) * s) for p in edge])
             self.scene_2d.addPolygon(poly, QPen(QColor("#06B6D4"), 2), QBrush(Qt.BrushStyle.NoBrush))
+            for pt in edge:
+                px, py = float(pt[0]) * s, -float(pt[1]) * s
+                self.scene_2d.addRect(QRectF(px - 3, py - 3, 6, 6), QPen(QColor("#06B6D4")), QBrush(QColor("#06B6D4")))
 
-        # 2. Beams & Non-Overlapping Orange Beam Tags
-        columns = story_data.get("columns", [])
+        # 3. Beams & Non-Overlapping Orange Beam Tags
         placed_tags = []
         for col in columns:
             if col.get("active", True):
                 placed_tags.append((float(col["x"]) + 0.25, float(col["y"]) + 0.25))
 
-        for bm in story_data.get("beams", []):
+        for bm in beams:
             sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
             ex, ey = float(bm.get("end_x", 5.0)), float(bm.get("end_y", 0.0))
             b_kind = bm.get("beam_kind", "hidden")
@@ -298,7 +908,7 @@ class StructuralCadCanvas2D(QGraphicsView):
             txt.setDefaultTextColor(QColor("#FB923C"))  # Bright Orange
             txt.setPos(tx * s - 10, -ty * s - 12)
 
-        # 3. Columns & Bright Green Column Tags Outside Corner
+        # 4. Columns & Bright Green Column Tags Outside Corner
         for col in columns:
             if not col.get("active", True):
                 continue
@@ -362,18 +972,48 @@ class XpertStudioMainWindow(QMainWindow):
         act_exit.triggered.connect(self.close)
         m_file.addAction(act_exit)
 
-        # Draw Menu
-        m_draw = mbar.addMenu("&Draw")
+        # View Menu
+        m_view = mbar.addMenu("&View")
+        act_pan = QAction("Pan (Hand)", self)
+        act_pan.triggered.connect(lambda: self.activate_cad_tool("PAN"))
+        m_view.addAction(act_pan)
+
+        act_zoom_ext = QAction("Zoom Extents", self)
+        act_zoom_ext.triggered.connect(lambda: self.activate_cad_tool("ZOOM_EXTENTS"))
+        m_view.addAction(act_zoom_ext)
+
+        m_view.addSeparator()
+        act_osnap = QAction("Toggle OSNAP (F3)", self)
+        act_osnap.setShortcut("F3")
+        act_osnap.triggered.connect(lambda: self.cad_canvas.toggle_osnap())
+        m_view.addAction(act_osnap)
+
+        act_ortho = QAction("Toggle Ortho (F8)", self)
+        act_ortho.setShortcut("F8")
+        act_ortho.triggered.connect(lambda: self.cad_canvas.toggle_ortho())
+        m_view.addAction(act_ortho)
+
+        # Draw Menu (Strict 4-Step Sequence)
+        m_draw = mbar.addMenu("&Draw && Modify")
         for label, tool_id in [
+            ("1. Draw Outer Slab Boundary [00-XD-EDGE]", "DRAW_SLAB_EDGE"),
+            ("2. Place Column [00-XD-COL]", "ADD_COL"),
+            ("3A. Draw Hidden Beam [00-XD-BEAM-HID]", "ADD_HID_BEAM"),
+            ("3B. Draw Drop Beam [00-XD-BEAM-DROP]", "ADD_DROP_BEAM"),
+            ("4A. Pick Area: Slab [00-XD-SLAB]", "PICK_SLAB"),
+            ("4B. Pick: Flip Rib Direction", "PICK_FLIP_RIB"),
+            ("4C. Pick: Toggle Slab <-> Opening [00-XD-OPEN]", "PICK_OPENING"),
+            ("---", None),
             ("Select / Pick Element", "SELECT"),
-            ("Draw Column (00-XD-COL)", "DRAW_COL"),
-            ("Draw Hidden Beam (00-XD-BEAM-HID)", "DRAW_BEAM_HID"),
-            ("Draw Drop Beam (00-XD-BEAM-DROP)", "DRAW_BEAM_DROP"),
+            ("Move Column / Beam", "MOVE"),
             ("Load Standard 2-Bay Structural Layout", "LOAD_TEMPLATE"),
         ]:
-            act = QAction(label, self)
-            act.triggered.connect(lambda checked=False, tid=tool_id: self.activate_cad_tool(tid))
-            m_draw.addAction(act)
+            if tool_id is None:
+                m_draw.addSeparator()
+            else:
+                act = QAction(label, self)
+                act.triggered.connect(lambda checked=False, tid=tool_id: self.activate_cad_tool(tid))
+                m_draw.addAction(act)
 
         # Analyze Menu
         m_analyze = mbar.addMenu("&Analyze")
@@ -411,7 +1051,7 @@ class XpertStudioMainWindow(QMainWindow):
 
         top_tb.addWidget(QLabel("  Active Story: "))
         self.cb_story = QComboBox()
-        self.cb_story.setMinimumWidth(260)
+        self.cb_story.setMinimumWidth(240)
         self.cb_story.currentIndexChanged.connect(self._on_story_changed)
         top_tb.addWidget(self.cb_story)
         top_tb.addSeparator()
@@ -427,26 +1067,61 @@ class XpertStudioMainWindow(QMainWindow):
             top_tb.addWidget(b)
 
         top_tb.addSeparator()
+        top_tb.addWidget(QLabel("Col Boundary Rule: "))
+        self.cb_col_rule = QComboBox()
+        self.cb_col_rule.addItems([
+            "Auto-Clamp Column Flush Inside Edge",
+            "Auto-Expand Slab Boundary to Fit Column",
+        ])
+        top_tb.addWidget(self.cb_col_rule)
+
+        top_tb.addSeparator()
+        self.btn_osnap = QPushButton("OSNAP [F3]: ON")
+        self.btn_osnap.setCheckable(True)
+        self.btn_osnap.setChecked(True)
+        self.btn_osnap.toggled.connect(self._on_toggle_osnap)
+        top_tb.addWidget(self.btn_osnap)
+
+        self.btn_ortho = QPushButton("ORTHO [F8]: OFF")
+        self.btn_ortho.setCheckable(True)
+        self.btn_ortho.setChecked(False)
+        self.btn_ortho.toggled.connect(self._on_toggle_ortho)
+        top_tb.addWidget(self.btn_ortho)
+
+        top_tb.addSeparator()
         btn_run_all = QPushButton("Analyze All Beams (F5)")
         btn_run_all.setStyleSheet("background-color: #16A34A; color: white; font-weight: bold; padding: 5px 12px;")
         btn_run_all.clicked.connect(self.run_analyze_all_beams)
         top_tb.addWidget(btn_run_all)
 
-        # Left Vertical CAD Toolbar
+        # Left Vertical CAD Toolbar (Strict 4-Step Sequence)
         left_tb = QToolBar("CAD Drawing Tools", self)
         left_tb.setOrientation(Qt.Orientation.Vertical)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, left_tb)
 
-        for label, tid in [
+        left_tools = [
+            ("1. Slab Boundary", "DRAW_SLAB_EDGE"),
+            ("2. Place Column", "ADD_COL"),
+            ("3A. + Hidden Beam", "ADD_HID_BEAM"),
+            ("3B. + Drop Beam", "ADD_DROP_BEAM"),
+            ("4A. Pick: Slab", "PICK_SLAB"),
+            ("4B. Pick: Flip Rib", "PICK_FLIP_RIB"),
+            ("4C. Pick: Opening", "PICK_OPENING"),
+            ("---", None),
             ("Select", "SELECT"),
-            ("+ Column", "ADD_COL"),
-            ("+ Hidden Beam", "ADD_HID_BEAM"),
-            ("+ Drop Beam", "ADD_DROP_BEAM"),
+            ("Move Col / Beam", "MOVE"),
+            ("Pan (Hand)", "PAN"),
+            ("Zoom Extents", "ZOOM_EXTENTS"),
             ("Demo Layout", "LOAD_TEMPLATE"),
-        ]:
-            btn = QPushButton(label)
-            btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
-            left_tb.addWidget(btn)
+        ]
+
+        for label, tid in left_tools:
+            if tid is None:
+                left_tb.addSeparator()
+            else:
+                btn = QPushButton(label)
+                btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
+                left_tb.addWidget(btn)
 
     def _build_main_workspace(self) -> None:
         central = QWidget()
@@ -623,6 +1298,27 @@ class XpertStudioMainWindow(QMainWindow):
         self.refresh_story_ui()
 
     def activate_cad_tool(self, tool_id: str) -> None:
+        if tool_id == "ZOOM_EXTENTS":
+            self.cad_canvas.zoom_extents()
+            return
+
+        # Strict 4-step sequence enforcement:
+        if tool_id in ["ADD_COL", "ADD_HID_BEAM", "ADD_DROP_BEAM", "PICK_SLAB", "PICK_FLIP_RIB", "PICK_OPENING"]:
+            edge = self.current_story_data.get("slab_edge_polygon", [])
+            if not edge or len(edge) < 3:
+                QMessageBox.warning(
+                    self,
+                    "Step 1 Required — Outer Slab Boundary",
+                    "Strict Structural Workflow Requirement:\n\n"
+                    "You must define the Outer Slab Boundary [00-XD-EDGE] first before "
+                    "placing columns, drawing beams, or picking slabs/openings.\n\n"
+                    "Active tool switched to '1. Slab Boundary'. Please click 2 opposite corners on the canvas.",
+                )
+                self.cad_canvas.active_tool = "DRAW_SLAB_EDGE"
+                self.cad_canvas.draw_start_pt = None
+                self.statusBar().showMessage("Tool: 1. Draw Outer Slab Boundary [00-XD-EDGE] (Click Corner 1)")
+                return
+
         if tool_id == "LOAD_TEMPLATE":
             self.current_story_data["slab_edge_polygon"] = [[0, 0], [10.0, 0], [10.0, 8.5], [0, 8.5]]
             self.current_story_data["columns"] = [
@@ -642,9 +1338,9 @@ class XpertStudioMainWindow(QMainWindow):
                     "start_x": 0.0, "start_y": 8.5, "end_x": 10.0, "end_y": 8.5,
                     "spans": [5.2, 4.8],
                     "supports": [
-                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.25},
-                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.25},
-                        {"support_index": 3, "kind": "column", "target_id": "C3", "width_m": 0.25},
+                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.25, "x": 0.0, "y": 8.5},
+                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.25, "x": 5.2, "y": 8.5},
+                        {"support_index": 3, "kind": "column", "target_id": "C3", "width_m": 0.25, "x": 10.0, "y": 8.5},
                     ],
                     "loads": [{"type": "dist", "x1": 0.0, "x2": 10.0, "val": 28.5}],
                 },
@@ -653,18 +1349,38 @@ class XpertStudioMainWindow(QMainWindow):
                     "start_x": 0.0, "start_y": 4.2, "end_x": 10.0, "end_y": 4.2,
                     "spans": [5.2, 4.8],
                     "supports": [
-                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.25},
-                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.30},
-                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.25},
+                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.25, "x": 0.0, "y": 4.2},
+                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.30, "x": 5.2, "y": 4.2},
+                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.25, "x": 10.0, "y": 4.2},
                     ],
                     "loads": [{"type": "dist", "x1": 0.0, "x2": 10.0, "val": 36.2}],
                 },
             ]
             self.current_story_data["slabs"] = [
-                {"id": "S1", "axis_span_m": 4.3, "left_support_w_m": 0.60, "right_support_w_m": 0.20},
+                {"id": "S1", "axis_span_m": 4.3, "left_support_w_m": 0.60, "right_support_w_m": 0.20, "rib_direction_deg": 0.0},
             ]
+            self.current_story_data["openings"] = []
             self.save_and_sync_current_story()
             self.refresh_story_ui()
+            self.cad_canvas.zoom_extents()
+            self.statusBar().showMessage("Standard 2-Bay Structural Layout loaded successfully.")
+            return
+
+        self.cad_canvas.active_tool = tool_id
+        self.cad_canvas.draw_start_pt = None
+        self.cad_canvas.move_element = None
+        self.statusBar().showMessage(f"Active Tool: {tool_id}")
+
+    def get_column_boundary_rule(self) -> str:
+        if hasattr(self, "cb_col_rule") and self.cb_col_rule.currentIndex() == 1:
+            return "expand"
+        return "clamp"
+
+    def _on_toggle_osnap(self, checked: bool) -> None:
+        self.cad_canvas.toggle_osnap(checked)
+
+    def _on_toggle_ortho(self, checked: bool) -> None:
+        self.cad_canvas.toggle_ortho(checked)
 
     def save_and_sync_current_story(self) -> None:
         if not self.master_project:
@@ -744,6 +1460,11 @@ def main() -> None:
     win = XpertStudioMainWindow()
     if "--check" in sys.argv:
         win.run_analyze_all_beams()
+        win.activate_cad_tool("ZOOM_EXTENTS")
+        win.cad_canvas.toggle_osnap(True)
+        win.cad_canvas.toggle_ortho(True)
+        win.activate_cad_tool("LOAD_TEMPLATE")
+        win.cad_canvas.render_story(win.current_story_data)
         print("HEADLESS_STUDIO_CHECK_OK")
         sys.exit(0)
     win.show()

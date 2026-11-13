@@ -16,7 +16,13 @@ Core Structural Analysis, Optimization & ACI 318 Design Engine:
 
 from __future__ import annotations
 import math
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
+
+try:
+    from shapely.geometry import Polygon, Point, LineString, box
+    from shapely.ops import polygonize, unary_union
+except ImportError:
+    Polygon = Point = LineString = box = polygonize = unary_union = None
 
 
 def get_aci_deflection_divisor(continuity_case: str) -> float:
@@ -627,3 +633,768 @@ def design_column_and_pm_curve(
         "pm_curve_points": pm_curve_points,
         "status": "SAFE" if pu_kn <= phi_pn_max else "INCREASE SECTION",
     }
+
+
+# ============================================================================
+# Interactive CAD Modeling, Boundary Control & Equilibrium Engine
+# ============================================================================
+
+def clamp_or_expand_column_boundary(
+    col_x: float,
+    col_y: float,
+    b_m: float,
+    h_m: float,
+    slab_edge_polygon: List[List[float]],
+    rule: str = "clamp",
+) -> Tuple[float, float, List[List[float]], bool]:
+    """
+    Enforces that column (b_m x h_m) centered at (col_x, col_y) does not exceed slab boundary.
+    - If rule == 'clamp': clamps (col_x, col_y) flush inside the slab boundary.
+    - If rule == 'expand': expands slab_edge_polygon bounding box to encompass the column outer face.
+    Returns: (final_x, final_y, final_polygon, was_modified)
+    """
+    if not slab_edge_polygon or len(slab_edge_polygon) < 3:
+        return col_x, col_y, slab_edge_polygon, False
+
+    xs = [float(p[0]) for p in slab_edge_polygon]
+    ys = [float(p[1]) for p in slab_edge_polygon]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    half_b = b_m / 2.0
+    half_h = h_m / 2.0
+
+    if rule == "expand":
+        new_min_x = min(min_x, col_x - half_b)
+        new_max_x = max(max_x, col_x + half_b)
+        new_min_y = min(min_y, col_y - half_h)
+        new_max_y = max(max_y, col_y + half_h)
+        was_modified = (
+            abs(new_min_x - min_x) > 1e-4
+            or abs(new_max_x - max_x) > 1e-4
+            or abs(new_min_y - min_y) > 1e-4
+            or abs(new_max_y - max_y) > 1e-4
+        )
+        new_poly = [
+            [round(new_min_x, 3), round(new_min_y, 3)],
+            [round(new_max_x, 3), round(new_min_y, 3)],
+            [round(new_max_x, 3), round(new_max_y, 3)],
+            [round(new_min_x, 3), round(new_max_y, 3)],
+        ]
+        return col_x, col_y, new_poly, was_modified
+
+    # rule == 'clamp' (default):
+    allow_min_x = min_x + half_b
+    allow_max_x = max_x - half_b
+    allow_min_y = min_y + half_h
+    allow_max_y = max_y - half_h
+
+    if allow_max_x < allow_min_x:
+        allow_min_x = allow_max_x = (min_x + max_x) / 2.0
+    if allow_max_y < allow_min_y:
+        allow_min_y = allow_max_y = (min_y + max_y) / 2.0
+
+    clamped_x = max(allow_min_x, min(allow_max_x, col_x))
+    clamped_y = max(allow_min_y, min(allow_max_y, col_y))
+    was_modified = (abs(clamped_x - col_x) > 1e-4 or abs(clamped_y - col_y) > 1e-4)
+
+    return round(clamped_x, 3), round(clamped_y, 3), slab_edge_polygon, was_modified
+
+
+def validate_beam_cantilevers_and_boundary(
+    beam: Dict[str, Any],
+    columns: List[Dict[str, Any]],
+    all_beams: List[Dict[str, Any]],
+    slab_edge_polygon: List[List[float]],
+    openings: Optional[List[Dict[str, Any]]] = None,
+    tolerance_m: float = 0.25,
+) -> Tuple[bool, str]:
+    """
+    Validates:
+    1. Beam start and end points must reside inside or on the slab boundary polygon.
+    2. Cantilever overhangs extending past the outermost column support must have a true
+       free end reaching the outer slab boundary edge (or an opening edge), or rest
+       on a supporting girder beam.
+       Unsupported overhangs terminating in the mid-slab interior are rejected
+       with 'Invalid Interior Cantilever'.
+    """
+    if not slab_edge_polygon or len(slab_edge_polygon) < 3:
+        return True, "No slab boundary defined."
+
+    sx = float(beam.get("start_x", 0.0))
+    sy = float(beam.get("start_y", 0.0))
+    ex = float(beam.get("end_x", 0.0))
+    ey = float(beam.get("end_y", 0.0))
+
+    if Polygon is None:
+        return True, "Shapely not installed."
+
+    edge_poly = Polygon(slab_edge_polygon)
+    edge_ext = edge_poly.exterior
+
+    # 1. Start and end must not be outside outer boundary
+    if edge_poly.distance(Point(sx, sy)) > tolerance_m:
+        return False, f"Beam start point ({sx:.2f}, {sy:.2f}) is outside the slab boundary [00-XD-EDGE]."
+    if edge_poly.distance(Point(ex, ey)) > tolerance_m:
+        return False, f"Beam end point ({ex:.2f}, {ey:.2f}) is outside the slab boundary [00-XD-EDGE]."
+
+    beam_line = LineString([(sx, sy), (ex, ey)])
+    beam_len = beam_line.length
+    if beam_len < 0.20:
+        return False, "Beam length must be at least 0.20 m."
+
+    # Find columns lying along this beam
+    sup_cols = []
+    for col in columns:
+        if not col.get("active", True):
+            continue
+        cx, cy = float(col["x"]), float(col["y"])
+        c_pt = Point(cx, cy)
+        dist = beam_line.distance(c_pt)
+        if dist <= max(float(col.get("b_m", 0.25)), float(col.get("h_m", 0.50))) / 1.5:
+            proj = beam_line.project(c_pt)
+            sup_cols.append((proj, col))
+
+    sup_cols.sort(key=lambda item: item[0])
+
+    def is_supported_by_another_beam(pt: Point) -> bool:
+        b_id = str(beam.get("id", ""))
+        for ob in all_beams:
+            if str(ob.get("id", "")) == b_id:
+                continue
+            ob_line = LineString([(float(ob["start_x"]), float(ob["start_y"])), (float(ob["end_x"]), float(ob["end_y"]))])
+            if ob_line.distance(pt) <= 0.20:
+                return True
+        return False
+
+    def is_near_boundary_or_opening(pt: Point) -> bool:
+        if edge_ext.distance(pt) <= tolerance_m:
+            return True
+        if openings:
+            for op in openings:
+                op_poly = Polygon(op.get("polygon", [])) if op.get("polygon") else None
+                if op_poly and op_poly.exterior.distance(pt) <= tolerance_m:
+                    return True
+        return False
+
+    if sup_cols:
+        d_first = sup_cols[0][0]
+        d_last = beam_len - sup_cols[-1][0]
+
+        # Check left overhang
+        if d_first > 0.35:
+            start_pt = Point(sx, sy)
+            if not is_supported_by_another_beam(start_pt) and not is_near_boundary_or_opening(start_pt):
+                return False, (
+                    f"Invalid Interior Cantilever: Beam {beam.get('id', 'B')} starts with an overhang of "
+                    f"{d_first:.2f} m at ({sx:.2f}, {sy:.2f}) terminating in the interior slab without "
+                    f"a supporting beam or boundary edge."
+                )
+
+        # Check right overhang
+        if d_last > 0.35:
+            end_pt = Point(ex, ey)
+            if not is_supported_by_another_beam(end_pt) and not is_near_boundary_or_opening(end_pt):
+                return False, (
+                    f"Invalid Interior Cantilever: Beam {beam.get('id', 'B')} ends with an overhang of "
+                    f"{d_last:.2f} m at ({ex:.2f}, {ey:.2f}) terminating in the interior slab without "
+                    f"a supporting beam or boundary edge."
+                )
+    else:
+        # No columns along beam - both ends must be supported by other beams or reach boundary
+        start_pt = Point(sx, sy)
+        end_pt = Point(ex, ey)
+        if not is_supported_by_another_beam(start_pt) and not is_near_boundary_or_opening(start_pt):
+            return False, f"Invalid Beam: Start at ({sx:.2f}, {sy:.2f}) has neither column support nor carrying beam."
+        if not is_supported_by_another_beam(end_pt) and not is_near_boundary_or_opening(end_pt):
+            return False, f"Invalid Beam: End at ({ex:.2f}, {ey:.2f}) has neither column support nor carrying beam."
+
+    return True, "Beam geometry and cantilever overhangs are valid."
+
+
+def detect_bays_and_determine_ribs(
+    slab_edge_polygon: List[List[float]],
+    beams: List[Dict[str, Any]],
+    slabs: Optional[List[Dict[str, Any]]] = None,
+    openings: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Subdivides the floor bounded by slab_edge_polygon and beams into bays.
+    Determines bounding beams, bay type (4_beam vs 3_beam), and default rib directions:
+    - 4-Beam Bounded Bay: default rib along shorter span (0° if Lx <= Ly else 90°).
+    - 3-Beam Bounded Bay: default rib between opposing parallel beams.
+    Preserves overrides from existing slabs & openings.
+    """
+    if not slab_edge_polygon or len(slab_edge_polygon) < 3 or Polygon is None:
+        return []
+
+    slabs = slabs or []
+    openings = openings or []
+
+    edge_poly = Polygon(slab_edge_polygon)
+    edge_coords = list(edge_poly.exterior.coords)
+    edge_lines = [
+        LineString([edge_coords[i], edge_coords[i + 1]])
+        for i in range(len(edge_coords) - 1)
+    ]
+
+    beam_lines = []
+    beam_objs = []
+    for bm in beams:
+        sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+        ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+        if ((sx - ex) ** 2 + (sy - ey) ** 2) ** 0.5 > 0.10:
+            bl = LineString([(sx, sy), (ex, ey)])
+            beam_lines.append(bl)
+            beam_objs.append((bm.get("id", "B"), bl, bm))
+
+    all_network = unary_union(edge_lines + beam_lines)
+    raw_bays = list(polygonize(all_network))
+
+    # Keep only bays strictly inside edge_poly
+    valid_bays = []
+    for b in raw_bays:
+        if edge_poly.contains(b.centroid) and b.area > 0.05:
+            valid_bays.append(b)
+
+    valid_bays.sort(key=lambda p: (-p.centroid.y, p.centroid.x))
+
+    result_bays: List[Dict[str, Any]] = []
+
+    for idx, bay_poly in enumerate(valid_bays):
+        bay_id = f"S{idx + 1}"
+        minx, miny, maxx, maxy = bay_poly.bounds
+        lx = round(maxx - minx, 2)
+        ly = round(maxy - miny, 2)
+        cx, cy = round(bay_poly.centroid.x, 2), round(bay_poly.centroid.y, 2)
+        poly_pts = [[round(p[0], 2), round(p[1], 2)] for p in list(bay_poly.exterior.coords)[:-1]]
+
+        # Analyze edges to find bounding beams
+        coords = list(bay_poly.exterior.coords)
+        beam_sides = []
+        carrying_beams = {}
+
+        for k in range(len(coords) - 1):
+            seg = LineString([coords[k], coords[k + 1]])
+            mid = seg.interpolate(0.5, normalized=True)
+
+            dx = abs(coords[k + 1][0] - coords[k][0])
+            dy = abs(coords[k + 1][1] - coords[k][1])
+            if dx >= dy:
+                side = "NORTH" if mid.y >= (miny + maxy) / 2.0 else "SOUTH"
+            else:
+                side = "EAST" if mid.x >= (minx + maxx) / 2.0 else "WEST"
+
+            hit_beam_id = None
+            for bid, bline, bdict in beam_objs:
+                if bline.distance(mid) <= 0.15:
+                    hit_beam_id = bid
+                    break
+
+            if hit_beam_id:
+                if side not in beam_sides:
+                    beam_sides.append(side)
+                    carrying_beams[side] = hit_beam_id
+
+        # Determine Bay Type & Default Ribs
+        if len(beam_sides) >= 4:
+            bay_type = "4_beam"
+            free_side = None
+            default_rib_deg = 0.0 if lx <= ly else 90.0  # Shorter span
+            carrying_side = None
+            carrying_beam_id = None
+        elif len(beam_sides) == 3:
+            bay_type = "3_beam"
+            all_s = {"NORTH", "SOUTH", "EAST", "WEST"}
+            free_side = list(all_s - set(beam_sides))[0]
+            if free_side in ("EAST", "WEST"):
+                default_rib_deg = 90.0  # Opposing horizontal beams North & South
+                carrying_side = "WEST" if free_side == "EAST" else "EAST"
+            else:
+                default_rib_deg = 0.0  # Opposing vertical beams East & West
+                carrying_side = "SOUTH" if free_side == "NORTH" else "NORTH"
+            carrying_beam_id = carrying_beams.get(carrying_side)
+        else:
+            bay_type = "cantilever" if len(beam_sides) == 1 else "other"
+            free_side = None
+            default_rib_deg = 0.0 if lx <= ly else 90.0
+            carrying_side = beam_sides[0] if beam_sides else None
+            carrying_beam_id = carrying_beams.get(carrying_side) if carrying_side else None
+
+        # Check existing slab matching this centroid
+        matched_slab = None
+        for s in slabs:
+            spoly = Polygon(s.get("polygon", [])) if s.get("polygon") else None
+            if spoly and spoly.contains(Point(cx, cy)):
+                matched_slab = s
+                break
+            elif abs(float(s.get("center_x", -999)) - cx) < 0.4 and abs(float(s.get("center_y", -999)) - cy) < 0.4:
+                matched_slab = s
+                break
+
+        # Check existing opening matching this centroid
+        is_opening = False
+        for op in openings:
+            op_poly = Polygon(op.get("polygon", [])) if op.get("polygon") else None
+            if op_poly and op_poly.contains(Point(cx, cy)):
+                is_opening = True
+                break
+
+        rib_deg = float(matched_slab["rib_direction_deg"]) if matched_slab else default_rib_deg
+        is_cant = bool(matched_slab.get("is_cantilever", False)) if matched_slab else False
+        supports_cant = matched_slab.get("supports_cantilever_for") if matched_slab else None
+
+        result_bays.append({
+            "id": matched_slab.get("id", bay_id) if matched_slab else bay_id,
+            "polygon": poly_pts,
+            "bounds": (minx, miny, maxx, maxy),
+            "center": (cx, cy),
+            "lx": lx,
+            "ly": ly,
+            "bay_type": bay_type,
+            "beam_sides": beam_sides,
+            "free_side": free_side,
+            "carrying_side": carrying_side,
+            "carrying_beam_id": carrying_beam_id,
+            "default_rib_direction_deg": default_rib_deg,
+            "rib_direction_deg": rib_deg,
+            "is_cantilever": is_cant,
+            "is_opening": is_opening,
+            "supports_cantilever_for": supports_cant,
+        })
+
+    return result_bays
+
+
+def pick_area_slab(
+    click_pt: Tuple[float, float],
+    slab_edge_polygon: List[List[float]],
+    beams: List[Dict[str, Any]],
+    slabs: List[Dict[str, Any]],
+    openings: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[bool, str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Step 4A: Pick Area: Slab.
+    Detects the bay enclosing click_pt, assigns default rib direction
+    (shorter span for 4-beam, opposing beams for 3-beam), and creates or updates the slab.
+    If the bay was an opening, converts it back to a solid slab.
+    """
+    openings = list(openings or [])
+    slabs = list(slabs or [])
+    bays = detect_bays_and_determine_ribs(slab_edge_polygon, beams, slabs, openings)
+
+    target_bay = None
+    pt = Point(click_pt[0], click_pt[1])
+    for b in bays:
+        poly = Polygon(b["polygon"])
+        if poly.contains(pt) or poly.exterior.distance(pt) < 0.05:
+            target_bay = b
+            break
+
+    if not target_bay:
+        return False, f"Click at ({click_pt[0]:.2f}, {click_pt[1]:.2f}) is outside any closed beam bay.", slabs, openings
+
+    # Remove from openings if present
+    openings = [
+        op for op in openings
+        if not (Polygon(op.get("polygon", [])).contains(pt) if op.get("polygon") else False)
+    ]
+
+    # Create/update slab entry
+    existing_idx = None
+    for idx, s in enumerate(slabs):
+        spoly = Polygon(s.get("polygon", [])) if s.get("polygon") else None
+        if spoly and (spoly.contains(pt) or spoly.exterior.distance(pt) < 0.05):
+            existing_idx = idx
+            break
+
+    slab_record = {
+        "id": target_bay["id"],
+        "polygon": target_bay["polygon"],
+        "center_x": target_bay["center"][0],
+        "center_y": target_bay["center"][1],
+        "axis_span_m": target_bay["lx"] if target_bay["default_rib_direction_deg"] == 0.0 else target_bay["ly"],
+        "rib_direction_deg": target_bay["default_rib_direction_deg"],
+        "bay_type": target_bay["bay_type"],
+        "is_cantilever": False,
+        "is_opening": False,
+        "left_support_w_m": 0.25,
+        "right_support_w_m": 0.25,
+    }
+
+    if existing_idx is not None:
+        slabs[existing_idx] = slab_record
+    else:
+        slabs.append(slab_record)
+
+    return (
+        True,
+        f"Assigned Slab {slab_record['id']} ({target_bay['bay_type']}): Ribs at {slab_record['rib_direction_deg']:.0f}°.",
+        slabs,
+        openings,
+    )
+
+
+def flip_rib_direction_with_equilibrium(
+    click_pt: Tuple[float, float],
+    slab_edge_polygon: List[List[float]],
+    beams: List[Dict[str, Any]],
+    slabs: List[Dict[str, Any]],
+    openings: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """
+    Step 4B: Pick: Flip Rib Direction.
+    - If 4-beam bay: toggles between 0° and 90°.
+    - If 3-beam bay currently with default ribs:
+      User flips it to Cantilever Slab pointing to the free edge.
+      Enforces Cantilever Slab Equilibrium Rule:
+      1. Finds back-span slab directly behind carrying beam.
+      2. Validates that back-span slab exists and is NOT an opening.
+      3. Automatically synchronizes back-span ribs to be continuous in the exact same direction.
+      4. Tags back-span slab as supporting the cantilever.
+    - If 3-beam bay is already cantilever: restores default supported ribs.
+    """
+    openings = list(openings or [])
+    slabs = list(slabs or [])
+    bays = detect_bays_and_determine_ribs(slab_edge_polygon, beams, slabs, openings)
+
+    target_bay = None
+    pt = Point(click_pt[0], click_pt[1])
+    for b in bays:
+        poly = Polygon(b["polygon"])
+        if poly.contains(pt) or poly.exterior.distance(pt) < 0.05:
+            target_bay = b
+            break
+
+    if not target_bay:
+        return False, f"Click at ({click_pt[0]:.2f}, {click_pt[1]:.2f}) is outside any closed bay.", slabs
+
+    if target_bay["is_opening"]:
+        return False, "Cannot flip rib direction on a void opening [00-XD-OPEN].", slabs
+
+    bay_type = target_bay["bay_type"]
+
+    target_slab = None
+    for s in slabs:
+        spoly = Polygon(s.get("polygon", [])) if s.get("polygon") else None
+        if spoly and (spoly.contains(pt) or spoly.exterior.distance(pt) < 0.05):
+            target_slab = s
+            break
+
+    if not target_slab:
+        target_slab = {
+            "id": target_bay["id"],
+            "polygon": target_bay["polygon"],
+            "center_x": target_bay["center"][0],
+            "center_y": target_bay["center"][1],
+            "axis_span_m": target_bay["lx"] if target_bay["default_rib_direction_deg"] == 0.0 else target_bay["ly"],
+            "rib_direction_deg": target_bay["default_rib_direction_deg"],
+            "bay_type": target_bay["bay_type"],
+            "is_cantilever": False,
+        }
+        slabs.append(target_slab)
+
+    if bay_type == "4_beam":
+        new_deg = 90.0 if float(target_slab.get("rib_direction_deg", 0.0)) == 0.0 else 0.0
+        target_slab["rib_direction_deg"] = new_deg
+        target_slab["axis_span_m"] = target_bay["ly"] if new_deg == 90.0 else target_bay["lx"]
+        return True, f"Flipped 4-Beam Slab {target_slab['id']} ribs to {new_deg:.0f}°.", slabs
+
+    if bay_type == "3_beam":
+        currently_cant = bool(target_slab.get("is_cantilever", False))
+        if not currently_cant:
+            free_side = target_bay.get("free_side", "EAST")
+            carrying_side = target_bay.get("carrying_side", "WEST")
+            cant_rib_deg = 0.0 if free_side in ("EAST", "WEST") else 90.0
+
+            minx, miny, maxx, maxy = target_bay["bounds"]
+            if carrying_side == "WEST":
+                probe_pt = Point(minx - 0.5, (miny + maxy) / 2.0)
+            elif carrying_side == "EAST":
+                probe_pt = Point(maxx + 0.5, (miny + maxy) / 2.0)
+            elif carrying_side == "SOUTH":
+                probe_pt = Point((minx + maxx) / 2.0, miny - 0.5)
+            else:  # NORTH
+                probe_pt = Point((minx + maxx) / 2.0, maxy + 0.5)
+
+            back_bay = None
+            for b in bays:
+                if b["id"] != target_bay["id"]:
+                    bpoly = Polygon(b["polygon"])
+                    if bpoly.contains(probe_pt) or bpoly.exterior.distance(probe_pt) < 0.10:
+                        back_bay = b
+                        break
+
+            if not back_bay:
+                return False, (
+                    f"Cantilever Equilibrium Violation: Cannot flip to cantilever slab. "
+                    f"No adjacent back-span bay exists behind carrying beam on {carrying_side} side."
+                ), slabs
+
+            for op in openings:
+                op_poly = Polygon(op.get("polygon", [])) if op.get("polygon") else None
+                if op_poly and (op_poly.contains(probe_pt) or op_poly.exterior.distance(probe_pt) < 0.10):
+                    return False, (
+                        f"Cantilever Equilibrium Violation: Cannot flip to cantilever slab. "
+                        f"The adjacent back-span area behind carrying beam ({carrying_side}) is a Void Opening [00-XD-OPEN]."
+                    ), slabs
+
+            back_slab = None
+            for s in slabs:
+                spoly = Polygon(s.get("polygon", [])) if s.get("polygon") else None
+                if spoly and (spoly.contains(probe_pt) or spoly.exterior.distance(probe_pt) < 0.10):
+                    back_slab = s
+                    break
+
+            if not back_slab:
+                back_slab = {
+                    "id": back_bay["id"],
+                    "polygon": back_bay["polygon"],
+                    "center_x": back_bay["center"][0],
+                    "center_y": back_bay["center"][1],
+                    "axis_span_m": back_bay["lx"] if cant_rib_deg == 0.0 else back_bay["ly"],
+                    "rib_direction_deg": cant_rib_deg,
+                    "bay_type": back_bay["bay_type"],
+                    "is_cantilever": False,
+                }
+                slabs.append(back_slab)
+
+            target_slab["rib_direction_deg"] = cant_rib_deg
+            target_slab["is_cantilever"] = True
+            target_slab["cantilever_direction"] = free_side
+            target_slab["carrying_beam_id"] = target_bay.get("carrying_beam_id")
+
+            back_slab["rib_direction_deg"] = cant_rib_deg
+            back_slab["connected_to_cantilever"] = True
+            back_slab["supports_cantilever_for"] = target_slab["id"]
+
+            return True, (
+                f"Flipped to Cantilever Slab {target_slab['id']} pointing {free_side}. "
+                f"Back-Span Slab {back_slab['id']} ribs automatically synchronized to {cant_rib_deg:.0f}° for structural equilibrium."
+            ), slabs
+        else:
+            def_deg = target_bay["default_rib_direction_deg"]
+            target_slab["rib_direction_deg"] = def_deg
+            target_slab["is_cantilever"] = False
+            target_slab["cantilever_direction"] = None
+            target_slab["carrying_beam_id"] = None
+
+            for s in slabs:
+                if s.get("supports_cantilever_for") == target_slab["id"]:
+                    s["supports_cantilever_for"] = None
+                    s["connected_to_cantilever"] = False
+
+            return True, f"Restored 3-Beam Slab {target_slab['id']} to supported ribs at {def_deg:.0f}°.", slabs
+
+    curr = float(target_slab.get("rib_direction_deg", 0.0))
+    target_slab["rib_direction_deg"] = 90.0 if curr == 0.0 else 0.0
+    return True, f"Toggled Slab {target_slab['id']} ribs to {target_slab['rib_direction_deg']:.0f}°.", slabs
+
+
+def toggle_bay_slab_or_opening(
+    click_pt: Tuple[float, float],
+    slab_edge_polygon: List[List[float]],
+    beams: List[Dict[str, Any]],
+    slabs: List[Dict[str, Any]],
+    openings: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[bool, str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Step 4C: Pick: Toggle Slab <-> Opening [00-XD-OPEN].
+    - Converts solid slab to void opening with diagonal X, OR vice-versa.
+    - Cantilever Protection Rule: Strictly prohibits converting any slab that acts
+      as a back-span for an active cantilever slab into an opening.
+    """
+    openings = list(openings or [])
+    slabs = list(slabs or [])
+    bays = detect_bays_and_determine_ribs(slab_edge_polygon, beams, slabs, openings)
+
+    target_bay = None
+    pt = Point(click_pt[0], click_pt[1])
+    for b in bays:
+        poly = Polygon(b["polygon"])
+        if poly.contains(pt) or poly.exterior.distance(pt) < 0.05:
+            target_bay = b
+            break
+
+    if not target_bay:
+        return False, f"Click at ({click_pt[0]:.2f}, {click_pt[1]:.2f}) is outside any closed bay.", slabs, openings
+
+    is_op = False
+    op_match_idx = None
+    for idx, op in enumerate(openings):
+        op_poly = Polygon(op.get("polygon", [])) if op.get("polygon") else None
+        if op_poly and (op_poly.contains(pt) or op_poly.exterior.distance(pt) < 0.05):
+            is_op = True
+            op_match_idx = idx
+            break
+
+    if is_op and op_match_idx is not None:
+        openings.pop(op_match_idx)
+        new_slab = {
+            "id": target_bay["id"],
+            "polygon": target_bay["polygon"],
+            "center_x": target_bay["center"][0],
+            "center_y": target_bay["center"][1],
+            "axis_span_m": target_bay["lx"] if target_bay["default_rib_direction_deg"] == 0.0 else target_bay["ly"],
+            "rib_direction_deg": target_bay["default_rib_direction_deg"],
+            "bay_type": target_bay["bay_type"],
+            "is_cantilever": False,
+        }
+        slabs.append(new_slab)
+        return True, f"Converted Void Opening to Solid Slab {new_slab['id']} [00-XD-SLAB].", slabs, openings
+
+    # Protection check: Does this slab act as back-span for any cantilever?
+    for s in slabs:
+        spoly = Polygon(s.get("polygon", [])) if s.get("polygon") else None
+        if spoly and (spoly.contains(pt) or spoly.exterior.distance(pt) < 0.05):
+            if s.get("supports_cantilever_for"):
+                cant_id = s.get("supports_cantilever_for")
+                return False, (
+                    f"Structural Equilibrium Restriction: Cannot convert Slab {s['id']} to an Opening. "
+                    f"This slab serves as the balancing back-span for Cantilever Slab {cant_id}."
+                ), slabs, openings
+
+    for b in bays:
+        if b.get("is_cantilever") and b.get("supports_cantilever_for") == target_bay["id"]:
+            return False, (
+                f"Structural Equilibrium Restriction: Cannot convert bay to an Opening. "
+                f"It is required as the balancing back-span for Cantilever Slab {b['id']}."
+            ), slabs, openings
+
+    slabs = [
+        s for s in slabs
+        if not (Polygon(s.get("polygon", [])).contains(pt) if s.get("polygon") else False)
+    ]
+
+    openings.append({
+        "id": f"OPEN_{target_bay['id']}",
+        "polygon": target_bay["polygon"],
+        "center_x": target_bay["center"][0],
+        "center_y": target_bay["center"][1],
+    })
+
+    return True, f"Converted bay to Void Opening {target_bay['id']} [00-XD-OPEN].", slabs, openings
+
+
+def move_column_and_update_connected_beams(
+    col_id: str,
+    new_x: float,
+    new_y: float,
+    columns: List[Dict[str, Any]],
+    beams: List[Dict[str, Any]],
+    slab_edge_polygon: List[List[float]],
+    rule: str = "clamp",
+) -> Tuple[bool, str, List[Dict[str, Any]], List[Dict[str, Any]], List[List[float]]]:
+    """
+    Moves column col_id to (new_x, new_y) applying slab boundary rule (clamp or expand).
+    Automatically updates start/end coordinates and spans for all beams connected to this column.
+    """
+    target_col = None
+    for c in columns:
+        if c.get("id") == col_id:
+            target_col = c
+            break
+
+    if not target_col:
+        return False, f"Column {col_id} not found.", columns, beams, slab_edge_polygon
+
+    b_m = float(target_col.get("b_m", 0.25))
+    h_m = float(target_col.get("h_m", 0.50))
+    old_x, old_y = float(target_col["x"]), float(target_col["y"])
+
+    final_x, final_y, updated_poly, _ = clamp_or_expand_column_boundary(
+        new_x, new_y, b_m, h_m, slab_edge_polygon, rule=rule
+    )
+
+    target_col["x"] = final_x
+    target_col["y"] = final_y
+
+    col_map = {c["id"]: (float(c["x"]), float(c["y"])) for c in columns}
+    updated_beams_count = 0
+
+    for bm in beams:
+        bm_modified = False
+        sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+        ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+
+        if ((sx - old_x) ** 2 + (sy - old_y) ** 2) ** 0.5 <= max(b_m, h_m):
+            bm["start_x"] = final_x
+            bm["start_y"] = final_y
+            bm_modified = True
+
+        if ((ex - old_x) ** 2 + (ey - old_y) ** 2) ** 0.5 <= max(b_m, h_m):
+            bm["end_x"] = final_x
+            bm["end_y"] = final_y
+            bm_modified = True
+
+        for sup in bm.get("supports", []):
+            if sup.get("target_id") == col_id:
+                sup["x"] = final_x
+                sup["y"] = final_y
+                bm_modified = True
+
+        if bm_modified:
+            updated_beams_count += 1
+            pts = []
+            for sup in bm.get("supports", []):
+                tid = sup.get("target_id")
+                if tid in col_map:
+                    pts.append(col_map[tid])
+            if len(pts) >= 2:
+                bm["spans"] = [
+                    round(((pts[i + 1][0] - pts[i][0]) ** 2 + (pts[i + 1][1] - pts[i][1]) ** 2) ** 0.5, 2)
+                    for i in range(len(pts) - 1)
+                ]
+            else:
+                total_len = ((float(bm["end_x"]) - float(bm["start_x"])) ** 2 + (float(bm["end_y"]) - float(bm["start_y"])) ** 2) ** 0.5
+                bm["spans"] = [round(total_len, 2)]
+
+    return (
+        True,
+        f"Moved Column {col_id} to ({final_x:.2f}, {final_y:.2f}) m. Updated {updated_beams_count} connected beam(s).",
+        columns,
+        beams,
+        updated_poly,
+    )
+
+
+def move_beam_and_update(
+    beam_id: str,
+    dx: float,
+    dy: float,
+    beams: List[Dict[str, Any]],
+    slab_edge_polygon: List[List[float]],
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """
+    Moves beam beam_id by (dx, dy) while enforcing that it stays inside slab_edge_polygon.
+    """
+    target_beam = None
+    for b in beams:
+        if b.get("id") == beam_id:
+            target_beam = b
+            break
+
+    if not target_beam:
+        return False, f"Beam {beam_id} not found.", beams
+
+    new_sx = float(target_beam["start_x"]) + dx
+    new_sy = float(target_beam["start_y"]) + dy
+    new_ex = float(target_beam["end_x"]) + dx
+    new_ey = float(target_beam["end_y"]) + dy
+
+    if slab_edge_polygon and len(slab_edge_polygon) >= 3 and Polygon is not None:
+        poly = Polygon(slab_edge_polygon)
+        if poly.distance(Point(new_sx, new_sy)) > 0.10 or poly.distance(Point(new_ex, new_ey)) > 0.10:
+            return False, f"Cannot move Beam {beam_id}: Move would place beam outside outer slab boundary [00-XD-EDGE].", beams
+
+    target_beam["start_x"] = round(new_sx, 3)
+    target_beam["start_y"] = round(new_sy, 3)
+    target_beam["end_x"] = round(new_ex, 3)
+    target_beam["end_y"] = round(new_ey, 3)
+
+    for sup in target_beam.get("supports", []):
+        if "x" in sup and "y" in sup:
+            sup["x"] = round(sup["x"] + dx, 3)
+            sup["y"] = round(sup["y"] + dy, 3)
+
+    return True, f"Moved Beam {beam_id} by ({dx:.2f}, {dy:.2f}) m.", beams
