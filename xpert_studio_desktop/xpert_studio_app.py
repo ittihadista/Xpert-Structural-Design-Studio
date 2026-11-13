@@ -21,7 +21,7 @@ import sys
 from typing import Dict, Any, List, Optional
 
 from PyQt6.QtCore import Qt, QPointF, QRectF
-from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QBrush, QPolygonF
+from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen, QBrush, QPolygonF, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -326,6 +326,10 @@ class XpertStudioMainWindow(QMainWindow):
         self.resize(1460, 900)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
 
+        icon_path = os.path.join(os.path.dirname(__file__), "app_icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         self.master_project: Optional[Dict[str, Any]] = None
         self.current_story_index: int = 0
         self.current_story_data: Dict[str, Any] = {}
@@ -350,6 +354,13 @@ class XpertStudioMainWindow(QMainWindow):
         act_save.setShortcut("Ctrl+S")
         act_save.triggered.connect(self.save_and_sync_current_story)
         m_file.addAction(act_save)
+
+        m_file.addSeparator()
+        act_exit = QAction("E&xit", self)
+        act_exit.setShortcut("Ctrl+Q")
+        act_exit.setStatusTip("Close and exit Xpert Structural Design Studio")
+        act_exit.triggered.connect(self.close)
+        m_file.addAction(act_exit)
 
         # Draw Menu
         m_draw = mbar.addMenu("&Draw")
@@ -720,7 +731,16 @@ class XpertStudioMainWindow(QMainWindow):
 def main() -> None:
     if "--check" in sys.argv:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("xpert.structural.design.studio.v1")
+        except Exception:
+            pass
     app = QApplication(sys.argv)
+    icon_path = os.path.join(os.path.dirname(__file__), "app_icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     win = XpertStudioMainWindow()
     if "--check" in sys.argv:
         win.run_analyze_all_beams()
