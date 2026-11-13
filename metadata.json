@@ -1,0 +1,6 @@
+{
+  "name": "Xpert Designer Structural Suite",
+  "description": "Integrated CAD-to-Design structural engineering platform for hollow-block (Hordi) slabs, continuous beams, columns, foundations, and AutoCAD plugin automation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
