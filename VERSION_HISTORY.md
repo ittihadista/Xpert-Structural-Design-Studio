@@ -4,7 +4,43 @@ This file tracks all releases of **Xpert Structural Design Studio** (`v1.0.0-stu
 
 ---
 
-## Current Release: `v1.0.0-studio-foundation` (2026-11-13)
+## Current Release: `v1.3.0-smart-cad-intelligence` (2026-11-14)
+**Release Title:** Smart CAD Intelligence, Architectural DXF Underlay Block, Layer Visibility & Freeze Control, Zero Duplicates & Automated Multi-Span / Slab Splitting
+
+### Key Features & Advancements in `v1.3.0-smart-cad-intelligence`:
+1. **Architectural DXF Underlay Block (`import_arch_dxf_underlay`):**
+   - High-fidelity extraction of `LINE`, `LWPOLYLINE`, `POLYLINE`, and `CIRCLE` entities from architectural `.DXF` files into a dedicated `arch_underlay_block` per story.
+   - Top toolbar **`Import Arch .DXF`** button for the active story.
+   - Rendered in CAD Canvas as a locked reference block in quiet slate gray (`#64748B`), unaffected by deletion tools, with magnetic snap integration (OSNAP).
+
+2. **Layer Visibility & Freeze Control Bar:**
+   - Interactive checkbox bar above CAD canvas controlling: `Arch DXF Block`, `Columns`, `Beams`, `Slabs & Ribs`, and `Labels`.
+   - Freezing `Slabs & Ribs` turns off slab rendering and completely freezes slab snapping/clicking for obstruction-free beam drawing.
+
+3. **Updated Default Hidden Beam Width (`0.40 m`):**
+   - Hidden beams default width reduced from `0.60 m` to `0.40 m` (`40 cm`), while drop beams remain standard `0.20 m` (`20 cm`).
+
+4. **Strict Tool Isolation:**
+   - 1-click rib direction toggling is strictly isolated to `SELECT` and `PICK_FLIP_RIB` tools when the `Slabs & Ribs` layer is active, preventing accidental rib flips when placing columns or drawing beams.
+
+5. **Zero Duplicates & Zero Sliver Bays (`xpert_structural_engine.py`):**
+   - `check_duplicate_column`: Blocks column overlapping or duplication.
+   - `check_duplicate_beam`: Rejects duplicate overlapping beams on the same axis.
+   - Automatic continuous multi-span beam subdivision: 2-click beam placement detects all intermediate column and beam supports, computing consecutive spans automatically.
+   - `detect_story_grid_bays`: Merges perimeter beams within `max(0.45, width_m + 0.15)` with the outer boundary and discards sliver bays where `lx < 0.85 m` or `ly < 0.85 m`.
+
+6. **Smart Automatic Slab Splitting on Cutting Beam (`reconcile_and_split_slabs_after_beam_change`):**
+   - When a beam cuts through an existing slab, the engine automatically splits the parent slab into independent sub-slabs supported by the new beam and recalculates ACI 318 deflection thicknesses immediately.
+
+7. **Column Containment, Cursors & Productivity Actions:**
+   - 100% column cross-section containment inside the building boundary (including `Demo Layout`).
+   - Context-sensitive cursors: `ArrowCursor` in `SELECT`, `OpenHandCursor`/`ClosedHandCursor` in `PAN`, `CrossCursor` in drawing tools.
+   - **`Rotate Col 90° (R)`**: Rotates selected column by 90 degrees with boundary re-clamping.
+   - **`Auto-Fill All Slabs`**: 1-click automatic furnishing of all detected bays with code-default slabs.
+
+---
+
+## Previous Release: `v1.0.0-studio-foundation` (2026-11-13)
 **Release Title:** Standalone All-in-One Structural CAD, Analysis & Design Studio (ETABS / SAFE / Robot Paradigm with Built-in AutoCAD-Style 2D Modeler)
 
 ### Major Architectural Pivot & Achievements in `v1.0.0-studio-foundation`:
