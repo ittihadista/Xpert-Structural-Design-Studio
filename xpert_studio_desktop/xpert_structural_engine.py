@@ -1398,3 +1398,190 @@ def move_beam_and_update(
             sup["y"] = round(sup["y"] + dy, 3)
 
     return True, f"Moved Beam {beam_id} by ({dx:.2f}, {dy:.2f}) m.", beams
+
+
+def clamp_beam_inside_boundary(
+    beam: Dict[str, Any],
+    slab_edge_polygon: List[List[float]],
+    tolerance_m: float = 0.005,
+) -> Tuple[Dict[str, Any], bool]:
+    """
+    Checks if any lateral edge of a full-width beam rectangle (width_m)
+    protrudes outside the slab_edge_polygon.
+    If protruding, automatically shifts the beam centerline inward perpendicular
+    to the beam axis by the protrusion distance so the outer face is flush with
+    the building boundary (analogous to column clamping).
+    Returns (updated_beam_dict, was_modified).
+    """
+    if not slab_edge_polygon or len(slab_edge_polygon) < 3 or Polygon is None:
+        return beam, False
+
+    edge_poly = Polygon(slab_edge_polygon)
+    if not edge_poly.is_valid:
+        return beam, False
+
+    updated_beam = dict(beam)
+    sx = float(updated_beam.get("start_x", 0.0))
+    sy = float(updated_beam.get("start_y", 0.0))
+    ex = float(updated_beam.get("end_x", 5.0))
+    ey = float(updated_beam.get("end_y", 0.0))
+
+    b_kind = updated_beam.get("beam_kind", "hidden")
+    def_w = 0.60 if b_kind == "hidden" else 0.20
+    width_m = float(updated_beam.get("width_m", def_w))
+    half_w = width_m / 2.0
+
+    dx = ex - sx
+    dy = ey - sy
+    length = (dx * dx + dy * dy) ** 0.5
+    if length < 0.05:
+        return beam, False
+
+    ux = dx / length
+    uy = dy / length
+    # Normal vector perpendicular to beam axis
+    nx = -uy
+    ny = ux
+
+    # Sample points along both lateral edges: Side 1 (+n * half_w) and Side 2 (-n * half_w)
+    sample_ts = [0.0, 0.25, 0.5, 0.75, 1.0]
+    side1_protrusion = 0.0
+    side2_protrusion = 0.0
+
+    for t in sample_ts:
+        mx = sx + ux * (length * t)
+        my = sy + uy * (length * t)
+
+        p1 = Point(mx + nx * half_w, my + ny * half_w)
+        if not edge_poly.contains(p1) and edge_poly.exterior.distance(p1) > tolerance_m:
+            dist = edge_poly.distance(p1)
+            if dist > side1_protrusion:
+                side1_protrusion = dist
+
+        p2 = Point(mx - nx * half_w, my - ny * half_w)
+        if not edge_poly.contains(p2) and edge_poly.exterior.distance(p2) > tolerance_m:
+            dist = edge_poly.distance(p2)
+            if dist > side2_protrusion:
+                side2_protrusion = dist
+
+    shift_x = 0.0
+    shift_y = 0.0
+    was_modified = False
+
+    if side1_protrusion > tolerance_m and side2_protrusion <= tolerance_m:
+        # Shift inward in direction -n
+        shift_amount = min(half_w, side1_protrusion)
+        shift_x = -nx * shift_amount
+        shift_y = -ny * shift_amount
+        was_modified = True
+    elif side2_protrusion > tolerance_m and side1_protrusion <= tolerance_m:
+        # Shift inward in direction +n
+        shift_amount = min(half_w, side2_protrusion)
+        shift_x = nx * shift_amount
+        shift_y = ny * shift_amount
+        was_modified = True
+
+    if was_modified:
+        updated_beam["start_x"] = round(sx + shift_x, 3)
+        updated_beam["start_y"] = round(sy + shift_y, 3)
+        updated_beam["end_x"] = round(ex + shift_x, 3)
+        updated_beam["end_y"] = round(ey + shift_y, 3)
+        if "supports" in updated_beam:
+            for sup in updated_beam["supports"]:
+                if "x" in sup and "y" in sup:
+                    sup["x"] = round(sup["x"] + shift_x, 3)
+                    sup["y"] = round(sup["y"] + shift_y, 3)
+
+    return updated_beam, was_modified
+
+
+def delete_selected_element_from_story(
+    story_data: Dict[str, Any],
+    element: Dict[str, Any],
+) -> Tuple[bool, str]:
+    """
+    Deletes a selected element from the story data:
+    - "column": removes column, unlinks and recalculates spans of connected beams.
+    - "beam": removes beam from beams list.
+    - "slab": checks cantilever equilibrium: if an adjacent cantilever relies on this
+      slab for negative moment equilibrium, deletion is blocked!
+    - "opening": removes opening from openings list.
+    - "edge": clears slab_edge_polygon.
+    Returns (ok, message).
+    """
+    if not element or "type" not in element:
+        return False, "No element selected for deletion."
+
+    elem_type = str(element.get("type", "")).lower()
+    elem_id = str(element.get("id", ""))
+
+    if elem_type == "column":
+        cols = story_data.get("columns", [])
+        matched = [c for c in cols if str(c.get("id")) == elem_id]
+        if not matched:
+            return False, f"Column {elem_id} not found."
+        story_data["columns"] = [c for c in cols if str(c.get("id")) != elem_id]
+
+        # Update connected beams
+        for bm in story_data.get("beams", []):
+            old_sups = bm.get("supports", [])
+            new_sups = [s for s in old_sups if str(s.get("target_id")) != elem_id]
+            if len(new_sups) != len(old_sups):
+                for s_i, sup in enumerate(new_sups):
+                    sup["support_index"] = s_i + 1
+                bm["supports"] = new_sups
+                if len(new_sups) >= 2:
+                    new_spans = []
+                    for s_i in range(len(new_sups) - 1):
+                        p1 = (new_sups[s_i]["x"], new_sups[s_i]["y"])
+                        p2 = (new_sups[s_i + 1]["x"], new_sups[s_i + 1]["y"])
+                        new_spans.append(round(((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)**0.5, 2))
+                    bm["spans"] = new_spans
+                else:
+                    bm_len = ((bm["end_x"] - bm["start_x"])**2 + (bm["end_y"] - bm["start_y"])**2)**0.5
+                    bm["spans"] = [round(bm_len, 2)]
+
+        return True, f"Deleted Column {elem_id} and updated connected beams."
+
+    elif elem_type == "beam":
+        bms = story_data.get("beams", [])
+        matched = [b for b in bms if str(b.get("id")) == elem_id]
+        if not matched:
+            return False, f"Beam {elem_id} not found."
+        story_data["beams"] = [b for b in bms if str(b.get("id")) != elem_id]
+        return True, f"Deleted Beam {elem_id}."
+
+    elif elem_type == "slab":
+        slabs = story_data.get("slabs", [])
+        target_slab = None
+        for s in slabs:
+            if str(s.get("id")) == elem_id:
+                target_slab = s
+                break
+        if target_slab:
+            if target_slab.get("supports_cantilever_for"):
+                return False, (
+                    f"Cannot delete Slab {elem_id}: It acts as the back-span moment anchor "
+                    f"for Cantilever Slab {target_slab['supports_cantilever_for']}."
+                )
+
+        story_data["slabs"] = [s for s in slabs if str(s.get("id")) != elem_id]
+        return True, f"Deleted Slab {elem_id}."
+
+    elif elem_type == "opening":
+        ops = story_data.get("openings", [])
+        if "id" in element and element["id"]:
+            story_data["openings"] = [op for op in ops if str(op.get("id")) != elem_id]
+        elif "point" in element:
+            px, py = element["point"]
+            story_data["openings"] = [
+                op for op in ops
+                if not (Polygon(op.get("polygon", [])).contains(Point(px, py)) if op.get("polygon") else False)
+            ]
+        return True, "Deleted Opening [00-XD-OPEN]."
+
+    elif elem_type in ("edge", "boundary"):
+        story_data["slab_edge_polygon"] = []
+        return True, "Deleted Outer Slab Boundary [00-XD-EDGE]."
+
+    return False, f"Unknown element type: {elem_type}."

@@ -315,14 +315,21 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
         sync_story_to_dxf(story_data, dxf_path, role="STORY_EXTRACTION")
 
-    # Root Master & Output JSON files
-    master_file = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
+    # Root Master & Output JSON & .xpert files
+    master_file_xpert = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xpert")
+    master_file_json = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
+    master_payload["master_file_xpert"] = master_file_xpert
+    master_payload["master_file_json"] = master_file_json
+
     takedown_file = os.path.join(project_dir, f"{clean_name}-Columns_Load_Takedown.json")
     foundations_file = os.path.join(project_dir, f"{clean_name}-Foundations_Design.json")
     boq_file = os.path.join(project_dir, f"{clean_name}-BOQ_Quantities.json")
     foundations_dxf = os.path.join(cad_dir, f"{clean_name}-Foundations_And_Axes.dxf")
 
-    with open(master_file, "w", encoding="utf-8") as f:
+    with open(master_file_xpert, "w", encoding="utf-8") as f:
+        json.dump(master_payload, f, indent=2)
+
+    with open(master_file_json, "w", encoding="utf-8") as f:
         json.dump(master_payload, f, indent=2)
 
     with open(takedown_file, "w", encoding="utf-8") as f:
@@ -344,17 +351,84 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     return master_payload
 
 
+def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
+    """
+    Loads an existing Xpert Structural Design Studio project from its master file
+    (<ProjectName>-00_Project_Master.xpert or .json).
+    Automatically resolves and links paths for Stories_Data and CAD_Drawings.
+    """
+    resolved_path = os.path.abspath(master_path)
+    if os.path.isdir(resolved_path):
+        # Look for *.xpert or *.json master file in the directory
+        cands = [
+            f for f in os.listdir(resolved_path)
+            if f.endswith(("-00_Project_Master.xpert", "-00_Project_Master.json"))
+        ]
+        if not cands:
+            raise FileNotFoundError(f"No master project file (*-00_Project_Master.xpert) found in directory: {resolved_path}")
+        # Prefer .xpert
+        cands.sort(key=lambda x: (not x.endswith(".xpert"), x))
+        resolved_path = os.path.join(resolved_path, cands[0])
+
+    if not os.path.isfile(resolved_path):
+        raise FileNotFoundError(f"Master project file does not exist: {resolved_path}")
+
+    with open(resolved_path, "r", encoding="utf-8") as f:
+        master_payload: Dict[str, Any] = json.load(f)
+
+    project_dir = os.path.dirname(resolved_path)
+    clean_name = master_payload.get("project_name", "")
+    master_payload["project_dir"] = project_dir
+
+    master_payload["master_file_xpert"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xpert")
+    master_payload["master_file_json"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
+
+    cad_dir = os.path.join(project_dir, "CAD_Drawings")
+    stories_dir = os.path.join(project_dir, "Stories_Data")
+
+    # Link and verify each story path
+    for sm in master_payload.get("stories", []):
+        sid = sm.get("story_id", "")
+        expected_json = os.path.join(stories_dir, f"{clean_name}-{sid}.json")
+        expected_dxf = os.path.join(cad_dir, f"{clean_name}-{sid}.dxf")
+
+        if os.path.isfile(expected_json):
+            sm["json_file"] = expected_json
+        elif not os.path.isfile(sm.get("json_file", "")):
+            # Check alternative locations
+            for cand in [
+                os.path.join(project_dir, f"{clean_name}-{sid}.json"),
+                os.path.join(stories_dir, f"{sid}.json"),
+            ]:
+                if os.path.isfile(cand):
+                    sm["json_file"] = cand
+                    break
+
+        if os.path.isfile(expected_dxf):
+            sm["dxf_file"] = expected_dxf
+        elif not os.path.isfile(sm.get("dxf_file", "")):
+            for cand in [
+                os.path.join(project_dir, f"{clean_name}-{sid}.dxf"),
+                os.path.join(cad_dir, f"{sid}.dxf"),
+            ]:
+                if os.path.isfile(cand):
+                    sm["dxf_file"] = cand
+                    break
+
+    return master_payload
+
+
 def compute_smart_beam_tag_position(
     beam: Dict[str, Any],
     columns: List[Dict[str, Any]],
     placed_positions: List[Tuple[float, float]],
 ) -> Tuple[float, float, float]:
     """
-    Computes a non-overlapping label position (x, y, rotation_deg) for a beam B#:
-    - Places the label at the midpoint of the FIRST CLEAR SPAN between two supports
-      (strictly avoiding intermediate columns!).
+    Computes a non-overlapping label position (x, y, rotation_deg) for beam tag B#:
+    - Placed near the midpoint of the beam (length * 0.5).
+    - Offset above the upper face of the beam rectangle: offset = width_m / 2.0 + 0.12 m.
+    - Shifts slightly along the beam axis if an intermediate column is present at the center.
     - Rotates 0 deg for horizontal beams, 90 deg for vertical beams.
-    - Offsets +0.24m perpendicular to the beam axis.
     """
     sx = float(beam.get("start_x", 0.0))
     sy = float(beam.get("start_y", 0.0))
@@ -366,38 +440,41 @@ def compute_smart_beam_tag_position(
     length = max(0.01, (dx * dx + dy * dy) ** 0.5)
     ux = dx / length
     uy = dy / length
-    # Perpendicular unit vector (above horizontal beam, left of vertical beam)
+
+    # Perpendicular unit normal pointing upwards (or leftwards for vertical beams)
     nx = -uy
     ny = ux
+    if ny < 0 or (abs(ny) < 1e-4 and nx < 0):
+        nx = -nx
+        ny = -ny
 
     is_vertical = abs(dy) > abs(dx)
     rot_deg = 90.0 if is_vertical else 0.0
 
-    # Find columns along this beam to locate the first clear span midpoint
-    spans = beam.get("spans", [])
-    if spans and len(spans) >= 1:
-        first_span_len = float(spans[0])
-        # Midpoint of first span is at 0.5 * first_span_len from start support
-        dist_along = min(length * 0.5, max(0.6, first_span_len * 0.5))
-    else:
-        dist_along = length * 0.35
+    b_kind = beam.get("beam_kind", "hidden")
+    default_w = 0.60 if b_kind == "hidden" else 0.20
+    width_m = float(beam.get("width_m", default_w))
+    offset = width_m / 2.0 + 0.12
 
-    cand_x = sx + ux * dist_along + nx * 0.24
-    cand_y = sy + uy * dist_along + ny * 0.24
+    # Midpoint of beam
+    cand_x = sx + ux * (length * 0.5) + nx * offset
+    cand_y = sy + uy * (length * 0.5) + ny * offset
 
     # Ensure it doesn't collide with any column center or already placed tag
-    for shift_try in [0.0, 0.55, -0.55, 1.1, -1.1]:
+    for shift_try in [0.0, 0.40, -0.40, 0.75, -0.75, 1.10, -1.10]:
         tx = cand_x + ux * shift_try
         ty = cand_y + uy * shift_try
         collision = False
         for col in columns:
+            if not col.get("active", True):
+                continue
             cx, cy = float(col.get("x", 0.0)), float(col.get("y", 0.0))
             if ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5 < 0.45:
                 collision = True
                 break
         if not collision:
             for px, py in placed_positions:
-                if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 < 0.45:
+                if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 < 0.35:
                     collision = True
                     break
         if not collision:

@@ -63,6 +63,7 @@ from PyQt6.QtWidgets import (
 from xpert_project_io import (
     STUDIO_VERSION,
     initialize_studio_project,
+    load_studio_project_from_master_file,
     propagate_ground_columns_to_all_stories,
     sync_story_to_dxf,
     validate_project_name,
@@ -72,6 +73,7 @@ from xpert_structural_engine import (
     analyze_all_story_beams_and_columns,
     evaluate_story_thickness_and_optimization,
     clamp_or_expand_column_boundary,
+    clamp_beam_inside_boundary,
     validate_beam_cantilevers_and_boundary,
     detect_bays_and_determine_ribs,
     pick_area_slab,
@@ -79,6 +81,7 @@ from xpert_structural_engine import (
     toggle_bay_slab_or_opening,
     move_column_and_update_connected_beams,
     move_beam_and_update,
+    delete_selected_element_from_story,
 )
 
 
@@ -86,6 +89,7 @@ class NewProjectSetupDialog(QDialog):
     """
     Modal Project Definition Dialog (like ETABS / SAFE / Robot).
     Closes automatically on OK after initializing Stractural-<ProjectName> on disk.
+    Also provides a direct shortcut to open an existing .xpert master project.
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -93,11 +97,28 @@ class NewProjectSetupDialog(QDialog):
         self.setWindowTitle("New Structural Project — Xpert Structural Design Studio")
         self.setMinimumWidth(680)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.selected_existing_master_path: Optional[str] = None
         self._build_ui()
 
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
         root_layout.setSpacing(12)
+
+        # Top Bar: Open Existing Project (.xpert)
+        top_open_box = QHBoxLayout()
+        btn_open_exist = QPushButton("📂  Open Existing Project (.xpert / .json)...")
+        btn_open_exist.setStyleSheet(
+            "background-color: #0284C7; color: white; font-weight: bold; padding: 7px 16px; font-size: 13px; border-radius: 4px;"
+        )
+        btn_open_exist.clicked.connect(self._open_existing_project)
+        top_open_box.addWidget(btn_open_exist)
+        top_open_box.addStretch()
+        root_layout.addLayout(top_open_box)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        root_layout.addWidget(sep)
 
         # 1. Project Identity
         grp_id = QGroupBox("1. Project Identity && Workspace Folder")
@@ -224,6 +245,17 @@ class NewProjectSetupDialog(QDialog):
         if folder:
             self.ed_folder.setText(folder)
 
+    def _open_existing_project(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Existing Master Project",
+            self.ed_folder.text().strip() or os.path.abspath("./XpertStudio_Projects"),
+            "Xpert Studio Master Project (*-00_Project_Master.xpert *-00_Project_Master.json *.xpert *.json);;All Files (*.*)",
+        )
+        if file_path and os.path.isfile(file_path):
+            self.selected_existing_master_path = file_path
+            self.accept()
+
     def _on_accept(self) -> None:
         ok, _, _, err = validate_project_name(self.ed_name.text())
         if not ok:
@@ -286,6 +318,10 @@ class StructuralCadCanvas2D(QGraphicsView):
         self.current_snap: Optional[Dict[str, Any]] = None
         self.move_element: Optional[Dict[str, Any]] = None
 
+        self.polyline_pts: List[Tuple[float, float]] = []
+        self.selected_element: Optional[Dict[str, Any]] = None
+        self.cached_bay_badges: List[Dict[str, Any]] = []
+
         self.snap_marker_item = None
         self.rubber_band_item = None
 
@@ -317,9 +353,51 @@ class StructuralCadCanvas2D(QGraphicsView):
     def cancel_current_operation(self) -> None:
         self.draw_start_pt = None
         self.move_element = None
+        self.polyline_pts = []
+        self.selected_element = None
         self.hide_rubber_band()
         self.hide_snap_marker()
-        self.studio.statusBar().showMessage("Current operation cancelled. Crosshair active.")
+        self.studio.refresh_story_ui()
+        self.studio.statusBar().showMessage("Operation cancelled / Selection cleared.")
+
+    def delete_selected(self) -> None:
+        if not self.selected_element:
+            self.studio.statusBar().showMessage("No element selected to delete. Click an element first or use Select tool.")
+            return
+        ok, msg = delete_selected_element_from_story(self.studio.current_story_data, self.selected_element)
+        if ok:
+            self.selected_element = None
+            self.studio.save_and_sync_current_story()
+            self.studio.refresh_story_ui()
+            self.studio.statusBar().showMessage(msg)
+        else:
+            QMessageBox.warning(self.studio, "Cannot Delete Element", msg)
+
+    def finish_polyline_boundary(self) -> None:
+        if len(self.polyline_pts) < 3:
+            QMessageBox.warning(self.studio, "Incomplete Boundary", "Boundary polyline requires at least 3 vertices to form a closed polygon.")
+            return
+        pts = list(self.polyline_pts)
+        if Polygon is not None:
+            poly = Polygon(pts)
+            if not poly.is_valid or poly.area < 0.2:
+                QMessageBox.warning(
+                    self.studio,
+                    "Invalid Boundary",
+                    "The drawn polyline does not form a valid, non-self-intersecting closed polygon.",
+                )
+                return
+        new_poly = [[round(p[0], 2), round(p[1], 2)] for p in pts]
+        self.studio.current_story_data["slab_edge_polygon"] = new_poly
+        self.polyline_pts = []
+        self.draw_start_pt = None
+        self.hide_rubber_band()
+        self.studio.save_and_sync_current_story()
+        self.studio.refresh_story_ui()
+        self.studio.statusBar().showMessage(
+            f"Outer Slab Polyline Boundary closed with {len(new_poly)} vertices. Ready for Step 2: Place Columns."
+        )
+        self.studio.activate_cad_tool("ADD_COL")
 
     def find_snap_candidate(self, mx: float, my: float) -> Optional[Dict[str, Any]]:
         if not self.osnap_enabled:
@@ -336,7 +414,7 @@ class StructuralCadCanvas2D(QGraphicsView):
             if not col.get("active", True):
                 continue
             cx, cy = float(col["x"]), float(col["y"])
-            b, h = float(col.get("b_m", 0.25)), float(col.get("h_m", 0.50))
+            b, h = float(col.get("b_m", 0.20)), float(col.get("h_m", 0.40))
             if ((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5 <= tol:
                 return {"type": f"Column Center [{col['id']}]", "x": cx, "y": cy}
             for dx, dy in [(-b/2, -h/2), (b/2, -h/2), (b/2, h/2), (-b/2, h/2)]:
@@ -419,16 +497,8 @@ class StructuralCadCanvas2D(QGraphicsView):
             self.rubber_band_item = None
 
         if self.active_tool == "DRAW_SLAB_EDGE":
-            minx, maxx = min(x1, x2), max(x1, x2)
-            miny, maxy = min(y1, y2), max(y1, y2)
-            poly = QPolygonF([
-                QPointF(minx * s, -miny * s),
-                QPointF(maxx * s, -miny * s),
-                QPointF(maxx * s, -maxy * s),
-                QPointF(minx * s, -maxy * s),
-            ])
             pen = QPen(QColor("#06B6D4"), 2, Qt.PenStyle.DashLine)
-            self.rubber_band_item = self.scene_2d.addPolygon(poly, pen, QBrush(QColor(6, 182, 212, 35)))
+            self.rubber_band_item = self.scene_2d.addLine(x1 * s, -y1 * s, x2 * s, -y2 * s, pen)
             self.rubber_band_item.setZValue(90)
         elif self.active_tool in ("ADD_HID_BEAM", "ADD_DROP_BEAM"):
             color = QColor("#EAB308") if self.active_tool == "ADD_HID_BEAM" else QColor("#10B981")
@@ -454,6 +524,19 @@ class StructuralCadCanvas2D(QGraphicsView):
             event.accept()
             return
 
+        # Right click to close or cancel polyline boundary
+        if event.button() == Qt.MouseButton.RightButton:
+            if self.active_tool == "DRAW_SLAB_EDGE":
+                if len(self.polyline_pts) >= 3:
+                    self.finish_polyline_boundary()
+                else:
+                    self.polyline_pts = []
+                    self.hide_rubber_band()
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage("Polyline boundary drawing cancelled.")
+                event.accept()
+                return
+
         # Left click
         if event.button() == Qt.MouseButton.LeftButton:
             if self.active_tool == "PAN":
@@ -467,46 +550,58 @@ class StructuralCadCanvas2D(QGraphicsView):
             raw_x = sp.x() / self.scale_px
             raw_y = -sp.y() / self.scale_px
 
+            # 1-Click Rib Label Toggle: Check if click is directly on any bay rib label
+            for badge in self.cached_bay_badges:
+                bx, by = badge["center"]
+                if ((raw_x - bx) ** 2 + (raw_y - by) ** 2) ** 0.5 <= 0.85:
+                    edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+                    beams = self.studio.current_story_data.get("beams", [])
+                    slabs = self.studio.current_story_data.get("slabs", [])
+                    openings = self.studio.current_story_data.get("openings", [])
+                    ok, msg, new_slabs = flip_rib_direction_with_equilibrium(
+                        badge["center"], edge, beams, slabs, openings
+                    )
+                    if ok:
+                        self.studio.current_story_data["slabs"] = new_slabs
+                        self.studio.save_and_sync_current_story()
+                        self.studio.refresh_story_ui()
+                        self.studio.statusBar().showMessage(f"1-Click Rib Toggle: {msg}")
+                    else:
+                        QMessageBox.warning(self.studio, "Cantilever Equilibrium Warning", msg)
+                    event.accept()
+                    return
+
             snap = self.find_snap_candidate(raw_x, raw_y)
             cx = snap["x"] if snap else round(raw_x * 10.0) / 10.0
             cy = snap["y"] if snap else round(raw_y * 10.0) / 10.0
 
-            # Step 1: Draw Slab Boundary
+            # Step 1: Draw Multi-Point Polyline Boundary
             if self.active_tool == "DRAW_SLAB_EDGE":
-                if self.draw_start_pt is None:
-                    self.draw_start_pt = (cx, cy)
-                    self.studio.statusBar().showMessage(f"Slab Boundary: Corner 1 at ({cx:.2f}, {cy:.2f}). Click opposite corner.")
-                else:
-                    x1, y1 = self.draw_start_pt
-                    x2, y2 = cx, cy
-                    min_x, max_x = min(x1, x2), max(x1, x2)
-                    min_y, max_y = min(y1, y2), max(y1, y2)
-                    if (max_x - min_x) < 0.5 or (max_y - min_y) < 0.5:
-                        QMessageBox.warning(self.studio, "Invalid Boundary", "Slab boundary dimensions must be at least 0.50 m.")
-                        self.draw_start_pt = None
+                pt = (cx, cy)
+                if self.ortho_enabled and len(self.polyline_pts) >= 1:
+                    pt = self.apply_ortho(cx, cy, self.polyline_pts[-1])
+
+                # Check if clicking near first vertex V1 to close
+                if len(self.polyline_pts) >= 3:
+                    v1 = self.polyline_pts[0]
+                    if ((pt[0] - v1[0]) ** 2 + (pt[1] - v1[1]) ** 2) ** 0.5 <= 0.35:
+                        self.finish_polyline_boundary()
+                        event.accept()
                         return
-                    new_poly = [
-                        [round(min_x, 2), round(min_y, 2)],
-                        [round(max_x, 2), round(min_y, 2)],
-                        [round(max_x, 2), round(max_y, 2)],
-                        [round(min_x, 2), round(max_y, 2)],
-                    ]
-                    self.studio.current_story_data["slab_edge_polygon"] = new_poly
-                    self.draw_start_pt = None
-                    self.hide_rubber_band()
-                    self.studio.save_and_sync_current_story()
-                    self.studio.refresh_story_ui()
-                    self.studio.statusBar().showMessage(
-                        f"Outer Slab Boundary created ({max_x - min_x:.2f}m x {max_y - min_y:.2f}m). Ready for Step 2: Place Columns."
-                    )
-                    self.studio.activate_cad_tool("ADD_COL")
+
+                self.polyline_pts.append(pt)
+                self.studio.refresh_story_ui()
+                self.studio.statusBar().showMessage(
+                    f"Polyline Boundary: Vertex {len(self.polyline_pts)} at ({pt[0]:.2f}, {pt[1]:.2f}). "
+                    f"Click next vertex, click near V1 to close, or press Enter/C / Right-Click."
+                )
+                event.accept()
                 return
 
-            # Step 2: Place Column
+            # Step 2: Place Column (Default 0.20 x 0.40 m with orientation toggle)
             if self.active_tool == "ADD_COL":
                 rule = self.studio.get_column_boundary_rule()
-                b_m = 0.25
-                h_m = 0.50
+                b_m, h_m = self.studio.get_column_dimensions()
                 edge = self.studio.current_story_data.get("slab_edge_polygon", [])
                 final_x, final_y, updated_poly, _ = clamp_or_expand_column_boundary(
                     cx, cy, b_m, h_m, edge, rule=rule
@@ -527,10 +622,13 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self.studio.current_story_data["columns"] = cols
                 self.studio.save_and_sync_current_story()
                 self.studio.refresh_story_ui()
-                self.studio.statusBar().showMessage(f"Placed Column {col_id} at ({final_x:.2f}, {final_y:.2f}) m.")
+                self.studio.statusBar().showMessage(
+                    f"Placed Column {col_id} ({b_m:.2f}x{h_m:.2f}m) at ({final_x:.2f}, {final_y:.2f}) m."
+                )
+                event.accept()
                 return
 
-            # Step 3: Draw Hidden / Drop Beam
+            # Step 3: Draw Hidden / Drop Beam (Full-Width with Inward Boundary Clamping)
             if self.active_tool in ("ADD_HID_BEAM", "ADD_DROP_BEAM"):
                 b_kind = "hidden" if self.active_tool == "ADD_HID_BEAM" else "drop"
                 if self.draw_start_pt is None:
@@ -565,6 +663,9 @@ class StructuralCadCanvas2D(QGraphicsView):
                         "end_y": y2,
                     }
 
+                    # Auto-clamp beam centerline inward if protruding outside building edge
+                    temp_beam, was_clamped = clamp_beam_inside_boundary(temp_beam, edge)
+
                     ok, err_msg = validate_beam_cantilevers_and_boundary(
                         temp_beam, cols, beams, edge, openings=openings
                     )
@@ -574,14 +675,16 @@ class StructuralCadCanvas2D(QGraphicsView):
                         self.hide_rubber_band()
                         return
 
-                    # Detect supporting columns along line
-                    beam_line = LineString([(x1, y1), (x2, y2)])
+                    bx1, by1 = temp_beam["start_x"], temp_beam["start_y"]
+                    bx2, by2 = temp_beam["end_x"], temp_beam["end_y"]
+                    beam_line = LineString([(bx1, by1), (bx2, by2)])
                     sup_list = []
                     for c in cols:
                         if not c.get("active", True):
                             continue
                         c_pt = Point(float(c["x"]), float(c["y"]))
-                        if beam_line.distance(c_pt) <= max(float(c.get("b_m", 0.25)), float(c.get("h_m", 0.50))) / 1.5:
+                        c_reach = max(float(c.get("b_m", 0.20)), float(c.get("h_m", 0.40))) / 1.5 + width_m / 2.0
+                        if beam_line.distance(c_pt) <= c_reach:
                             proj = beam_line.project(c_pt)
                             sup_list.append((proj, c))
                     sup_list.sort(key=lambda s: s[0])
@@ -594,7 +697,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                                 "support_index": s_i + 1,
                                 "kind": "column",
                                 "target_id": c["id"],
-                                "width_m": float(c.get("b_m", 0.25)),
+                                "width_m": float(c.get("b_m", 0.20)),
                                 "x": float(c["x"]),
                                 "y": float(c["y"]),
                             })
@@ -623,7 +726,11 @@ class StructuralCadCanvas2D(QGraphicsView):
                     self.hide_rubber_band()
                     self.studio.save_and_sync_current_story()
                     self.studio.refresh_story_ui()
-                    self.studio.statusBar().showMessage(f"Added Beam {bid} ({b_kind}) with {len(spans)} span(s).")
+                    clamp_msg = " [Auto-Clamped Flush Inside Boundary]" if was_clamped else ""
+                    self.studio.statusBar().showMessage(
+                        f"Added Beam {bid} ({b_kind}) with {len(spans)} span(s){clamp_msg}."
+                    )
+                event.accept()
                 return
 
             # Step 4A: Pick Area: Slab
@@ -641,6 +748,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     self.studio.statusBar().showMessage(msg)
                 else:
                     QMessageBox.warning(self.studio, "Pick Area Failed", msg)
+                event.accept()
                 return
 
             # Step 4B: Pick: Flip Rib Direction
@@ -657,6 +765,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     self.studio.statusBar().showMessage(msg)
                 else:
                     QMessageBox.warning(self.studio, "Cantilever Equilibrium Warning", msg)
+                event.accept()
                 return
 
             # Step 4C: Pick: Toggle Opening
@@ -674,6 +783,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     self.studio.statusBar().showMessage(msg)
                 else:
                     QMessageBox.warning(self.studio, "Opening Protection Warning", msg)
+                event.accept()
                 return
 
             # CAD Move Tool
@@ -691,6 +801,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     if hit_col:
                         self.move_element = {"kind": "column", "id": hit_col["id"], "start_pt": (float(hit_col["x"]), float(hit_col["y"]))}
                         self.studio.statusBar().showMessage(f"Selected Column {hit_col['id']} to move. Click target destination.")
+                        event.accept()
                         return
 
                     hit_beam = None
@@ -702,6 +813,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     if hit_beam:
                         self.move_element = {"kind": "beam", "id": hit_beam["id"], "start_pt": (cx, cy)}
                         self.studio.statusBar().showMessage(f"Selected Beam {hit_beam['id']} to move. Click destination point.")
+                        event.accept()
                         return
 
                     self.studio.statusBar().showMessage("Move tool: Click directly on a Column or Beam to select it first.")
@@ -741,6 +853,95 @@ class StructuralCadCanvas2D(QGraphicsView):
                             QMessageBox.warning(self.studio, "Move Failed", msg)
 
                     self.move_element = None
+                event.accept()
+                return
+
+            # SELECT Tool: Pick and Highlight Any Element (for Deletion or Inspection)
+            if self.active_tool == "SELECT":
+                cols = self.studio.current_story_data.get("columns", [])
+                beams = self.studio.current_story_data.get("beams", [])
+                slabs = self.studio.current_story_data.get("slabs", [])
+                openings = self.studio.current_story_data.get("openings", [])
+                edge = self.studio.current_story_data.get("slab_edge_polygon", [])
+
+                # Check columns
+                hit_col = None
+                for c in cols:
+                    if not c.get("active", True):
+                        continue
+                    cx_col, cy_col = float(c["x"]), float(c["y"])
+                    bw, bh = float(c.get("b_m", 0.20)), float(c.get("h_m", 0.40))
+                    if abs(raw_x - cx_col) <= bw / 2.0 + 0.15 and abs(raw_y - cy_col) <= bh / 2.0 + 0.15:
+                        hit_col = c
+                        break
+                if hit_col:
+                    self.selected_element = {"type": "column", "id": hit_col["id"], "data": hit_col}
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(
+                        f"Selected Column {hit_col['id']} ({hit_col.get('b_m', 0.2):.2f}x{hit_col.get('h_m', 0.4):.2f}m). Press Del to delete."
+                    )
+                    event.accept()
+                    return
+
+                # Check beams
+                hit_beam = None
+                for b in beams:
+                    bl = LineString([(float(b["start_x"]), float(b["start_y"])), (float(b["end_x"]), float(b["end_y"]))])
+                    bw = float(b.get("width_m", 0.3))
+                    if bl.distance(Point(raw_x, raw_y)) <= bw / 2.0 + 0.15:
+                        hit_beam = b
+                        break
+                if hit_beam:
+                    self.selected_element = {"type": "beam", "id": hit_beam["id"], "data": hit_beam}
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(
+                        f"Selected Beam {hit_beam['id']} ({hit_beam.get('beam_kind', 'beam').upper()}). Press Del to delete."
+                    )
+                    event.accept()
+                    return
+
+                # Check openings
+                hit_op = None
+                for op in openings:
+                    op_poly = Polygon(op.get("polygon", [])) if op.get("polygon") else None
+                    if op_poly and op_poly.contains(Point(raw_x, raw_y)):
+                        hit_op = op
+                        break
+                if hit_op:
+                    self.selected_element = {"type": "opening", "id": hit_op.get("id"), "point": (raw_x, raw_y)}
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage("Selected Opening [00-XD-OPEN]. Press Del to delete.")
+                    event.accept()
+                    return
+
+                # Check slabs
+                hit_slab = None
+                for s_entry in slabs:
+                    spoly = Polygon(s_entry.get("polygon", [])) if s_entry.get("polygon") else None
+                    if spoly and spoly.contains(Point(raw_x, raw_y)):
+                        hit_slab = s_entry
+                        break
+                if hit_slab:
+                    self.selected_element = {"type": "slab", "id": hit_slab.get("id"), "point": (raw_x, raw_y)}
+                    self.studio.refresh_story_ui()
+                    self.studio.statusBar().showMessage(f"Selected Slab {hit_slab.get('id')}. Press Del to delete.")
+                    event.accept()
+                    return
+
+                # Check edge boundary
+                if edge and len(edge) >= 3 and Polygon is not None:
+                    epoly = Polygon(edge)
+                    if epoly.exterior.distance(Point(raw_x, raw_y)) <= 0.35:
+                        self.selected_element = {"type": "edge", "id": "00-XD-EDGE"}
+                        self.studio.refresh_story_ui()
+                        self.studio.statusBar().showMessage("Selected Outer Slab Boundary [00-XD-EDGE]. Press Del to delete.")
+                        event.accept()
+                        return
+
+                self.selected_element = None
+                self.studio.refresh_story_ui()
+                self.studio.statusBar().showMessage("Selection cleared.")
+                event.accept()
                 return
 
         super().mousePressEvent(event)
@@ -764,6 +965,8 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         if self.ortho_enabled and self.draw_start_pt is not None:
             snap_x, snap_y = self.apply_ortho(snap_x, snap_y, self.draw_start_pt)
+        elif self.ortho_enabled and self.active_tool == "DRAW_SLAB_EDGE" and len(self.polyline_pts) >= 1:
+            snap_x, snap_y = self.apply_ortho(snap_x, snap_y, self.polyline_pts[-1])
 
         # Status Bar updates
         snap_str = snap["type"] if snap else "Free Cursor"
@@ -782,6 +985,8 @@ class StructuralCadCanvas2D(QGraphicsView):
         # Dynamic Rubber-band Preview
         if self.draw_start_pt is not None:
             self.update_rubber_band(self.draw_start_pt[0], self.draw_start_pt[1], snap_x, snap_y)
+        elif self.active_tool == "DRAW_SLAB_EDGE" and len(self.polyline_pts) >= 1:
+            self.update_rubber_band(self.polyline_pts[-1][0], self.polyline_pts[-1][1], snap_x, snap_y)
         else:
             self.hide_rubber_band()
 
@@ -798,6 +1003,19 @@ class StructuralCadCanvas2D(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_selected()
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_C):
+            if self.active_tool == "DRAW_SLAB_EDGE" and len(self.polyline_pts) >= 3:
+                self.finish_polyline_boundary()
+                event.accept()
+                return
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancel_current_operation()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_F3:
             self.toggle_osnap()
             event.accept()
@@ -806,16 +1024,13 @@ class StructuralCadCanvas2D(QGraphicsView):
             self.toggle_ortho()
             event.accept()
             return
-        if event.key() == Qt.Key.Key_Escape:
-            self.cancel_current_operation()
-            event.accept()
-            return
         super().keyPressEvent(event)
 
     def render_story(self, story_data: Dict[str, Any]) -> None:
         self.scene_2d.clear()
         self.snap_marker_item = None
         self.rubber_band_item = None
+        self.cached_bay_badges = []
         s = self.scale_px
 
         edge = story_data.get("slab_edge_polygon", [])
@@ -874,6 +1089,13 @@ class StructuralCadCanvas2D(QGraphicsView):
                             self.scene_2d.addLine(curr_x * s, -bds[1] * s, curr_x * s, -bds[3] * s, rib_pen)
                             curr_x += 0.55
 
+                    # Cache badge position for 1-Click Rib Label Toggle
+                    self.cached_bay_badges.append({
+                        "id": bay["id"],
+                        "center": bay["center"],
+                        "rib_deg": rib_deg,
+                    })
+
                     badge = f"{bay['id']} ({bay['lx']:.1f}x{bay['ly']:.1f}m | {rib_deg:.0f}°)"
                     if bay.get("is_cantilever"):
                         badge += "\n[CANTILEVER]"
@@ -881,15 +1103,32 @@ class StructuralCadCanvas2D(QGraphicsView):
                     txt_s.setDefaultTextColor(QColor("#FBBF24"))
                     txt_s.setPos(bay["center"][0] * s - 35, -bay["center"][1] * s - 12)
 
+                # Selection highlight on slab
+                if self.selected_element and self.selected_element.get("type") == "slab" and self.selected_element.get("id") == bay["id"]:
+                    self.scene_2d.addPolygon(poly, QPen(QColor("#38BDF8"), 3, Qt.PenStyle.DashLine), QBrush(Qt.BrushStyle.NoBrush))
+
         # 2. Slab Boundary (00-XD-EDGE in Cyan)
         if len(edge) >= 3:
             poly = QPolygonF([QPointF(float(p[0]) * s, -float(p[1]) * s) for p in edge])
-            self.scene_2d.addPolygon(poly, QPen(QColor("#06B6D4"), 2), QBrush(Qt.BrushStyle.NoBrush))
+            pen_edge = QPen(QColor("#06B6D4"), 2)
+            if self.selected_element and self.selected_element.get("type") in ("edge", "boundary"):
+                pen_edge = QPen(QColor("#FACC15"), 3, Qt.PenStyle.DashLine)
+            self.scene_2d.addPolygon(poly, pen_edge, QBrush(Qt.BrushStyle.NoBrush))
             for pt in edge:
                 px, py = float(pt[0]) * s, -float(pt[1]) * s
                 self.scene_2d.addRect(QRectF(px - 3, py - 3, 6, 6), QPen(QColor("#06B6D4")), QBrush(QColor("#06B6D4")))
 
-        # 3. Beams & Non-Overlapping Orange Beam Tags
+        # In-progress polyline boundary vertices
+        if self.active_tool == "DRAW_SLAB_EDGE" and len(self.polyline_pts) >= 1:
+            for i in range(len(self.polyline_pts) - 1):
+                p_a = self.polyline_pts[i]
+                p_b = self.polyline_pts[i + 1]
+                self.scene_2d.addLine(p_a[0] * s, -p_a[1] * s, p_b[0] * s, -p_b[1] * s, QPen(QColor("#06B6D4"), 2, Qt.PenStyle.SolidLine))
+            for idx, p in enumerate(self.polyline_pts):
+                color = QColor("#FACC15") if idx == 0 else QColor("#06B6D4")
+                self.scene_2d.addRect(QRectF(p[0] * s - 4, -p[1] * s - 4, 8, 8), QPen(color, 2), QBrush(color))
+
+        # 3. Beams: Full-Width Hatched Rectangles & Non-Overlapping Orange Beam Tags
         placed_tags = []
         for col in columns:
             if col.get("active", True):
@@ -899,10 +1138,47 @@ class StructuralCadCanvas2D(QGraphicsView):
             sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
             ex, ey = float(bm.get("end_x", 5.0)), float(bm.get("end_y", 0.0))
             b_kind = bm.get("beam_kind", "hidden")
-            pen_color = QColor("#EAB308") if b_kind == "hidden" else QColor("#10B981")
-            pen_style = Qt.PenStyle.DashLine if b_kind == "hidden" else Qt.PenStyle.SolidLine
-            self.scene_2d.addLine(sx * s, -sy * s, ex * s, -ey * s, QPen(pen_color, 3, pen_style))
+            def_w = 0.60 if b_kind == "hidden" else 0.20
+            width_m = float(bm.get("width_m", def_w))
+            half_w = width_m / 2.0
 
+            dx = ex - sx
+            dy = ey - sy
+            length = max(0.01, (dx * dx + dy * dy) ** 0.5)
+            ux = dx / length
+            uy = dy / length
+            nx = -uy
+            ny = ux
+
+            p1 = (sx - nx * half_w, sy - ny * half_w)
+            p2 = (ex - nx * half_w, ey - ny * half_w)
+            p3 = (ex + nx * half_w, ey + ny * half_w)
+            p4 = (sx + nx * half_w, sy + ny * half_w)
+
+            poly = QPolygonF([
+                QPointF(p1[0] * s, -p1[1] * s),
+                QPointF(p2[0] * s, -p2[1] * s),
+                QPointF(p3[0] * s, -p3[1] * s),
+                QPointF(p4[0] * s, -p4[1] * s),
+            ])
+
+            if b_kind == "hidden":
+                pen = QPen(QColor("#EAB308"), 2, Qt.PenStyle.DashLine)
+                brush = QBrush(QColor(234, 179, 8, 80), Qt.BrushStyle.DiagCrossPattern)
+            else:
+                pen = QPen(QColor("#10B981"), 2, Qt.PenStyle.SolidLine)
+                brush = QBrush(QColor(16, 185, 129, 90), Qt.BrushStyle.BDiagPattern)
+
+            self.scene_2d.addPolygon(poly, pen, brush)
+
+            # Centerline subtle guide line
+            self.scene_2d.addLine(sx * s, -sy * s, ex * s, -ey * s, QPen(QColor(255, 255, 255, 50), 1, Qt.PenStyle.DashDotLine))
+
+            # Selection highlight on beam
+            if self.selected_element and self.selected_element.get("type") == "beam" and self.selected_element.get("id") == bm.get("id"):
+                self.scene_2d.addPolygon(poly, QPen(QColor("#38BDF8"), 3, Qt.PenStyle.SolidLine), QBrush(Qt.BrushStyle.NoBrush))
+
+            # Smart beam tag raised above upper face
             tx, ty, _ = compute_smart_beam_tag_position(bm, columns, placed_tags)
             txt = self.scene_2d.addText(f"{bm['id']}", QFont("Arial", 9, QFont.Weight.Bold))
             txt.setDefaultTextColor(QColor("#FB923C"))  # Bright Orange
@@ -913,9 +1189,14 @@ class StructuralCadCanvas2D(QGraphicsView):
             if not col.get("active", True):
                 continue
             cx, cy = float(col["x"]), float(col["y"])
-            b, h = float(col.get("b_m", 0.25)), float(col.get("h_m", 0.50))
+            b = float(col.get("b_m", 0.20))
+            h = float(col.get("h_m", 0.40))
             rect = QRectF((cx - b / 2.0) * s, -(cy + h / 2.0) * s, b * s, h * s)
             self.scene_2d.addRect(rect, QPen(QColor("#EF4444"), 2), QBrush(QColor(239, 68, 68, 90)))
+
+            # Selection highlight on column
+            if self.selected_element and self.selected_element.get("type") == "column" and self.selected_element.get("id") == col.get("id"):
+                self.scene_2d.addRect(rect.adjusted(-2, -2, 2, 2), QPen(QColor("#38BDF8"), 3), QBrush(Qt.BrushStyle.NoBrush))
 
             tag_x = cx + b / 2.0 + 0.12
             tag_y = cy + h / 2.0 + 0.12
@@ -930,7 +1211,7 @@ class XpertStudioMainWindow(QMainWindow):
     Uses Classic Menu Bar + Classic Toolbars (Zero Ribbon).
     """
 
-    def __init__(self):
+    def __init__(self, master_file_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle(f"Xpert Structural Design Studio — {STUDIO_VERSION} (ACI 318-19)")
         self.resize(1460, 900)
@@ -948,7 +1229,9 @@ class XpertStudioMainWindow(QMainWindow):
         self._build_classic_menu_bar()
         self._build_classic_toolbars()
         self._build_main_workspace()
-        self._init_demo_project_silently()
+
+        if master_file_path and os.path.isfile(master_file_path):
+            self.load_master_project(master_file_path)
 
     def _build_classic_menu_bar(self) -> None:
         mbar = self.menuBar()
@@ -959,6 +1242,11 @@ class XpertStudioMainWindow(QMainWindow):
         act_new.setShortcut("Ctrl+N")
         act_new.triggered.connect(self.open_new_project_dialog)
         m_file.addAction(act_new)
+
+        act_open = QAction("&Open Project (.xpert)...", self)
+        act_open.setShortcut("Ctrl+O")
+        act_open.triggered.connect(self.browse_and_open_project)
+        m_file.addAction(act_open)
 
         act_save = QAction("Save Story && Sync .DXF", self)
         act_save.setShortcut("Ctrl+S")
@@ -971,6 +1259,14 @@ class XpertStudioMainWindow(QMainWindow):
         act_exit.setStatusTip("Close and exit Xpert Structural Design Studio")
         act_exit.triggered.connect(self.close)
         m_file.addAction(act_exit)
+
+        # Edit Menu (Object Deletion)
+        m_edit = mbar.addMenu("&Edit")
+        act_del = QAction("&Delete Selected Object", self)
+        act_del.setShortcut("Delete")
+        act_del.setStatusTip("Delete the selected CAD element (Del / Backspace)")
+        act_del.triggered.connect(lambda: self.cad_canvas.delete_selected())
+        m_edit.addAction(act_del)
 
         # View Menu
         m_view = mbar.addMenu("&View")
@@ -996,7 +1292,7 @@ class XpertStudioMainWindow(QMainWindow):
         # Draw Menu (Strict 4-Step Sequence)
         m_draw = mbar.addMenu("&Draw && Modify")
         for label, tool_id in [
-            ("1. Draw Outer Slab Boundary [00-XD-EDGE]", "DRAW_SLAB_EDGE"),
+            ("1. Draw Outer Polyline Boundary [00-XD-EDGE]", "DRAW_SLAB_EDGE"),
             ("2. Place Column [00-XD-COL]", "ADD_COL"),
             ("3A. Draw Hidden Beam [00-XD-BEAM-HID]", "ADD_HID_BEAM"),
             ("3B. Draw Drop Beam [00-XD-BEAM-DROP]", "ADD_DROP_BEAM"),
@@ -1005,6 +1301,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("4C. Pick: Toggle Slab <-> Opening [00-XD-OPEN]", "PICK_OPENING"),
             ("---", None),
             ("Select / Pick Element", "SELECT"),
+            ("Delete Selected Element (Del)", "DELETE_SELECTED"),
             ("Move Column / Beam", "MOVE"),
             ("Load Standard 2-Bay Structural Layout", "LOAD_TEMPLATE"),
         ]:
@@ -1044,6 +1341,10 @@ class XpertStudioMainWindow(QMainWindow):
         btn_new.clicked.connect(self.open_new_project_dialog)
         top_tb.addWidget(btn_new)
 
+        btn_open = QPushButton("Open Project...")
+        btn_open.clicked.connect(self.browse_and_open_project)
+        top_tb.addWidget(btn_open)
+
         btn_save = QPushButton("Save && Sync .DXF (Ctrl+S)")
         btn_save.clicked.connect(self.save_and_sync_current_story)
         top_tb.addWidget(btn_save)
@@ -1067,7 +1368,16 @@ class XpertStudioMainWindow(QMainWindow):
             top_tb.addWidget(b)
 
         top_tb.addSeparator()
-        top_tb.addWidget(QLabel("Col Boundary Rule: "))
+        top_tb.addWidget(QLabel("Col Size: "))
+        self.cb_col_size = QComboBox()
+        self.cb_col_size.addItems([
+            "Vertical (0.20 x 0.40 m)",
+            "Horizontal (0.40 x 0.20 m)",
+        ])
+        top_tb.addWidget(self.cb_col_size)
+
+        top_tb.addSeparator()
+        top_tb.addWidget(QLabel("Col Boundary: "))
         self.cb_col_rule = QComboBox()
         self.cb_col_rule.addItems([
             "Auto-Clamp Column Flush Inside Edge",
@@ -1094,13 +1404,13 @@ class XpertStudioMainWindow(QMainWindow):
         btn_run_all.clicked.connect(self.run_analyze_all_beams)
         top_tb.addWidget(btn_run_all)
 
-        # Left Vertical CAD Toolbar (Strict 4-Step Sequence)
+        # Left Vertical CAD Toolbar (Strict 4-Step Sequence + Edit Actions)
         left_tb = QToolBar("CAD Drawing Tools", self)
         left_tb.setOrientation(Qt.Orientation.Vertical)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, left_tb)
 
         left_tools = [
-            ("1. Slab Boundary", "DRAW_SLAB_EDGE"),
+            ("1. Polyline Boundary", "DRAW_SLAB_EDGE"),
             ("2. Place Column", "ADD_COL"),
             ("3A. + Hidden Beam", "ADD_HID_BEAM"),
             ("3B. + Drop Beam", "ADD_DROP_BEAM"),
@@ -1109,6 +1419,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("4C. Pick: Opening", "PICK_OPENING"),
             ("---", None),
             ("Select", "SELECT"),
+            ("Delete Selected (Del)", "DELETE_SELECTED"),
             ("Move Col / Beam", "MOVE"),
             ("Pan (Hand)", "PAN"),
             ("Zoom Extents", "ZOOM_EXTENTS"),
@@ -1120,6 +1431,8 @@ class XpertStudioMainWindow(QMainWindow):
                 left_tb.addSeparator()
             else:
                 btn = QPushButton(label)
+                if tid == "DELETE_SELECTED":
+                    btn.setStyleSheet("background-color: #DC2626; color: white; font-weight: bold; padding: 4px;")
                 btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
                 left_tb.addWidget(btn)
 
@@ -1189,35 +1502,58 @@ class XpertStudioMainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
 
-    def _init_demo_project_silently(self) -> None:
-        cfg = {
-            "project_name": "Villa_Yasmin",
-            "root_directory": os.path.abspath("./XpertStudio_Projects"),
-            "ground_floor_height_m": 3.20,
-            "include_basement": False,
-            "floors_above_ground": 2,
-            "upper_floor_height_m": 3.00,
-            "upper_floors_mode": "typical",
-            "include_penthouse": False,
-            "foundation_depth_m": 1.50,
-            "fc_mpa": 20.0,
-            "fy_mpa": 350.0,
-            "soil_bearing_qall_kn_m2": 150.0,
-        }
-        self.master_project = initialize_studio_project(cfg)
-        self._populate_story_selector()
-        self.activate_cad_tool("LOAD_TEMPLATE")
+    def get_column_dimensions(self) -> Tuple[float, float]:
+        """Returns (b_m, h_m) based on selected toolbar orientation."""
+        if hasattr(self, "cb_col_size") and self.cb_col_size.currentIndex() == 1:
+            return 0.40, 0.20  # Horizontal
+        return 0.20, 0.40  # Vertical (Default minimum)
+
+    def load_master_project(self, master_path: str) -> bool:
+        """Loads project from .xpert or .json master file."""
+        try:
+            self.master_project = load_studio_project_from_master_file(master_path)
+            clean_name = self.master_project.get("project_name", "Project")
+            self.setWindowTitle(
+                f"Xpert Structural Design Studio — {clean_name} — {STUDIO_VERSION} (ACI 318-19)"
+            )
+            self._populate_story_selector()
+            self.switch_workspace_mode(0)
+            self.statusBar().showMessage(
+                f"Loaded Project: Stractural-{clean_name} from {os.path.basename(master_path)} on 02_Ground_Floor."
+            )
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Project Load Error", f"Failed to load project from master file:\n{str(e)}")
+            return False
+
+    def browse_and_open_project(self) -> None:
+        """Browse file dialog to open an existing .xpert master project."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Existing Master Project",
+            os.path.abspath("./XpertStudio_Projects"),
+            "Xpert Master Project (*-00_Project_Master.xpert *-00_Project_Master.json *.xpert *.json);;All Files (*.*)",
+        )
+        if file_path:
+            self.load_master_project(file_path)
 
     def open_new_project_dialog(self) -> None:
         dlg = NewProjectSetupDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            cfg = dlg.get_config()
-            self.master_project = initialize_studio_project(cfg)
-            self._populate_story_selector()
-            self.switch_workspace_mode(0)
-            self.statusBar().showMessage(
-                f"Initialized Project: Stractural-{self.master_project['project_name']} on 02_Ground_Floor."
-            )
+            if dlg.selected_existing_master_path:
+                self.load_master_project(dlg.selected_existing_master_path)
+            else:
+                cfg = dlg.get_config()
+                self.master_project = initialize_studio_project(cfg)
+                clean_name = self.master_project.get("project_name", "Project")
+                self.setWindowTitle(
+                    f"Xpert Structural Design Studio — {clean_name} — {STUDIO_VERSION} (ACI 318-19)"
+                )
+                self._populate_story_selector()
+                self.switch_workspace_mode(0)
+                self.statusBar().showMessage(
+                    f"Initialized Project: Stractural-{clean_name} on 02_Ground_Floor."
+                )
 
     def _populate_story_selector(self) -> None:
         self.cb_story.blockSignals(True)
@@ -1267,20 +1603,20 @@ class XpertStudioMainWindow(QMainWindow):
         req = float(eval_res.get("calculated_min_thickness_cm", 0.0))
 
         if eval_res.get("has_data") and entered < req:
-            ans = QMessageBox.warning(
+            reply = QMessageBox.warning(
                 self,
-                "ACI 318 Minimum Thickness Warning",
-                f"Entered slab thickness ({entered:.1f} cm) is less than the ACI 318 calculated minimum "
-                f"thickness ({req:.1f} cm) governed by {eval_res['governing_member']}.\n\n"
-                f"Do you want to continue with your entered value ({entered:.1f} cm) or modify it?",
+                "Thickness Under ACI 318 Minimum",
+                f"Entered slab thickness ({entered:.1f} cm) is less than the calculated minimum "
+                f"({req:.1f} cm governed by {eval_res['governing_member']}).\n\n"
+                f"Proceed anyway? Long-term deflection checks will be required.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if ans == QMessageBox.StandardButton.No:
-                self.sp_adopted_thick.setFocus()
+            if reply != QMessageBox.StandardButton.Yes:
                 return
 
         self.current_story_data["adopted_slab_thickness_cm"] = entered
         self.save_and_sync_current_story()
+        self.statusBar().showMessage(f"Adopted slab thickness {entered:.1f} cm saved.")
 
     def convert_critical_beam_to_drop(self) -> None:
         fy = float(self.master_project["materials_and_soil"]["fy_mpa"]) if self.master_project else 350.0
@@ -1302,6 +1638,10 @@ class XpertStudioMainWindow(QMainWindow):
             self.cad_canvas.zoom_extents()
             return
 
+        if tool_id == "DELETE_SELECTED":
+            self.cad_canvas.delete_selected()
+            return
+
         # Strict 4-step sequence enforcement:
         if tool_id in ["ADD_COL", "ADD_HID_BEAM", "ADD_DROP_BEAM", "PICK_SLAB", "PICK_FLIP_RIB", "PICK_OPENING"]:
             edge = self.current_story_data.get("slab_edge_polygon", [])
@@ -1312,35 +1652,36 @@ class XpertStudioMainWindow(QMainWindow):
                     "Strict Structural Workflow Requirement:\n\n"
                     "You must define the Outer Slab Boundary [00-XD-EDGE] first before "
                     "placing columns, drawing beams, or picking slabs/openings.\n\n"
-                    "Active tool switched to '1. Slab Boundary'. Please click 2 opposite corners on the canvas.",
+                    "Active tool switched to '1. Polyline Boundary'. Click consecutive vertices to draw the perimeter.",
                 )
                 self.cad_canvas.active_tool = "DRAW_SLAB_EDGE"
+                self.cad_canvas.polyline_pts = []
                 self.cad_canvas.draw_start_pt = None
-                self.statusBar().showMessage("Tool: 1. Draw Outer Slab Boundary [00-XD-EDGE] (Click Corner 1)")
+                self.statusBar().showMessage("Tool: 1. Draw Outer Polyline Boundary [00-XD-EDGE] (Click Vertex 1)")
                 return
 
         if tool_id == "LOAD_TEMPLATE":
             self.current_story_data["slab_edge_polygon"] = [[0, 0], [10.0, 0], [10.0, 8.5], [0, 8.5]]
             self.current_story_data["columns"] = [
-                {"id": "C1", "x": 0.0, "y": 8.5, "b_m": 0.25, "h_m": 0.50, "active": True},
-                {"id": "C2", "x": 5.2, "y": 8.5, "b_m": 0.25, "h_m": 0.60, "active": True},
-                {"id": "C3", "x": 10.0, "y": 8.5, "b_m": 0.25, "h_m": 0.50, "active": True},
-                {"id": "C4", "x": 0.0, "y": 4.2, "b_m": 0.25, "h_m": 0.50, "active": True},
-                {"id": "C5", "x": 5.2, "y": 4.2, "b_m": 0.30, "h_m": 0.60, "active": True},
-                {"id": "C6", "x": 10.0, "y": 4.2, "b_m": 0.25, "h_m": 0.50, "active": True},
-                {"id": "C7", "x": 0.0, "y": 0.0, "b_m": 0.25, "h_m": 0.50, "active": True},
-                {"id": "C8", "x": 5.2, "y": 0.0, "b_m": 0.25, "h_m": 0.60, "active": True},
-                {"id": "C9", "x": 10.0, "y": 0.0, "b_m": 0.25, "h_m": 0.50, "active": True},
+                {"id": "C1", "x": 0.0, "y": 8.5, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 5.2, "y": 8.5, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 10.0, "y": 8.5, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.0, "y": 4.2, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 5.2, "y": 4.2, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C6", "x": 10.0, "y": 4.2, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C7", "x": 0.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C8", "x": 5.2, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C9", "x": 10.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
             ]
             self.current_story_data["beams"] = [
                 {
                     "id": "B1", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.50,
-                    "start_x": 0.0, "start_y": 8.5, "end_x": 10.0, "end_y": 8.5,
+                    "start_x": 0.0, "start_y": 8.40, "end_x": 10.0, "end_y": 8.40,
                     "spans": [5.2, 4.8],
                     "supports": [
-                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.25, "x": 0.0, "y": 8.5},
-                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.25, "x": 5.2, "y": 8.5},
-                        {"support_index": 3, "kind": "column", "target_id": "C3", "width_m": 0.25, "x": 10.0, "y": 8.5},
+                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.20, "x": 0.0, "y": 8.5},
+                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.20, "x": 5.2, "y": 8.5},
+                        {"support_index": 3, "kind": "column", "target_id": "C3", "width_m": 0.20, "x": 10.0, "y": 8.5},
                     ],
                     "loads": [{"type": "dist", "x1": 0.0, "x2": 10.0, "val": 28.5}],
                 },
@@ -1349,9 +1690,9 @@ class XpertStudioMainWindow(QMainWindow):
                     "start_x": 0.0, "start_y": 4.2, "end_x": 10.0, "end_y": 4.2,
                     "spans": [5.2, 4.8],
                     "supports": [
-                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.25, "x": 0.0, "y": 4.2},
-                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.30, "x": 5.2, "y": 4.2},
-                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.25, "x": 10.0, "y": 4.2},
+                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.20, "x": 0.0, "y": 4.2},
+                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.20, "x": 5.2, "y": 4.2},
+                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.20, "x": 10.0, "y": 4.2},
                     ],
                     "loads": [{"type": "dist", "x1": 0.0, "x2": 10.0, "val": 36.2}],
                 },
@@ -1365,6 +1706,9 @@ class XpertStudioMainWindow(QMainWindow):
             self.cad_canvas.zoom_extents()
             self.statusBar().showMessage("Standard 2-Bay Structural Layout loaded successfully.")
             return
+
+        if tool_id != "DRAW_SLAB_EDGE":
+            self.cad_canvas.polyline_pts = []
 
         self.cad_canvas.active_tool = tool_id
         self.cad_canvas.draw_start_pt = None
@@ -1383,7 +1727,7 @@ class XpertStudioMainWindow(QMainWindow):
         self.cad_canvas.toggle_ortho(checked)
 
     def save_and_sync_current_story(self) -> None:
-        if not self.master_project:
+        if not self.master_project or self.current_story_index >= len(self.master_project.get("stories", [])):
             return
         st_meta = self.master_project["stories"][self.current_story_index]
         jpath = st_meta["json_file"]
@@ -1453,21 +1797,77 @@ def main() -> None:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("xpert.structural.design.studio.v1")
         except Exception:
             pass
+
     app = QApplication(sys.argv)
     icon_path = os.path.join(os.path.dirname(__file__), "app_icon.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
-    win = XpertStudioMainWindow()
+
+    # Check command-line arguments for master file (.xpert or .json)
+    master_file_arg = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("--"):
+            continue
+        if arg.endswith((".xpert", ".json")) and os.path.isfile(arg):
+            master_file_arg = os.path.abspath(arg)
+            break
+
     if "--check" in sys.argv:
+        win = XpertStudioMainWindow()
+        cfg = {
+            "project_name": "CheckProject",
+            "root_directory": os.path.abspath("./test_output"),
+            "ground_floor_height_m": 3.20,
+            "include_basement": False,
+            "floors_above_ground": 1,
+            "upper_floor_height_m": 3.00,
+            "upper_floors_mode": "typical",
+            "include_penthouse": False,
+            "foundation_depth_m": 1.50,
+            "fc_mpa": 20.0,
+            "fy_mpa": 350.0,
+            "soil_bearing_qall_kn_m2": 150.0,
+        }
+        win.master_project = initialize_studio_project(cfg)
+        win._populate_story_selector()
+        win.activate_cad_tool("LOAD_TEMPLATE")
         win.run_analyze_all_beams()
         win.activate_cad_tool("ZOOM_EXTENTS")
         win.cad_canvas.toggle_osnap(True)
         win.cad_canvas.toggle_ortho(True)
-        win.activate_cad_tool("LOAD_TEMPLATE")
         win.cad_canvas.render_story(win.current_story_data)
         print("HEADLESS_STUDIO_CHECK_OK")
         sys.exit(0)
-    win.show()
+
+    win = XpertStudioMainWindow()
+
+    if master_file_arg:
+        # Case 1: Opened directly via master project file argument (.xpert)
+        ok = win.load_master_project(master_file_arg)
+        if not ok:
+            sys.exit(1)
+        win.show()
+    else:
+        # Case 2: Opened directly or via shortcut -> Modal NewProjectSetupDialog opens first
+        dlg = NewProjectSetupDialog(win)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            if dlg.selected_existing_master_path:
+                ok = win.load_master_project(dlg.selected_existing_master_path)
+                if not ok:
+                    sys.exit(1)
+            else:
+                cfg = dlg.get_config()
+                win.master_project = initialize_studio_project(cfg)
+                clean_name = win.master_project.get("project_name", "Project")
+                win.setWindowTitle(
+                    f"Xpert Structural Design Studio — {clean_name} — {STUDIO_VERSION} (ACI 318-19)"
+                )
+                win._populate_story_selector()
+                win.switch_workspace_mode(0)
+            win.show()
+        else:
+            sys.exit(0)
+
     sys.exit(app.exec())
 
 

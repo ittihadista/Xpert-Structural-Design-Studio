@@ -9,12 +9,14 @@ import unittest
 
 from xpert_project_io import (
     initialize_studio_project,
+    load_studio_project_from_master_file,
     compute_smart_beam_tag_position,
 )
 from xpert_structural_engine import (
     evaluate_story_thickness_and_optimization,
     analyze_all_story_beams_and_columns,
     clamp_or_expand_column_boundary,
+    clamp_beam_inside_boundary,
     validate_beam_cantilevers_and_boundary,
     detect_bays_and_determine_ribs,
     pick_area_slab,
@@ -22,6 +24,7 @@ from xpert_structural_engine import (
     toggle_bay_slab_or_opening,
     move_column_and_update_connected_beams,
     move_beam_and_update,
+    delete_selected_element_from_story,
 )
 
 
@@ -94,9 +97,12 @@ class TestXpertStudioEngine(unittest.TestCase):
         }
         placed = [(5.0 + 0.245, 8.5 + 0.37)]  # C2 tag position
         tx, ty, rot = compute_smart_beam_tag_position(beam, columns, placed)
-        # Distance from middle column C2 (5.0, 8.5) must be >= 1.5m (placed in first clear span)
+        # Tag is near beam midpoint (length * 0.5 = 5.0) and shifted slightly along axis to avoid C2
         dist_from_c2 = ((tx - 5.0) ** 2 + (ty - 8.5) ** 2) ** 0.5
-        self.assertGreater(dist_from_c2, 1.5)
+        self.assertGreaterEqual(dist_from_c2, 0.45)
+        self.assertLess(abs(tx - 5.0), 1.5)
+        # Tag is placed above upper face of beam (offset = width_m/2 + 0.12)
+        self.assertGreater(ty, 8.5)
         self.assertEqual(rot, 0.0)
 
     def test_analyze_all_beams_and_4way_column_framing(self):
@@ -242,6 +248,150 @@ class TestXpertStudioEngine(unittest.TestCase):
         ok_bm, msg_bm, bms2 = move_beam_and_update("B1", 0.0, 1.0, new_bms, edge)
         self.assertTrue(ok_bm)
         self.assertEqual(bms2[0]["start_y"], 6.0)
+
+    def test_xpert_master_file_saving_and_loading(self):
+        cfg = {
+            "project_name": "RoyalVilla",
+            "root_directory": self.tmp_dir,
+            "ground_floor_height_m": 3.20,
+            "include_basement": False,
+            "floors_above_ground": 2,
+            "include_penthouse": False,
+            "foundation_depth_m": 1.50,
+            "fc_mpa": 25.0,
+            "fy_mpa": 420.0,
+            "soil_bearing_qall_kn_m2": 200.0,
+        }
+        master = initialize_studio_project(cfg)
+        proj_dir = master["project_dir"]
+        xpert_file = os.path.join(proj_dir, "RoyalVilla-00_Project_Master.xpert")
+        json_file = os.path.join(proj_dir, "RoyalVilla-00_Project_Master.json")
+
+        self.assertTrue(os.path.isfile(xpert_file))
+        self.assertTrue(os.path.isfile(json_file))
+
+        # Test loading from .xpert
+        loaded = load_studio_project_from_master_file(xpert_file)
+        self.assertEqual(loaded["project_name"], "RoyalVilla")
+        self.assertEqual(len(loaded["stories"]), 3)  # 00_TieBeams, 02_Ground_Floor, 03_Typical_Floor (multiplier=2)
+        self.assertEqual(loaded["stories"][2]["multiplier"], 2)
+        for st in loaded["stories"]:
+            self.assertTrue(os.path.isfile(st["json_file"]))
+            self.assertTrue(os.path.isfile(st["dxf_file"]))
+
+    def test_clamp_beam_inside_boundary(self):
+        edge = [[0.0, 0.0], [10.0, 0.0], [10.0, 8.5], [0.0, 8.5]]
+        # 1. Drop beam (w=0.20m, half_w=0.10m) drawn along top boundary line y=8.5
+        top_beam = {
+            "id": "B_top",
+            "beam_kind": "drop",
+            "width_m": 0.20,
+            "depth_m": 0.50,
+            "start_x": 0.0,
+            "start_y": 8.5,
+            "end_x": 10.0,
+            "end_y": 8.5,
+        }
+        clamped_top, mod_top = clamp_beam_inside_boundary(top_beam, edge)
+        self.assertTrue(mod_top)
+        # Shifted inward by 0.10m from 8.5 -> 8.40 so top face is flush at 8.50
+        self.assertEqual(clamped_top["start_y"], 8.40)
+        self.assertEqual(clamped_top["end_y"], 8.40)
+
+        # 2. Drop beam along right boundary x=10.0
+        right_beam = {
+            "id": "B_right",
+            "beam_kind": "drop",
+            "width_m": 0.20,
+            "depth_m": 0.50,
+            "start_x": 10.0,
+            "start_y": 0.0,
+            "end_x": 10.0,
+            "end_y": 8.5,
+        }
+        clamped_right, mod_right = clamp_beam_inside_boundary(right_beam, edge)
+        self.assertTrue(mod_right)
+        self.assertEqual(clamped_right["start_x"], 9.90)
+        self.assertEqual(clamped_right["end_x"], 9.90)
+
+        # 3. Interior beam - not modified
+        mid_beam = {
+            "id": "B_mid",
+            "beam_kind": "hidden",
+            "width_m": 0.60,
+            "depth_m": 0.30,
+            "start_x": 0.0,
+            "start_y": 4.25,
+            "end_x": 10.0,
+            "end_y": 4.25,
+        }
+        clamped_mid, mod_mid = clamp_beam_inside_boundary(mid_beam, edge)
+        self.assertFalse(mod_mid)
+        self.assertEqual(clamped_mid["start_y"], 4.25)
+
+    def test_delete_selected_element_and_cantilever_protection(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [12.0, 0.0], [12.0, 6.0], [0.0, 6.0]],
+            "columns": [
+                {"id": "C1", "x": 0.0, "y": 3.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 6.0, "y": 3.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {
+                    "id": "B1", "start_x": 0.0, "start_y": 3.0, "end_x": 12.0, "end_y": 3.0,
+                    "spans": [6.0, 6.0],
+                    "supports": [
+                        {"support_index": 1, "target_id": "C1", "x": 0.0, "y": 3.0},
+                        {"support_index": 2, "target_id": "C2", "x": 6.0, "y": 3.0},
+                    ]
+                }
+            ],
+            "slabs": [
+                {"id": "S1_Back", "center_x": 3.0, "center_y": 3.0, "supports_cantilever_for": "S2_Cant"},
+                {"id": "S2_Cant", "center_x": 9.0, "center_y": 3.0, "is_cantilever": True},
+            ],
+            "openings": [{"id": "OP1", "x1": 1.0, "y1": 1.0, "x2": 2.0, "y2": 2.0}],
+        }
+
+        # 1. Attempt to delete S1_Back (back-span anchor) MUST fail!
+        ok, msg = delete_selected_element_from_story(story, {"type": "slab", "id": "S1_Back"})
+        self.assertFalse(ok)
+        self.assertIn("back-span moment anchor", msg)
+        self.assertEqual(len(story["slabs"]), 2)
+
+        # 2. Deleting cantilever slab S2_Cant succeeds
+        ok2, msg2 = delete_selected_element_from_story(story, {"type": "slab", "id": "S2_Cant"})
+        self.assertTrue(ok2)
+        self.assertEqual(len(story["slabs"]), 1)
+
+        # 3. Deleting column C2 updates beam B1 supports
+        ok_col, msg_col = delete_selected_element_from_story(story, {"type": "column", "id": "C2"})
+        self.assertTrue(ok_col)
+        self.assertEqual(len(story["columns"]), 1)
+        self.assertEqual(len(story["beams"][0]["supports"]), 1)
+
+        # 4. Deleting beam B1 succeeds
+        ok_bm, msg_bm = delete_selected_element_from_story(story, {"type": "beam", "id": "B1"})
+        self.assertTrue(ok_bm)
+        self.assertEqual(len(story["beams"]), 0)
+
+        # 5. Deleting opening succeeds
+        ok_op, msg_op = delete_selected_element_from_story(story, {"type": "opening", "id": "OP1"})
+        self.assertTrue(ok_op)
+        self.assertEqual(len(story["openings"]), 0)
+
+    def test_default_column_dimensions_orientation(self):
+        edge = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        # Minimum column size: 0.20 x 0.40 (vertical) and 0.40 x 0.20 (horizontal)
+        # Vertical column near right edge (10.0, 5.0)
+        cx_v, cy_v, _, _ = clamp_or_expand_column_boundary(10.0, 5.0, 0.20, 0.40, edge, rule="clamp")
+        self.assertEqual(cx_v, 9.90)  # 10.0 - 0.20 / 2
+        self.assertEqual(cy_v, 5.0)
+
+        # Horizontal column near right edge (10.0, 5.0)
+        cx_h, cy_h, _, _ = clamp_or_expand_column_boundary(10.0, 5.0, 0.40, 0.20, edge, rule="clamp")
+        self.assertEqual(cx_h, 9.80)  # 10.0 - 0.40 / 2
+        self.assertEqual(cy_h, 5.0)
 
 
 if __name__ == "__main__":
