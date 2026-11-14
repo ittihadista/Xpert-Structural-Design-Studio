@@ -27,7 +27,8 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.3.0-smart-cad-intelligence"
+STUDIO_VERSION = "v1.4.0-revit-bim-ux"
+MASTER_FILE_EXT = ".xsd"
 
 STANDARD_LAYERS = [
     ("00-XD-EDGE", 4, "Continuous"),       # Cyan: Outer Slab Boundary
@@ -244,7 +245,7 @@ def cleanup_unprefixed_duplicates(project_dir: str, clean_project_name: str) -> 
         if not os.path.isdir(target_dir):
             continue
         for fname in os.listdir(target_dir):
-            if fname.endswith((".dxf", ".json")) and not fname.startswith(prefix):
+            if fname.endswith((".dxf", ".json", ".xpert", ".xsd")) and not fname.startswith(prefix):
                 full_p = os.path.join(target_dir, fname)
                 try:
                     os.remove(full_p)
@@ -443,9 +444,12 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
         sync_story_to_dxf(story_data, dxf_path, role="STORY_EXTRACTION")
 
-    # Root Master & Output JSON & .xpert files
+    # Root Master & Output JSON, .xpert & .xsd files
+    master_file_xsd = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xsd")
     master_file_xpert = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xpert")
     master_file_json = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
+    master_payload["master_file"] = master_file_xsd
+    master_payload["master_file_xsd"] = master_file_xsd
     master_payload["master_file_xpert"] = master_file_xpert
     master_payload["master_file_json"] = master_file_json
 
@@ -453,6 +457,9 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     foundations_file = os.path.join(project_dir, f"{clean_name}-Foundations_Design.json")
     boq_file = os.path.join(project_dir, f"{clean_name}-BOQ_Quantities.json")
     foundations_dxf = os.path.join(cad_dir, f"{clean_name}-Foundations_And_Axes.dxf")
+
+    with open(master_file_xsd, "w", encoding="utf-8") as f:
+        json.dump(master_payload, f, indent=2)
 
     with open(master_file_xpert, "w", encoding="utf-8") as f:
         json.dump(master_payload, f, indent=2)
@@ -482,20 +489,20 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
     """
     Loads an existing Xpert Structural Design Studio project from its master file
-    (<ProjectName>-00_Project_Master.xpert or .json).
+    (<ProjectName>-00_Project_Master.xsd, .xpert, or .json).
     Automatically resolves and links paths for Stories_Data and CAD_Drawings.
     """
     resolved_path = os.path.abspath(master_path)
     if os.path.isdir(resolved_path):
-        # Look for *.xpert or *.json master file in the directory
+        # Look for *.xsd, *.xpert or *.json master file in the directory
         cands = [
             f for f in os.listdir(resolved_path)
-            if f.endswith(("-00_Project_Master.xpert", "-00_Project_Master.json"))
+            if f.endswith(("-00_Project_Master.xsd", "-00_Project_Master.xpert", "-00_Project_Master.json"))
         ]
         if not cands:
-            raise FileNotFoundError(f"No master project file (*-00_Project_Master.xpert) found in directory: {resolved_path}")
-        # Prefer .xpert
-        cands.sort(key=lambda x: (not x.endswith(".xpert"), x))
+            raise FileNotFoundError(f"No master project file (*-00_Project_Master.xsd) found in directory: {resolved_path}")
+        # Prefer .xsd, then .xpert, then .json
+        cands.sort(key=lambda x: (0 if x.endswith(".xsd") else (1 if x.endswith(".xpert") else 2), x))
         resolved_path = os.path.join(resolved_path, cands[0])
 
     if not os.path.isfile(resolved_path):
@@ -508,6 +515,8 @@ def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
     clean_name = master_payload.get("project_name", "")
     master_payload["project_dir"] = project_dir
 
+    master_payload["master_file"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xsd")
+    master_payload["master_file_xsd"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xsd")
     master_payload["master_file_xpert"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xpert")
     master_payload["master_file_json"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
 

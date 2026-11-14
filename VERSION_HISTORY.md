@@ -1,10 +1,37 @@
 # Xpert Structural Design Studio — Version History & Changelog
 
-This file tracks all releases of **Xpert Structural Design Studio** (`v1.0.0-studio-foundation`) for **Eng. Yousef Mohammed Keshlaf** (`xpert.tifosamp@gmail.com`).
+This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Yousef Mohammed Keshlaf** (`xpert.tifosamp@gmail.com`).
 
 ---
 
-## Current Release: `v1.3.0-smart-cad-intelligence` (2026-11-14)
+## Current Release: `v1.4.0-revit-bim-ux` (2026-11-14)
+**Release Title:** Revit BIM UX, Custom `.xsd` Master Project Extension, Full-Face Column Bearing, Room-Bounding Clear Slabs, Window/Crossing Selection & Align/Move/Measure Tools
+
+### Key Features & Advancements in `v1.4.0-revit-bim-ux`:
+1. **Custom `.xsd` Master Project File (`<ProjectName>-00_Project_Master.xsd`):**
+   - Standardized project master file extension to `.xsd` (`MASTER_FILE_EXT = ".xsd"`) with backward compatibility for `.xpert` and `.json`.
+   - Updated `initialize_studio_project` and `load_studio_project_from_master_file` to support double-click launching and direct path resolution.
+   - Cleaned unprefixed duplicates including `.xsd`.
+2. **Revit-Style Full Outer-Face Column Bearing:**
+   - When drawing beams between column centers, beam ends automatically project to the column outer faces (`sx = cx1 - b1/2` to `ex = cx2 + b2/2`).
+   - Lateral boundary shift: If beam lateral face protrudes outside the building boundary, the beam axis automatically shifts inward flush with the perimeter.
+   - Collinear overlapping beam prevention & duplicate column collision detection.
+3. **Revit Room-Bounding Bay & Slab Detection:**
+   - Slabs are never generated from the outer boundary polyline alone; at least 3 beams are required.
+   - Calculates clear inner bounds (`clear_min_x, clear_max_x, clear_min_y, clear_max_y`) by subtracting beam widths so ribs and slab bodies never overlap beam concrete.
+4. **AutoCAD Window vs Crossing Selection (`SELECT`):**
+   - Dragging Left-to-Right produces a Blue solid box selecting only items fully enclosed inside.
+   - Dragging Right-to-Left produces a Green dashed box selecting any items crossing or touched by the window.
+5. **Revit-Style Align (`AL`), Move (`MV`) & Measure (`DI`) Tools:**
+   - **Align [AL]:** Aligns column/beam faces (left, right, top, bottom) to reference coordinates with optional lock constraints (`locked_alignments`).
+   - **Move [MV]:** Interactive base-point to target-point movement and numeric delta input dialog (`MoveNumericDeltaDialog`).
+   - **Measure [DI]:** Instant 2D distance, delta X, delta Y, and angle measurement in status prompt.
+6. **Startup Welcome Dialog (`StartupWelcomeDialog`):**
+   - Clean launch screen offering: "Start a New Structural Project" or "Open an Existing Project (*.xsd)".
+
+---
+
+## Previous Release: `v1.3.0-smart-cad-intelligence` (2026-11-14)
 **Release Title:** Smart CAD Intelligence, Architectural DXF Underlay Block, Layer Visibility & Freeze Control, Zero Duplicates & Automated Multi-Span / Slab Splitting
 
 ### Key Features & Advancements in `v1.3.0-smart-cad-intelligence`:
