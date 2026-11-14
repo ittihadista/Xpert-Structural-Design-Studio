@@ -4,7 +4,38 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v1.5.0-structural-bim-pro` (2026-11-14)
+## Current Release: `v1.6.0-structural-bim-pro` (2026-11-14)
+**Release Title:** Advanced Continuous Beam Analytical Solver, Dynamic Wall Load Policies, Interactive SFD/BMD Hover Tracker, Longitudinal R.C. Elevation, 4-Mode Stacked Workspaces & Element Context Menus
+
+### Key Features & Advancements in `v1.6.0-structural-bim-pro`:
+1. **Beam Span Segments, Support Reactions & Analytical Critical Tables:**
+   - Introduced `get_beam_span_segments(beam)` decomposing continuous beams into distinct centerline segments (`cant_left`, `span_1`, `span_2`, ..., `cant_right`).
+   - Enhanced `solve_continuous_beam_analytical` returning:
+     - `num_spans_excluding_cantilevers`: True number of spans without cantilevers.
+     - `reactions_kn`: Analytical support reactions array $[R_1, R_2, ...]$.
+     - `v_left_kn`, `v_right_kn`, and `m_center_knm` in `support_critical_table`.
+     - `m_max_pos_knm` and `x_at_m_max_m` in `span_critical_table`.
+     - Support for both `"point"` and `"P"` load types with `dist_from_sup1_m`.
+2. **Dynamic Wall Load Policies & Slab Tributary Load Transfers:**
+   - Span-specific wall toggles (`set_beam_span_wall_flag`, `ensure_beam_wall_flags`) and story-wide wall policies (`set_story_wall_load_policy`: `all_beams`, `perimeter_only`, `none`).
+   - Dynamic tributary slab load distribution respecting one-way hollow-block rib orientations (0° vs 90°).
+   - Topological sorting of beams transferring secondary beam reactions directly as concentrated point loads onto primary carrier beams.
+   - Section and kind conversion engine (`convert_beam_kind_and_section`).
+3. **Dedicated 4-Mode Stacked Workspace (`QStackedWidget`):**
+   - **Mode 0 (`1. 2D Structural Drawing`):** 2D CAD canvas with drawing, modify, and dimensioning toolbars.
+   - **Mode 1 (`2. Beam Analysis (Loads, SFD & BMD)`):** Beam selector dropdown, story wall policy buttons, dynamic per-span wall toggles, and white-background analytical diagram widget with real-time mouse hover tracker ($X$, $V$, $M$), hatched SFD (`#1D70B8`), and hatched BMD (`#C81E1E` tension face down).
+   - **Mode 2 (`3. Beam R.C. Design & Elevation`):** Beam longitudinal reinforcement elevation display (bottom & top bars, bar curtailment, stirrups) and Section A-A cross-sectional view.
+   - **Mode 3 (`4. Schedules & Report`):** ACI 318 beam reinforcement schedule featuring `No. of Spans (Excl. Cantilevers)` placed between `Beam ID` and `Section (b x h)` with each span on a separate row, column design table, and master calculation report.
+   - Automatic toolbar visibility switching (drawing toolbars hidden outside Mode 0).
+4. **Interactive CAD Canvas Upgrades & Context Menus:**
+   - Selection safety: Slab clicking in `SELECT` mode selects without accidental rib flipping.
+   - Translucent live preview of column placement in `DRAW_COL` mode with Spacebar rotation toggle (0.20×0.40m ↔ 0.40×0.20m) and `NoFocus` policy on toolbar buttons.
+   - Contextual Right-Click Menus (`_show_element_context_menu`) on canvas for Columns (Rotate 90°, Delete), Beams (Convert Hidden ↔ Drop, Delete), and Slabs (Flip Rib Direction 0° ↔ 90°, Delete).
+   - Smart tool-adaptive cursors: Arrow for Selection, PointingHand for modify/pick, Crosshair for draw/dim, and Hand for pan.
+
+---
+
+## Previous Release: `v1.5.0-structural-bim-pro` (2026-11-14)
 **Release Title:** Structural BIM Pro, Persistent CAD Dimensions, Analytical SFD & BMD Interactive Diagrams, Separated Toolbars & Physical Room Coalescing
 
 ### Key Features & Advancements in `v1.5.0-structural-bim-pro`:

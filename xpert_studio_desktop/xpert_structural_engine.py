@@ -163,6 +163,131 @@ def evaluate_story_thickness_and_optimization(
     }
 
 
+def get_beam_span_segments(beam: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Returns beam span segments and cantilevers ('cant_left', 'span_1', 'span_2', ..., 'cant_right')
+    measured from support centerlines.
+    """
+    raw_spans = [float(s) for s in beam.get("spans", []) if float(s) > 0.15]
+    if not raw_spans:
+        sx, sy = float(beam.get("start_x", 0.0)), float(beam.get("start_y", 0.0))
+        ex, ey = float(beam.get("end_x", 4.0)), float(beam.get("end_y", 0.0))
+        raw_spans = [round(max(0.50, math.hypot(ex - sx, ey - sy)), 3)]
+    c_left = max(0.0, float(beam.get("cantilever_left_m", 0.0)))
+    c_right = max(0.0, float(beam.get("cantilever_right_m", 0.0)))
+
+    segments: List[Dict[str, Any]] = []
+    cur_x = 0.0
+    if c_left > 0.05:
+        segments.append({
+            "key": "cant_left",
+            "type": "cantilever",
+            "label": "Cantilever Left",
+            "length_m": round(c_left, 3),
+            "x_start_m": round(cur_x, 3),
+            "x_end_m": round(cur_x + c_left, 3),
+            "support_index": 1,
+        })
+        cur_x += c_left
+
+    for idx, s_len in enumerate(raw_spans, start=1):
+        segments.append({
+            "key": f"span_{idx}",
+            "type": "span",
+            "span_index": idx,
+            "label": f"Span {idx}",
+            "length_m": round(s_len, 3),
+            "x_start_m": round(cur_x, 3),
+            "x_end_m": round(cur_x + s_len, 3),
+            "support_start_index": idx,
+            "support_end_index": idx + 1,
+        })
+        cur_x += s_len
+
+    if c_right > 0.05:
+        segments.append({
+            "key": "cant_right",
+            "type": "cantilever",
+            "label": "Cantilever Right",
+            "length_m": round(c_right, 3),
+            "x_start_m": round(cur_x, 3),
+            "x_end_m": round(cur_x + c_right, 3),
+            "support_index": len(raw_spans) + 1,
+        })
+        cur_x += c_right
+
+    return segments
+
+
+def ensure_beam_wall_flags(story_data: Dict[str, Any], beam: Dict[str, Any]) -> Dict[str, bool]:
+    """
+    Ensures beam has wall load flags for all its spans and cantilevers.
+    """
+    policy = story_data.get("wall_load_policy", "all_beams")
+    default_val = (policy != "no_walls")
+    flags = beam.setdefault("span_wall_flags", {})
+    for seg in get_beam_span_segments(beam):
+        if seg["key"] not in flags:
+            flags[seg["key"]] = default_val
+    return flags
+
+
+def set_story_wall_load_policy(
+    story_data: Dict[str, Any],
+    policy: str = "all_beams",
+    wall_load_kn_m: float = 12.0,
+    apply_to_all_existing_spans: bool = True,
+) -> None:
+    """
+    Sets wall load policy for the entire story ('all_beams' or 'no_walls').
+    """
+    story_data["wall_load_policy"] = policy
+    story_data["wall_load_val_kn_m"] = float(wall_load_kn_m)
+    if apply_to_all_existing_spans:
+        val = (policy == "all_beams")
+        for bm in story_data.get("beams", []):
+            flags = bm.setdefault("span_wall_flags", {})
+            for seg in get_beam_span_segments(bm):
+                flags[seg["key"]] = val
+
+
+def set_beam_span_wall_flag(
+    story_data: Dict[str, Any],
+    beam_id: str,
+    span_key: str,
+    enabled: bool,
+) -> bool:
+    """
+    Sets the wall load flag for a specific span or cantilever of a beam.
+    """
+    for bm in story_data.get("beams", []):
+        if bm.get("id") == beam_id:
+            flags = bm.setdefault("span_wall_flags", {})
+            flags[span_key] = bool(enabled)
+            return True
+    return False
+
+
+def convert_beam_kind_and_section(
+    story_data: Dict[str, Any],
+    beam_id: str,
+    new_kind: str,
+    new_width_m: float,
+    new_depth_m: float,
+) -> Tuple[bool, str]:
+    """
+    Converts a beam between 'hidden' and 'drop' with updated width and depth.
+    """
+    for bm in story_data.get("beams", []):
+        if bm.get("id") == beam_id:
+            old_kind = bm.get("beam_kind", "hidden")
+            bm["beam_kind"] = new_kind
+            bm["width_m"] = round(float(new_width_m), 2)
+            bm["depth_m"] = round(float(new_depth_m), 2)
+            return True, f"Beam {beam_id} converted from {old_kind.upper()} to {new_kind.upper()} ({new_width_m:.2f}x{new_depth_m:.2f}m)."
+    return False, f"Beam {beam_id} not found."
+
+
 def solve_continuous_beam_analytical(
     beam: Dict[str, Any],
     fc_mpa: float = 20.0,
@@ -199,7 +324,7 @@ def solve_continuous_beam_analytical(
     v_cant_left = 0.0
     if c_left > 0.0:
         for ld in loads:
-            if ld.get("type") == "point":
+            if ld.get("type") in ("point", "P"):
                 lx = float(ld.get("x", 0.0))
                 lval = float(ld.get("val", 0.0))
                 if lx < c_left:
@@ -221,7 +346,7 @@ def solve_continuous_beam_analytical(
     right_sup_x = span_starts[-1]
     if c_right > 0.0:
         for ld in loads:
-            if ld.get("type") == "point":
+            if ld.get("type") in ("point", "P"):
                 lx = float(ld.get("x", 0.0))
                 lval = float(ld.get("val", 0.0))
                 if lx > right_sup_x:
@@ -245,7 +370,7 @@ def solve_continuous_beam_analytical(
         s_start = span_starts[i - 1]
         s_end = span_starts[i]
         for ld in loads:
-            if ld.get("type") == "point":
+            if ld.get("type") in ("point", "P"):
                 lx = float(ld.get("x", 0.0))
                 P = float(ld.get("val", 0.0))
                 if s_start <= lx <= s_end:
@@ -305,19 +430,21 @@ def solve_continuous_beam_analytical(
     RA = [0.0] * (ns + 2)
     RA[1] += v_cant_left
     RA[ns + 1] += v_cant_right
+
     for i in range(1, ns + 1):
         L = spans[i - 1]
         s_start = span_starts[i - 1]
         s_end = span_starts[i]
-        sum_p_r = 0.0
         sum_p_l = 0.0
+        sum_p_r = 0.0
         for ld in loads:
-            if ld.get("type") == "point":
+            if ld.get("type") in ("point", "P"):
                 lx = float(ld.get("x", 0.0))
                 P = float(ld.get("val", 0.0))
                 if s_start <= lx <= s_end:
                     a = lx - s_start
-                    sum_p_l += P * (L - a) / L
+                    b = L - a
+                    sum_p_l += P * b / L
                     sum_p_r += P * a / L
             else:
                 lx1 = float(ld.get("x1", 0.0))
@@ -327,12 +454,31 @@ def solve_continuous_beam_analytical(
                 w = float(ld.get("val", 0.0))
                 ov1, ov2 = max(s_start, lx1), min(s_end, lx2)
                 if ov2 > ov1:
-                    wtot = w * (ov2 - ov1)
-                    xc = (ov1 + ov2) / 2.0 - s_start
-                    sum_p_l += wtot * (L - xc) / L
-                    sum_p_r += wtot * xc / L
+                    w_sub = w * (ov2 - ov1)
+                    x_mid = (ov1 + ov2) / 2.0 - s_start
+                    sum_p_l += w_sub * (L - x_mid) / L
+                    sum_p_r += w_sub * x_mid / L
+
         RA[i] += sum_p_l + (Mus[i + 1] - Mus[i]) / L
         RA[i + 1] += sum_p_r + (Mus[i] - Mus[i + 1]) / L
+
+    def eval_shear_at(xpos_eval: float) -> float:
+        v = 0.0
+        for s_idx, sup_x in enumerate(span_starts):
+            if xpos_eval >= sup_x:
+                v += RA[s_idx + 1]
+        for ld in loads:
+            if ld.get("type") in ("point", "P"):
+                lx = float(ld.get("x", 0.0))
+                if xpos_eval >= lx:
+                    v -= float(ld.get("val", 0.0))
+            else:
+                lx1 = float(ld.get("x1", 0.0))
+                lx2 = float(ld.get("x2", total_len))
+                w = float(ld.get("val", 0.0))
+                eff = max(0.0, min(xpos_eval, lx2) - lx1)
+                v -= w * eff
+        return v
 
     num_pts = 250
     x_full: List[float] = []
@@ -347,7 +493,7 @@ def solve_continuous_beam_analytical(
                 vval += RA[s_i + 1]
                 mval += RA[s_i + 1] * (xpos - sx)
         for ld in loads:
-            if ld.get("type") == "point":
+            if ld.get("type") in ("point", "P"):
                 lx = float(ld.get("x", 0.0))
                 lval = float(ld.get("val", 0.0))
                 if xpos >= lx - 1e-9:
@@ -356,15 +502,12 @@ def solve_continuous_beam_analytical(
             else:
                 lx1 = float(ld.get("x1", 0.0))
                 lx2 = float(ld.get("x2", total_len))
-                if lx2 <= lx1:
-                    lx2 = total_len
                 lval = float(ld.get("val", 0.0))
                 if xpos > lx1:
                     eff = min(xpos, lx2) - lx1
-                    if eff > 0:
-                        fw = lval * eff
-                        vval -= fw
-                        mval -= fw * (xpos - lx1 - eff / 2.0)
+                    fw = lval * eff
+                    vval -= fw
+                    mval -= fw * (xpos - lx1 - eff / 2.0)
         x_full.append(round(xpos, 4))
         v_full.append(round(vval, 3))
         m_full.append(round(mval, 3))
@@ -384,37 +527,51 @@ def solve_continuous_beam_analytical(
             [abs(v_full[k]) for k in range(len(x_full)) if abs(x_full[k] - x_face_left) <= 0.08 or abs(x_full[k] - x_face_right) <= 0.08]
             or [abs(RA[s_i + 1])]
         )
+
+        v_left = eval_shear_at(sx - 1e-4) if (s_i > 0 or c_left > 0.01) else 0.0
+        v_right = eval_shear_at(sx + 1e-4) if (s_i < ns or c_right > 0.01) else 0.0
+
         support_critical_table.append({
             "support_index": s_i + 1,
             "target_id": sup_info.get("target_id", f"C{s_i+1}"),
             "support_kind": sup_info.get("kind", "column"),
             "x_m": round(sx, 2),
             "reaction_ru_kn": round(RA[s_i + 1], 2),
+            "v_left_kn": round(v_left, 2),
+            "v_right_kn": round(v_right, 2),
+            "m_center_knm": round(Mus[s_i + 1], 2),
             "centerline_neg_mu_knm": round(Mus[s_i + 1], 2),
             "face_neg_mu_knm": round(m_face, 2),
             "face_vu_kn": round(v_face, 2),
         })
 
-    span_positive_moments = []
+    span_critical_table = []
     for s_i in range(ns):
         s_st, s_en = span_starts[s_i], span_starts[s_i + 1]
         span_pts = [(x_full[k], m_full[k]) for k in range(len(x_full)) if s_st <= x_full[k] <= s_en]
         best_x, best_m = max(span_pts, key=lambda t: t[1]) if span_pts else (s_st, 0.0)
-        span_positive_moments.append({
+        span_critical_table.append({
             "span_index": s_i + 1,
             "length_m": spans[s_i],
+            "m_max_pos_knm": round(max(0.0, best_m), 2),
+            "x_at_m_max_m": round(best_x, 2),
             "max_pos_mu_knm": round(max(0.0, best_m), 2),
             "at_x_m": round(best_x, 2),
         })
 
-    max_pos_val = max([s["max_pos_mu_knm"] for s in span_positive_moments] or [0.0])
+    max_pos_val = max([s["m_max_pos_knm"] for s in span_critical_table] or [0.0])
+
     return {
         "beam_id": beam.get("id", "B1"),
         "spans": spans,
+        "num_spans_excluding_cantilevers": ns,
+        "num_spans": ns,
         "reactions": {i: round(RA[i], 2) for i in range(1, ns + 2)},
+        "reactions_kn": [round(RA[i], 2) for i in range(1, ns + 2)],
         "support_moments": [round(Mus[i], 2) for i in range(1, ns + 2)],
         "support_critical_table": support_critical_table,
-        "span_positive_moments": span_positive_moments,
+        "span_critical_table": span_critical_table,
+        "span_positive_moments": span_critical_table,
         "max_pos_mu_knm": max_pos_val,
         "max_pos_moment": max_pos_val,
         "max_neg_face_mu_knm": min([s["face_neg_mu_knm"] for s in support_critical_table] or [0.0]),
@@ -443,68 +600,93 @@ def analyze_all_story_beams_and_columns(
     slabs = story_data.get("slabs", [])
     story_h = float(story_data.get("height_m", 3.0))
 
+    wall_policy = story_data.get("wall_load_policy", "all_beams")
+    wall_val_default = float(story_data.get("wall_load_val_kn_m", 12.0))
     slab_wu_kpa = 12.5
-    beam_slab_w_add: Dict[str, float] = {b["id"]: 0.0 for b in beams}
-    for slb in slabs:
-        if "min_x" not in slb:
-            continue
-        smin_x, smax_x = float(slb["min_x"]), float(slb["max_x"])
-        smin_y, smax_y = float(slb["min_y"]), float(slb["max_y"])
-        lx = max(0.5, smax_x - smin_x)
-        ly = max(0.5, smax_y - smin_y)
-        rib_dir = int(slb.get("rib_direction_deg", 0))
-        is_cant = bool(slb.get("is_cantilever", False))
-        for bm in beams:
-            bid = bm["id"]
-            bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
-            bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
-            b_horiz = abs(bex - bsx) >= abs(bey - bsy)
-            if rib_dir == 0 and (not b_horiz):
-                if (abs(bsx - smin_x) <= 0.45 or abs(bsx - smax_x) <= 0.45) and min(bsy, bey) <= (smin_y + smax_y) / 2.0 <= max(bsy, bey):
-                    trib_m = lx if is_cant else (lx * 0.50)
-                    beam_slab_w_add[bid] = beam_slab_w_add.get(bid, 0.0) + round(slab_wu_kpa * trib_m, 2)
-            elif rib_dir == 90 and b_horiz:
-                if (abs(bsy - smin_y) <= 0.45 or abs(bsy - smax_y) <= 0.45) and min(bsx, bex) <= (smin_x + smax_x) / 2.0 <= max(bsx, bex):
-                    trib_m = ly if is_cant else (ly * 0.50)
-                    beam_slab_w_add[bid] = beam_slab_w_add.get(bid, 0.0) + round(slab_wu_kpa * trib_m, 2)
 
-    beam_map = {}
-    for b in beams:
-        bid = b["id"]
-        b_copy = dict(b)
-        raw_spans = [float(s) for s in b_copy.get("spans", []) if float(s) > 0.15]
-        if not raw_spans:
-            sx, sy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
-            ex, ey = float(b_copy.get("end_x", 4.0)), float(b_copy.get("end_y", 0.0))
-            raw_spans = [round(max(0.50, math.hypot(ex - sx, ey - sy)), 3)]
-        b_copy["spans"] = raw_spans
-        tot_l = round(
-            float(b_copy.get("cantilever_left_m", 0.0))
-            + sum(raw_spans)
-            + float(b_copy.get("cantilever_right_m", 0.0)),
-            3,
-        )
-        base_sw = 14.0 if b_copy.get("beam_kind") == "drop" else 11.0
-        slab_add = beam_slab_w_add.get(bid, 0.0)
-        existing_loads = list(b_copy.get("loads", []))
-        if not existing_loads:
-            b_copy["loads"] = [{"type": "dist", "x1": 0.0, "x2": tot_l, "val": round(base_sw + max(16.0, slab_add), 2)}]
-        elif slab_add > 0.1 and len(existing_loads) == 1 and existing_loads[0].get("type") == "dist":
-            ld0 = dict(existing_loads[0])
-            ld0["x2"] = max(float(ld0.get("x2", tot_l)), tot_l)
-            ld0["val"] = round(max(float(ld0.get("val", 28.0)), base_sw + slab_add), 2)
-            b_copy["loads"] = [ld0]
+    beam_map: Dict[str, Dict[str, Any]] = {}
+    for bm in beams:
+        bid = bm["id"]
+        b_copy = dict(bm)
+        ensure_beam_wall_flags(story_data, b_copy)
+        segments = get_beam_span_segments(b_copy)
+
+        bsx, bsy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
+        bex, bey = float(b_copy.get("end_x", 4.0)), float(b_copy.get("end_y", 0.0))
+        b_dx, b_dy = bex - bsx, bey - bsy
+        b_len = max(0.01, math.hypot(b_dx, b_dy))
+        ux, uy = b_dx / b_len, b_dy / b_len
+        b_horiz = abs(b_dx) >= abs(b_dy)
+
+        b_kind = b_copy.get("beam_kind", "hidden")
+        w_m = float(b_copy.get("width_m", 0.40 if b_kind == "hidden" else 0.20))
+        h_m = float(b_copy.get("depth_m", 0.30 if b_kind == "hidden" else 0.50))
+        w_sw = round(max(3.0, w_m * h_m * 25.0 * 1.2), 2)
+
+        span_wall_flags = b_copy.get("span_wall_flags", {})
+
+        new_loads: List[Dict[str, Any]] = []
+
+        for seg in segments:
+            s_key = seg["key"]
+            x1, x2 = seg["x_start_m"], seg["x_end_m"]
+            seg_len = seg["length_m"]
+            if seg_len <= 0.01:
+                continue
+
+            seg_mid_x = bsx + ux * ((x1 + x2) / 2.0)
+            seg_mid_y = bsy + uy * ((x1 + x2) / 2.0)
+
+            has_wall = span_wall_flags.get(s_key, (wall_policy != "no_walls"))
+            w_wall = wall_val_default if has_wall else 0.0
+
+            w_slab = 0.0
+            for slb in slabs:
+                if "min_x" not in slb:
+                    continue
+                smin_x, smax_x = float(slb["min_x"]), float(slb["max_x"])
+                smin_y, smax_y = float(slb["min_y"]), float(slb["max_y"])
+                lx = max(0.5, smax_x - smin_x)
+                ly = max(0.5, smax_y - smin_y)
+                rib_dir = int(slb.get("rib_direction_deg", 0))
+                is_cant = bool(slb.get("is_cantilever", False))
+
+                if b_horiz and rib_dir == 90:
+                    if smin_x - 0.25 <= seg_mid_x <= smax_x + 0.25:
+                        if abs(seg_mid_y - smin_y) <= 0.45 or abs(seg_mid_y - smax_y) <= 0.45:
+                            trib_m = ly if is_cant else (ly * 0.50)
+                            w_slab += round(slab_wu_kpa * trib_m, 2)
+                elif (not b_horiz) and rib_dir == 0:
+                    if smin_y - 0.25 <= seg_mid_y <= smax_y + 0.25:
+                        if abs(seg_mid_x - smin_x) <= 0.45 or abs(seg_mid_x - smax_x) <= 0.45:
+                            trib_m = lx if is_cant else (lx * 0.50)
+                            w_slab += round(slab_wu_kpa * trib_m, 2)
+
+            w_total = round(w_sw + w_wall + w_slab, 2)
+            new_loads.append({
+                "type": "dist",
+                "x1": round(x1, 3),
+                "x2": round(x2, 3),
+                "val": w_total,
+                "span_key": s_key,
+                "w_sw": w_sw,
+                "w_wall": w_wall,
+                "w_slab": w_slab,
+            })
+
+        b_copy["loads"] = new_loads
         beam_map[bid] = b_copy
 
     ordered_ids: List[str] = []
     visited = set()
 
-    def visit(bid: str):
-        if bid in visited or bid not in beam_map:
+    def visit(b_identifier: str):
+        if b_identifier in visited or b_identifier not in beam_map:
             return
-        visited.add(bid)
-        ordered_ids.append(bid)
+        visited.add(b_identifier)
+        ordered_ids.append(b_identifier)
 
+    # Secondary beams first
     for b in beams:
         if any(s.get("kind") == "beam" for s in b.get("supports", [])):
             visit(b["id"])
@@ -522,15 +704,35 @@ def analyze_all_story_beams_and_columns(
 
         for sup in bm.get("supports", []):
             if sup.get("kind") == "beam" and sup.get("target_id") in beam_map:
+                carrier_id = sup["target_id"]
+                carrier = beam_map[carrier_id]
                 s_idx = int(sup.get("support_index", 1))
                 r_kn = res["reactions"].get(s_idx, 0.0)
-                pos_x = float(sup.get("pos_on_carrier_m", 2.0))
-                carrier = beam_map[sup["target_id"]]
+
+                c_sx = float(carrier.get("start_x", 0.0))
+                c_sy = float(carrier.get("start_y", 0.0))
+                c_ex = float(carrier.get("end_x", 4.0))
+                c_ey = float(carrier.get("end_y", 0.0))
+                c_dx, c_dy = c_ex - c_sx, c_ey - c_sy
+                c_len = max(0.01, math.hypot(c_dx, c_dy))
+                c_ux, c_uy = c_dx / c_len, c_dy / c_len
+                c_cleft = max(0.0, float(carrier.get("cantilever_left_m", 0.0)))
+
+                c_s1_x = c_sx + c_ux * c_cleft
+                c_s1_y = c_sy + c_uy * c_cleft
+
+                b_supp_x = float(bm.get("start_x" if s_idx == 1 else "end_x", 0.0))
+                b_supp_y = float(bm.get("start_y" if s_idx == 1 else "end_y", 0.0))
+
+                dist_from_sup1 = max(0.0, (b_supp_x - c_s1_x) * c_ux + (b_supp_y - c_s1_y) * c_uy)
+                x_on_carrier = round(c_cleft + dist_from_sup1, 3)
+
                 carrier["loads"] = list(carrier.get("loads", [])) + [{
-                    "type": "point",
-                    "x": pos_x,
-                    "val": r_kn,
-                    "label": f"Transferred Reaction from {bid}",
+                    "type": "P",
+                    "dist_from_sup1_m": round(dist_from_sup1, 3),
+                    "x": x_on_carrier,
+                    "val": round(r_kn, 2),
+                    "label": f"P from {bid}",
                 }]
 
     column_records = []
@@ -553,61 +755,51 @@ def analyze_all_story_beams_and_columns(
 
         for bm in beam_map.values():
             bid = bm["id"]
-            res = beam_results.get(bid)
-            if not res:
-                continue
-            sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
-            ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
-            is_horiz = abs(ex - sx) >= abs(ey - sy)
-
-            for sup in bm.get("supports", []):
+            res = beam_results.get(bid, {})
+            supports = bm.get("supports", [])
+            for s_idx, sup in enumerate(supports):
                 if sup.get("kind") == "column" and sup.get("target_id") == cid:
-                    s_idx = int(sup.get("support_index", 1))
-                    r_kn = res["reactions"].get(s_idx, 0.0)
-                    m_end = res["support_moments"][s_idx - 1] if (s_idx - 1) < len(res["support_moments"]) else 0.0
-                    total_beam_reaction_kn += r_kn
-
-                    beam_info = {
-                        "beam_id": bid,
-                        "kind": bm.get("beam_kind", "hidden"),
-                        "width_m": bm.get("width_m", 0.40),
-                        "depth_m": bm.get("depth_m", 0.30),
-                        "reaction_kn": round(r_kn, 2),
-                    }
-                    if is_horiz:
-                        muy_knm += abs(m_end) * 0.5 + 8.5
-                        mid_x = (sx + ex) / 2.0
-                        if mid_x >= cx:
-                            framing_directions["East"] = beam_info
-                        if mid_x <= cx:
-                            framing_directions["West"] = beam_info
+                    r_val = res.get("reactions", {}).get(s_idx + 1, 0.0)
+                    total_beam_reaction_kn += r_val
+                    sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                    ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+                    if abs(ex - sx) >= abs(ey - sy):
+                        f_dir = "East" if max(sx, ex) > cx else "West"
+                        framing_directions[f_dir] = {"beam_id": bid, "reaction_kn": r_val}
+                        muy_knm += r_val * (b_m / 6.0)
                     else:
-                        mux_knm += abs(m_end) * 0.5 + 6.5
-                        mid_y = (sy + ey) / 2.0
-                        if mid_y >= cy:
-                            framing_directions["North"] = beam_info
-                        if mid_y <= cy:
-                            framing_directions["South"] = beam_info
+                        f_dir = "North" if max(sy, ey) > cy else "South"
+                        framing_directions[f_dir] = {"beam_id": bid, "reaction_kn": r_val}
+                        mux_knm += r_val * (h_m / 6.0)
 
-        self_wt_kn = round(b_m * h_m * story_h * 25.0 * 1.2, 2)
-        story_pu_kn = round(max(45.0, total_beam_reaction_kn) + self_wt_kn, 2)
-        col_design = design_column_and_pm_curve(cid, b_m, h_m, story_pu_kn, round(mux_knm, 1), round(muy_knm, 1), fc_mpa, fy_mpa)
+        tributary_col_slab_pu = 45.0
+        wall_col_pu = 18.0 * (story_h / 3.0)
+        col_self_weight = (b_m * h_m * 25.0 * story_h) * 1.2
+        pu_kn = round(total_beam_reaction_kn + tributary_col_slab_pu + wall_col_pu + col_self_weight, 1)
+
+        c_design = design_column_and_pm_curve(
+            column_id=cid,
+            b_m=b_m,
+            h_m=h_m,
+            pu_kn=pu_kn,
+            mux_knm=round(mux_knm, 1),
+            muy_knm=round(muy_knm, 1),
+            fc_mpa=fc_mpa,
+            fy_mpa=fy_mpa,
+        )
 
         column_records.append({
             "column_id": cid,
             "x": cx,
             "y": cy,
-            "b_m": b_m,
-            "h_m": h_m,
-            "story_pu_kn": story_pu_kn,
-            "mux_knm": round(mux_knm, 2),
-            "muy_knm": round(muy_knm, 2),
+            "story_pu_kn": pu_kn,
+            "mux_knm": round(mux_knm, 1),
+            "muy_knm": round(muy_knm, 1),
             "framing_4way": framing_directions,
-            "design": col_design,
+            "design": c_design,
         })
 
     return {
-        "ordered_beam_ids": ordered_ids,
         "beam_results": beam_results,
         "beam_designs": beam_designs,
         "column_records": column_records,
@@ -627,9 +819,10 @@ def design_beam_aci318(
     h_mm = float(beam.get("depth_m", 0.30)) * 1000.0
     d_mm = max(120.0, h_mm - 45.0)
 
-    pos_mu = float(analysis_res.get("max_pos_mu_knm", 0.0))
-    neg_mu = abs(float(analysis_res.get("max_neg_face_mu_knm", 0.0)))
-    vu_kn = float(analysis_res.get("max_face_vu_kn", 0.0))
+    spans = analysis_res.get("spans", [])
+    num_spans = len(spans)
+    span_crit = analysis_res.get("span_critical_table", [])
+    supp_crit = analysis_res.get("support_critical_table", [])
 
     def calc_ast(mu_knm: float) -> Tuple[float, str]:
         as_min = max(0.25 * math.sqrt(fc_mpa) / fy_mpa, 1.4 / fy_mpa) * b_mm * d_mm
@@ -644,17 +837,54 @@ def design_beam_aci318(
         n_bars = max(3 if b_mm >= 300 else 2, math.ceil(ast / area_16))
         return round(ast, 1), f"{n_bars} Phi 16 mm"
 
-    ast_bot, bars_bot = calc_ast(pos_mu)
-    ast_top, bars_top = calc_ast(neg_mu)
+    span_designs = []
+    for s_i, sp_entry in enumerate(span_crit):
+        mu_pos = float(sp_entry.get("m_max_pos_knm", sp_entry.get("max_pos_mu_knm", 0.0)))
+        ast_bot, bars_bot = calc_ast(mu_pos)
+        span_designs.append({
+            "span_index": s_i + 1,
+            "length_m": sp_entry.get("length_m", spans[s_i] if s_i < len(spans) else 4.0),
+            "max_pos_mu_knm": mu_pos,
+            "bottom_ast_mm2": ast_bot,
+            "bottom_bars": bars_bot,
+            "stirrups": "Phi 8 @ 150 mm (2-Branches)" if b_mm <= 300 else "Phi 8 @ 150 mm (4-Branches)",
+        })
 
+    support_designs = []
     vc_kn = (0.17 * math.sqrt(fc_mpa) * b_mm * d_mm) / 1000.0
     phi_vc = 0.75 * vc_kn
+
+    for s_j, sup_entry in enumerate(supp_crit):
+        mu_neg = abs(float(sup_entry.get("face_neg_mu_knm", sup_entry.get("centerline_neg_mu_knm", 0.0))))
+        vu_face = float(sup_entry.get("face_vu_kn", 0.0))
+        ast_top, bars_top = calc_ast(mu_neg)
+        stirrups = "Phi 8 @ 100 mm (2-Branches)" if vu_face <= phi_vc * 1.5 else "Phi 10 @ 100 mm (4-Branches)"
+        support_designs.append({
+            "support_index": s_j + 1,
+            "target_id": sup_entry.get("target_id", f"C{s_j+1}"),
+            "face_neg_mu_knm": mu_neg,
+            "face_vu_kn": vu_face,
+            "top_ast_mm2": ast_top,
+            "top_bars": bars_top,
+            "stirrups": stirrups,
+        })
+
+    pos_mu = float(analysis_res.get("max_pos_mu_knm", 0.0))
+    neg_mu = abs(float(analysis_res.get("max_neg_face_mu_knm", 0.0)))
+    vu_kn = float(analysis_res.get("max_face_vu_kn", 0.0))
+
+    ast_bot, bars_bot = calc_ast(pos_mu)
+    ast_top, bars_top = calc_ast(neg_mu)
     stirrups = "Phi 8 @ 150 mm (2-Branches)" if vu_kn <= phi_vc * 1.5 else "Phi 10 @ 120 mm (4-Branches)"
 
     return {
         "beam_id": beam.get("id", "B1"),
         "b_mm": round(b_mm),
         "h_mm": round(h_mm),
+        "num_spans": num_spans,
+        "num_spans_excluding_cantilevers": num_spans,
+        "span_designs": span_designs,
+        "support_designs": support_designs,
         "bottom_ast_mm2": ast_bot,
         "bottom_bars": bars_bot,
         "top_ast_mm2": ast_top,

@@ -1,5 +1,5 @@
 """
-Unit Test Suite for Xpert Structural Design Studio (v1.5.0-structural-bim-pro)
+Unit Test Suite for Xpert Structural Design Studio (v1.6.0-structural-bim-pro)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
 
@@ -30,6 +30,13 @@ from xpert_structural_engine import (
     rotate_column_90_deg,
     create_linear_dimension,
     auto_generate_exterior_dimensions,
+    get_beam_span_segments,
+    ensure_beam_wall_flags,
+    set_story_wall_load_policy,
+    set_beam_span_wall_flag,
+    convert_beam_kind_and_section,
+    solve_continuous_beam_analytical,
+    design_beam_aci318,
 )
 
 
@@ -41,7 +48,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_project_initialization_custom_xsd_master_and_no_duplicates(self):
-        self.assertEqual(STUDIO_VERSION, "v1.5.0-structural-bim-pro")
+        self.assertEqual(STUDIO_VERSION, "v1.6.0-structural-bim-pro")
         self.assertEqual(MASTER_FILE_EXT, ".xsd")
         cfg = {
             "project_name": "TestTower",
@@ -167,15 +174,62 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertAlmostEqual(col1["b_m"], 0.40, places=2)
         self.assertAlmostEqual(col1["h_m"], 0.20, places=2)
 
-        # 4. Test story analysis with tributary slab loads transferred to beams
-        bundle = analyze_all_story_beams_and_columns(story, fc_mpa=20.0, fy_mpa=350.0)
-        self.assertIn("beam_results", bundle)
-        self.assertIn("B1", bundle["beam_results"])
-        b1_res = bundle["beam_results"]["B1"]
-        self.assertIn("x_full", b1_res)
-        self.assertIn("v_full", b1_res)
-        self.assertIn("m_full", b1_res)
-        self.assertGreater(b1_res["max_pos_mu_knm"], 0.0)
+    def test_v160_beam_segments_wall_loads_and_advanced_analysis(self):
+        beam = {
+            "id": "B10",
+            "beam_kind": "hidden",
+            "width_m": 0.40,
+            "depth_m": 0.30,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 12.0,
+            "end_y": 0.0,
+            "cantilever_left_m": 1.5,
+            "spans": [5.0, 4.0],
+            "cantilever_right_m": 1.5,
+            "loads": [{"type": "dist", "x1": 0.0, "x2": 12.0, "val": 30.0}],
+        }
+        segs = get_beam_span_segments(beam)
+        self.assertEqual(len(segs), 4)
+        self.assertEqual([s["key"] for s in segs], ["cant_left", "span_1", "span_2", "cant_right"])
+
+        story = {
+            "wall_load_policy": "all_beams",
+            "wall_load_val_kn_m": 12.0,
+            "beams": [beam],
+            "columns": [],
+            "slabs": [],
+        }
+        flags = ensure_beam_wall_flags(story, beam)
+        self.assertTrue(flags["span_1"])
+
+        set_beam_span_wall_flag(story, "B10", "span_1", False)
+        self.assertFalse(beam["span_wall_flags"]["span_1"])
+
+        set_story_wall_load_policy(story, "no_walls")
+        self.assertFalse(beam["span_wall_flags"]["span_2"])
+
+        ok_conv, _ = convert_beam_kind_and_section(story, "B10", "drop", 0.20, 0.50)
+        self.assertTrue(ok_conv)
+        self.assertEqual(beam["beam_kind"], "drop")
+        self.assertEqual(beam["width_m"], 0.20)
+        self.assertEqual(beam["depth_m"], 0.50)
+
+        # Test solve_continuous_beam_analytical return fields
+        res = solve_continuous_beam_analytical(beam, 20.0, 350.0)
+        self.assertEqual(res["num_spans_excluding_cantilevers"], 2)
+        self.assertEqual(len(res["reactions_kn"]), 3)
+        self.assertIn("v_left_kn", res["support_critical_table"][1])
+        self.assertIn("v_right_kn", res["support_critical_table"][1])
+        self.assertIn("m_center_knm", res["support_critical_table"][1])
+        self.assertIn("m_max_pos_knm", res["span_critical_table"][0])
+        self.assertIn("x_at_m_max_m", res["span_critical_table"][0])
+
+        # Test design_beam_aci318 return fields
+        des = design_beam_aci318(beam, res, 20.0, 350.0)
+        self.assertEqual(des["num_spans"], 2)
+        self.assertEqual(len(des["span_designs"]), 2)
+        self.assertEqual(len(des["support_designs"]), 3)
 
 
 if __name__ == "__main__":

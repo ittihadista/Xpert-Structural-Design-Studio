@@ -28,7 +28,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.5.0-structural-bim-pro"
+STUDIO_VERSION = "v1.6.0-structural-bim-pro"
 MASTER_FILE_EXT = ".xsd"
 
 STANDARD_LAYERS = [
