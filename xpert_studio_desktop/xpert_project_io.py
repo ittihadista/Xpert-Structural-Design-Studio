@@ -16,6 +16,7 @@ Handles:
 
 from __future__ import annotations
 import json
+import math
 import os
 import re
 import uuid
@@ -27,7 +28,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.4.0-revit-bim-ux"
+STUDIO_VERSION = "v1.5.0-structural-bim-pro"
 MASTER_FILE_EXT = ".xsd"
 
 STANDARD_LAYERS = [
@@ -40,6 +41,7 @@ STANDARD_LAYERS = [
     ("00-XD-TAG-COL", 3, "Continuous"),    # Bright Green: Column Tags (C1..Cn)
     ("00-XD-TAG-BEAM", 30, "Continuous"),  # Bright Orange: Beam Tags (B1..Bm)
     ("00-XD-ARCH-REF", 8, "Continuous"),   # Gray: Imported Architectural Underlay
+    ("00-XD-DIM", 7, "Continuous"),        # White: Persistent CAD Dimensions
 ]
 
 
@@ -785,7 +787,33 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
                     dxfattribs={"layer": "00-XD-ARCH-REF", "color": 8},
                 )
 
+    # 7. Persistent CAD Dimensions (00-XD-DIM)
+    for dim in story_data.get("dimensions", []):
+        x1, y1 = float(dim.get("x1", 0.0)), float(dim.get("y1", 0.0))
+        x2, y2 = float(dim.get("x2", 0.0)), float(dim.get("y2", 0.0))
+        off = float(dim.get("offset_m", 0.65))
+        dx, dy = x2 - x1, y2 - y1
+        L = max(1e-6, math.hypot(dx, dy))
+        nx, ny = -dy / L, dx / L
+        ox1, oy1 = x1 + nx * off, y1 + ny * off
+        ox2, oy2 = x2 + nx * off, y2 + ny * off
+        msp.add_line((x1, y1), (ox1, oy1), dxfattribs={"layer": "00-XD-DIM", "color": 2})
+        msp.add_line((x2, y2), (ox2, oy2), dxfattribs={"layer": "00-XD-DIM", "color": 2})
+        msp.add_line((ox1, oy1), (ox2, oy2), dxfattribs={"layer": "00-XD-DIM", "color": 2})
+        msp.add_text(
+            dim.get("text", f"{L:.2f} m"),
+            dxfattribs={
+                "layer": "00-XD-DIM",
+                "height": 0.16,
+                "color": 2,
+                "insert": ((ox1 + ox2) / 2.0, (oy1 + oy2) / 2.0 + 0.10),
+            },
+        )
+
     doc.saveas(dxf_path)
+
+
+export_story_to_dxf = sync_story_to_dxf
 
 
 def propagate_ground_columns_to_all_stories(master_payload: Dict[str, Any], ground_columns: List[Dict[str, Any]]) -> None:

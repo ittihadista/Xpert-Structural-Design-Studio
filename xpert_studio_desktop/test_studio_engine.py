@@ -1,5 +1,6 @@
 """
-Unit Test Suite for Xpert Structural Design Studio (v1.4.0-revit-bim-ux)
+Unit Test Suite for Xpert Structural Design Studio (v1.5.0-structural-bim-pro)
+Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
 
 import os
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 
 from xpert_project_io import (
+    STUDIO_VERSION,
     MASTER_FILE_EXT,
     initialize_studio_project,
     load_studio_project_from_master_file,
@@ -25,6 +27,9 @@ from xpert_structural_engine import (
     align_element_face_to_reference,
     move_selected_elements_by_delta,
     measure_distance_2d,
+    rotate_column_90_deg,
+    create_linear_dimension,
+    auto_generate_exterior_dimensions,
 )
 
 
@@ -36,6 +41,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_project_initialization_custom_xsd_master_and_no_duplicates(self):
+        self.assertEqual(STUDIO_VERSION, "v1.5.0-structural-bim-pro")
         self.assertEqual(MASTER_FILE_EXT, ".xsd")
         cfg = {
             "project_name": "TestTower",
@@ -122,6 +128,54 @@ class TestXpertStudioEngine(unittest.TestCase):
 
         m_res = measure_distance_2d((0.0, 0.0), (3.0, 4.0))
         self.assertAlmostEqual(m_res["distance_m"], 5.0, places=3)
+
+    def test_v150_bim_pro_dimensions_and_analysis(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [8.0, 0.0], [8.0, 6.0], [0.0, 6.0]],
+            "columns": [
+                {"id": "C1", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 7.90, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 0.10, "y": 5.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 7.90, "y": 5.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 0.0, "start_y": 0.20, "end_x": 8.0, "end_y": 0.20, "width_m": 0.40, "beam_kind": "hidden", "spans": [7.8]},
+                {"id": "B2", "start_x": 0.0, "start_y": 5.80, "end_x": 8.0, "end_y": 5.80, "width_m": 0.40, "beam_kind": "hidden", "spans": [7.8]},
+            ],
+            "slabs": [
+                {"id": "S1", "min_x": 0.0, "max_x": 8.0, "min_y": 0.20, "max_y": 5.80, "clear_min_x": 0.20, "clear_max_x": 7.80, "clear_min_y": 0.40, "clear_max_y": 5.60, "rib_direction_deg": 90, "is_cantilever": False, "axis_span_m": 5.2}
+            ],
+            "openings": [],
+            "dimensions": [],
+        }
+
+        # 1. Test dimension creation
+        dim = create_linear_dimension(story, (0.0, 0.0), (8.0, 0.0), offset_m=0.8)
+        self.assertEqual(dim["id"], "D1")
+        self.assertAlmostEqual(float(dim["x2"]), 8.0, places=2)
+        self.assertEqual(len(story["dimensions"]), 1)
+
+        # 2. Test auto exterior dimensions
+        count, _ = auto_generate_exterior_dimensions(story)
+        self.assertGreaterEqual(count, 2)
+        self.assertEqual(len(story["dimensions"]), count)
+
+        # 3. Test column rotation 90 deg
+        ok_rot, _ = rotate_column_90_deg(story, "C1")
+        self.assertTrue(ok_rot)
+        col1 = next(c for c in story["columns"] if c["id"] == "C1")
+        self.assertAlmostEqual(col1["b_m"], 0.40, places=2)
+        self.assertAlmostEqual(col1["h_m"], 0.20, places=2)
+
+        # 4. Test story analysis with tributary slab loads transferred to beams
+        bundle = analyze_all_story_beams_and_columns(story, fc_mpa=20.0, fy_mpa=350.0)
+        self.assertIn("beam_results", bundle)
+        self.assertIn("B1", bundle["beam_results"])
+        b1_res = bundle["beam_results"]["B1"]
+        self.assertIn("x_full", b1_res)
+        self.assertIn("v_full", b1_res)
+        self.assertIn("m_full", b1_res)
+        self.assertGreater(b1_res["max_pos_mu_knm"], 0.0)
 
 
 if __name__ == "__main__":

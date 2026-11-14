@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v1.4.0-revit-bim-ux)
+Xpert Structural Design Studio (v1.5.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf + Matplotlib)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -34,6 +34,8 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QSplitter,
     QSpinBox,
     QStackedWidget,
     QStatusBar,
@@ -76,6 +78,8 @@ from xpert_structural_engine import (
     align_element_face_to_reference,
     move_selected_elements_by_delta,
     measure_distance_2d,
+    create_linear_dimension,
+    auto_generate_exterior_dimensions,
 )
 
 
@@ -344,16 +348,187 @@ class MoveNumericDeltaDialog(QDialog):
         vbox.addWidget(btns)
 
 
+
+class BeamDiagramsViewWidget(QWidget):
+    """
+    Renders analytical Shear Force Diagram (SFD - Vu in kN) and
+    Bending Moment Diagram (BMD - Mu in kN.m) with zero baselines,
+    positive moment downward (tension face down), support markers,
+    and critical peak annotations.
+    """
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.beam_data: Optional[Dict[str, Any]] = None
+        self.setMinimumHeight(340)
+        self.setStyleSheet("background-color: #0B0F19;")
+
+    def set_beam_analysis_data(self, beam_data: Optional[Dict[str, Any]]) -> None:
+        self.beam_data = beam_data
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+
+        painter.fillRect(0, 0, w, h, QColor("#0B0F19"))
+
+        if not self.beam_data or "x_full" not in self.beam_data or len(self.beam_data["x_full"]) < 2:
+            painter.setPen(QPen(QColor("#94A3B8"), 1))
+            painter.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+            msg = "Select a beam and click 'Run Analysis & Design (F5)' to display SFD (Vu) & BMD (Mu) diagrams."
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, msg)
+            return
+
+        x_pts = self.beam_data["x_full"]
+        v_pts = self.beam_data["v_full"]
+        m_pts = self.beam_data["m_full"]
+        beam_id = str(self.beam_data.get("beam_id", "Beam"))
+        spans = self.beam_data.get("spans", [])
+
+        x_min = min(x_pts)
+        x_max = max(x_pts)
+        L_total = max(1e-3, x_max - x_min)
+
+        pad_left = 65
+        pad_right = 35
+        pad_top = 35
+        pad_bottom = 25
+        plot_w = max(10, w - pad_left - pad_right)
+
+        half_h = (h - pad_top - pad_bottom - 20) / 2.0
+        sfd_top = pad_top
+        sfd_bot = sfd_top + half_h
+        sfd_mid = (sfd_top + sfd_bot) / 2.0
+
+        bmd_top = sfd_bot + 20
+        bmd_bot = bmd_top + half_h
+        bmd_mid = (bmd_top + bmd_bot) / 2.0
+
+        def to_sx(x_val: float) -> float:
+            return pad_left + ((x_val - x_min) / L_total) * plot_w
+
+        # --- SFD (Vu) ---
+        max_abs_v = max(abs(v) for v in v_pts) if v_pts else 1.0
+        if max_abs_v < 1e-3:
+            max_abs_v = 1.0
+        v_scale = (half_h * 0.42) / max_abs_v
+
+        painter.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+        painter.setPen(QColor("#38BDF8"))
+        max_v = max(v_pts) if v_pts else 0.0
+        min_v = min(v_pts) if v_pts else 0.0
+        painter.drawText(
+            pad_left, int(sfd_top - 12),
+            f"Shear Force Diagram — {beam_id} [Vu, kN]  (Max +Vu = {max_v:.2f} kN, Max -Vu = {min_v:.2f} kN)"
+        )
+
+        painter.setPen(QPen(QColor("#475569"), 1.2, Qt.PenStyle.DashLine))
+        painter.drawLine(int(pad_left), int(sfd_mid), int(pad_left + plot_w), int(sfd_mid))
+        painter.setFont(QFont("Arial", 8))
+        painter.setPen(QColor("#64748B"))
+        painter.drawText(int(pad_left - 35), int(sfd_mid + 4), "0.0")
+
+        sfd_poly = [QPointF(to_sx(x_pts[0]), sfd_mid)]
+        for x, v in zip(x_pts, v_pts):
+            sfd_poly.append(QPointF(to_sx(x), sfd_mid - v * v_scale))
+        sfd_poly.append(QPointF(to_sx(x_pts[-1]), sfd_mid))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(6, 182, 212, 45)))
+        painter.drawPolygon(QPolygonF(sfd_poly))
+
+        painter.setPen(QPen(QColor("#06B6D4"), 2.0))
+        for i in range(len(x_pts) - 1):
+            p1 = QPointF(to_sx(x_pts[i]), sfd_mid - v_pts[i] * v_scale)
+            p2 = QPointF(to_sx(x_pts[i + 1]), sfd_mid - v_pts[i + 1] * v_scale)
+            painter.drawLine(p1, p2)
+
+        # --- BMD (Mu) ---
+        max_abs_m = max(abs(m) for m in m_pts) if m_pts else 1.0
+        if max_abs_m < 1e-3:
+            max_abs_m = 1.0
+        m_scale = (half_h * 0.42) / max_abs_m
+
+        painter.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+        painter.setPen(QColor("#F59E0B"))
+        max_m = max(m_pts) if m_pts else 0.0
+        min_m = min(m_pts) if m_pts else 0.0
+        painter.drawText(
+            pad_left, int(bmd_top - 12),
+            f"Bending Moment Diagram — {beam_id} [Mu, kN.m]  (Max +Mu = {max_m:.2f} kN.m, Max -Mu = {min_m:.2f} kN.m [Tension Face Down])"
+        )
+
+        painter.setPen(QPen(QColor("#475569"), 1.2, Qt.PenStyle.DashLine))
+        painter.drawLine(int(pad_left), int(bmd_mid), int(pad_left + plot_w), int(bmd_mid))
+        painter.setFont(QFont("Arial", 8))
+        painter.setPen(QColor("#64748B"))
+        painter.drawText(int(pad_left - 35), int(bmd_mid + 4), "0.0")
+
+        bmd_poly = [QPointF(to_sx(x_pts[0]), bmd_mid)]
+        for x, m in zip(x_pts, m_pts):
+            bmd_poly.append(QPointF(to_sx(x), bmd_mid + m * m_scale))
+        bmd_poly.append(QPointF(to_sx(x_pts[-1]), bmd_mid))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(245, 158, 11, 45)))
+        painter.drawPolygon(QPolygonF(bmd_poly))
+
+        painter.setPen(QPen(QColor("#F59E0B"), 2.0))
+        for i in range(len(x_pts) - 1):
+            p1 = QPointF(to_sx(x_pts[i]), bmd_mid + m_pts[i] * m_scale)
+            p2 = QPointF(to_sx(x_pts[i + 1]), bmd_mid + m_pts[i + 1] * m_scale)
+            painter.drawLine(p1, p2)
+
+        # Supports & ticks
+        supp_xs = [0.0]
+        cur_x = 0.0
+        for s in spans:
+            cur_x += float(s)
+            supp_xs.append(cur_x)
+
+        supp_pen = QPen(QColor("#EF4444"), 1.5)
+        for sx_val in supp_xs:
+            if sx_val <= x_max + 1e-4:
+                px = to_sx(sx_val)
+                painter.setPen(supp_pen)
+                painter.setBrush(QBrush(QColor("#EF4444")))
+                tri_s = QPolygonF([QPointF(px, sfd_mid), QPointF(px - 5, sfd_mid + 10), QPointF(px + 5, sfd_mid + 10)])
+                painter.drawPolygon(tri_s)
+                tri_m = QPolygonF([QPointF(px, bmd_mid), QPointF(px - 5, bmd_mid - 10), QPointF(px + 5, bmd_mid - 10)])
+                painter.drawPolygon(tri_m)
+
+        painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+        if max_m > 0.01:
+            max_idx = m_pts.index(max(m_pts))
+            peak_x = to_sx(x_pts[max_idx])
+            peak_y = bmd_mid + max_m * m_scale
+            painter.setPen(QColor("#FDE047"))
+            painter.drawText(int(peak_x - 30), int(peak_y + 16), f"+{max_m:.2f}")
+
+        if min_m < -0.01:
+            min_idx = m_pts.index(min(m_pts))
+            peak_x = to_sx(x_pts[min_idx])
+            peak_y = bmd_mid + min_m * m_scale
+            painter.setPen(QColor("#FDE047"))
+            painter.drawText(int(peak_x - 30), int(peak_y - 8), f"{min_m:.2f}")
+
+
 class StructuralCadCanvas2D(QGraphicsView):
     def __init__(self, parent_studio: "XpertStudioMainWindow"):
         super().__init__()
         self.studio = parent_studio
         self.scene_2d = QGraphicsScene(self)
+        self.scene_2d.setSceneRect(-10000.0, -10000.0, 20000.0, 20000.0)
         self.setScene(self.scene_2d)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setBackgroundBrush(QBrush(QColor("#0D1117")))
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -391,10 +566,13 @@ class StructuralCadCanvas2D(QGraphicsView):
         self._current_snap_info: Optional[Dict[str, Any]] = None
 
         self._align_ref: Optional[Dict[str, Any]] = None
-        self._last_align_padlock: Optional[Dict[str, Any]] = None
 
         self._measure_pts: List[Tuple[float, float]] = []
         self._last_measurement: Optional[Dict[str, Any]] = None
+
+        self._zoom_win_start: Optional[Tuple[float, float]] = None
+        self._zoom_win_curr: Optional[Tuple[float, float]] = None
+        self._dim_first_pt: Optional[Tuple[float, float]] = None
 
         self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
 
@@ -419,6 +597,8 @@ class StructuralCadCanvas2D(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
         elif self.active_tool == "SELECT":
             self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        elif self.active_tool == "ROTATE_COL":
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
 
@@ -488,6 +668,9 @@ class StructuralCadCanvas2D(QGraphicsView):
             self._first_click_pt = None
             self._align_ref = None
             self._measure_pts.clear()
+            self._dim_first_pt = None
+            self._zoom_win_start = None
+            self._zoom_win_curr = None
             self._is_box_selecting = False
             self.active_tool = "SELECT"
             self.update_cursor_for_active_tool()
@@ -632,6 +815,9 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self._first_click_pt = None
                 self._align_ref = None
                 self._measure_pts.clear()
+                self._dim_first_pt = None
+                self._zoom_win_start = None
+                self._zoom_win_curr = None
                 self._is_box_selecting = False
                 self.active_tool = "SELECT"
                 self.update_cursor_for_active_tool()
@@ -644,27 +830,29 @@ class StructuralCadCanvas2D(QGraphicsView):
             scene_pt = self.mapToScene(event.position().toPoint())
             raw_x, raw_y = self._scene_to_world_m(scene_pt)
 
-            if self._last_align_padlock is not None:
-                px, py = self._last_align_padlock["x"], self._last_align_padlock["y"]
-                if math.hypot(raw_x - px, raw_y - py) <= 0.40:
-                    self._last_align_padlock["locked"] = not self._last_align_padlock["locked"]
-                    is_lk = self._last_align_padlock["locked"]
-                    t_kind = self._last_align_padlock["kind"]
-                    t_id = self._last_align_padlock["id"]
-                    t_axis = self._last_align_padlock["axis"]
-                    coll = self.studio.current_story_data.get("columns" if t_kind == "column" else "beams", [])
-                    for item in coll:
-                        if item.get("id") == t_id:
-                            locks = item.setdefault("locked_alignments", {})
-                            if t_axis in locks:
-                                locks[t_axis]["locked"] = is_lk
-                    self.studio.save_and_sync_current_story()
-                    self.render_story(self.studio.current_story_data)
-                    self.studio.update_contextual_prompt(
-                        f"Alignment Constraint on {t_kind.upper()} {t_id} ({t_axis.upper()}-axis) is now {'LOCKED 🔒' if is_lk else 'UNLOCKED 🔓'}."
-                    )
-                    event.accept()
-                    return
+            if self.active_tool == "ZOOM_WINDOW":
+                self._zoom_win_start = (raw_x, raw_y)
+                self._zoom_win_curr = (raw_x, raw_y)
+                self.render_story(self.studio.current_story_data)
+                event.accept()
+                return
+
+            if self.active_tool == "ROTATE_COL":
+                found = self._find_element_near(raw_x, raw_y)
+                if found and found["kind"] == "column":
+                    cid = str(found["id"])
+                    ok, msg = rotate_column_90_deg(self.studio.current_story_data, cid)
+                    if ok:
+                        self.studio.save_and_sync_current_story()
+                        self.studio.refresh_story_ui()
+                        self.studio.update_contextual_prompt(f"Column {cid} rotated: {msg}")
+                    else:
+                        QMessageBox.warning(self, "Rotate Column Notice", msg)
+                        self.studio.update_contextual_prompt(msg)
+                else:
+                    self.studio.update_contextual_prompt("Rotate Col [R]: Click directly on a Column (C#) to rotate it 90°.")
+                event.accept()
+                return
 
             snap = self.compute_osnap_point(raw_x, raw_y, self.studio.current_story_data)
             sx, sy = snap["x"], snap["y"]
@@ -745,6 +933,12 @@ class StructuralCadCanvas2D(QGraphicsView):
         scene_pt = self.mapToScene(event.position().toPoint())
         raw_x, raw_y = self._scene_to_world_m(scene_pt)
 
+        if self.active_tool == "ZOOM_WINDOW" and self._zoom_win_start is not None:
+            self._zoom_win_curr = (raw_x, raw_y)
+            self.render_story(self.studio.current_story_data)
+            event.accept()
+            return
+
         if self._is_box_selecting and self._box_start_world is not None:
             self._box_current_world = (raw_x, raw_y)
             is_cross = raw_x < self._box_start_world[0]
@@ -761,6 +955,8 @@ class StructuralCadCanvas2D(QGraphicsView):
             ref_pt = self._polyline_pts[-1]
         elif self.active_tool in ("DRAW_BEAM_HID", "DRAW_BEAM_DROP", "MOVE_ELEMENT") and self._first_click_pt is not None:
             ref_pt = self._first_click_pt
+        elif self.active_tool in ("DIM_LINEAR", "DIM_ALIGNED") and self._dim_first_pt is not None:
+            ref_pt = self._dim_first_pt
 
         if self.ortho_enabled and ref_pt is not None and snap["snap_type"] != "POLY_CLOSE":
             fx, fy = ref_pt
@@ -778,6 +974,25 @@ class StructuralCadCanvas2D(QGraphicsView):
         if self._is_panning and event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton):
             self._is_panning = False
             self.update_cursor_for_active_tool()
+            event.accept()
+            return
+
+        if self.active_tool == "ZOOM_WINDOW" and self._zoom_win_start is not None and event.button() == Qt.MouseButton.LeftButton:
+            x1, y1 = self._zoom_win_start
+            scene_pt = self.mapToScene(event.position().toPoint())
+            x2, y2 = self._scene_to_world_m(scene_pt)
+            s = self.scale_px
+            min_x, max_x = min(x1, x2), max(x1, x2)
+            min_y, max_y = min(y1, y2), max(y1, y2)
+            if (max_x - min_x) > 0.05 and (max_y - min_y) > 0.05:
+                rect = QRectF(min_x * s, -max_y * s, (max_x - min_x) * s, (max_y - min_y) * s)
+                self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+            self._zoom_win_start = None
+            self._zoom_win_curr = None
+            self.active_tool = "SELECT"
+            self.update_cursor_for_active_tool()
+            self.render_story(self.studio.current_story_data)
+            self.studio.update_contextual_prompt("Zoom Window complete. Ready (SELECT).")
             event.accept()
             return
 
@@ -967,26 +1182,31 @@ class StructuralCadCanvas2D(QGraphicsView):
                 ok, msg = align_element_face_to_reference(
                     story, found["kind"], found["id"], face, axis, rc, lock_constraint=False, boundary_mode=boundary_mode
                 )
+                self._align_ref = None
                 if ok:
-                    self._last_align_padlock = {
-                        "x": rc if axis == "x" else raw_x,
-                        "y": raw_y if axis == "x" else rc,
-                        "kind": found["kind"],
-                        "id": found["id"],
-                        "axis": axis,
-                        "locked": False,
-                    }
-                    self._align_ref = None
                     self.studio.save_and_sync_current_story()
                     self.studio.refresh_story_ui()
-                    self.studio.update_contextual_prompt(
-                        f"{msg} — Click the Padlock icon (🔓) on canvas to LOCK this alignment!"
-                    )
+                    self.studio.update_contextual_prompt(msg)
                 else:
                     QMessageBox.warning(self, "Align Tool Notice", msg)
-                    self._align_ref = None
                     self.render_story(story)
                 return
+
+        if tool in ("DIM_LINEAR", "DIM_ALIGNED"):
+            if self._dim_first_pt is None:
+                self._dim_first_pt = (sx, sy)
+                self.render_story(story)
+                self.studio.update_contextual_prompt(f"{tool}: Point 1 set at ({sx:.2f}, {sy:.2f}). Click second point to place dimension...")
+            else:
+                p1 = self._dim_first_pt
+                p2 = (sx, sy)
+                dim_type = "linear" if tool == "DIM_LINEAR" else "aligned"
+                dim_obj = create_linear_dimension(story, p1, p2, offset_m=0.65, dim_kind=dim_type)
+                self._dim_first_pt = None
+                self.studio.save_and_sync_current_story()
+                self.render_story(story)
+                self.studio.update_contextual_prompt(f"Created Dimension {dim_obj['id']} ({dim_obj['text']}). Click next point or right-click to finish.")
+            return
 
         if tool == "DRAW_SLAB_EDGE":
             if len(self._polyline_pts) >= 3 and (
@@ -1154,10 +1374,10 @@ class StructuralCadCanvas2D(QGraphicsView):
         s = self.scale_px
 
         grid_pen = QPen(QColor("#161F2C"), 1, Qt.PenStyle.DotLine)
-        for gx in range(-2, 18):
-            self.scene_2d.addLine(gx * s, -14 * s, gx * s, 2 * s, grid_pen)
-        for gy in range(-2, 14):
-            self.scene_2d.addLine(-2 * s, -gy * s, 18 * s, -gy * s, grid_pen)
+        for gx in range(-30, 53):
+            self.scene_2d.addLine(gx * s, -52 * s, gx * s, 30 * s, grid_pen)
+        for gy in range(-30, 53):
+            self.scene_2d.addLine(-30 * s, -gy * s, 52 * s, -gy * s, grid_pen)
 
         arch_block = story_data.get("arch_underlay_block")
         if self.layer_show_arch and isinstance(arch_block, dict) and arch_block.get("visible", True):
@@ -1304,17 +1524,50 @@ class StructuralCadCanvas2D(QGraphicsView):
             else:
                 self.scene_2d.addLine(-2 * s, -rc * s, 18 * s, -rc * s, ref_pen)
 
-        if self._last_align_padlock is not None:
-            px, py = self._last_align_padlock["x"], self._last_align_padlock["y"]
-            is_lk = self._last_align_padlock["locked"]
-            lk_rect = QRectF(px * s - 14, -py * s - 14, 28, 24)
-            self.scene_2d.addRect(
-                lk_rect,
-                QPen(QColor("#22C55E" if is_lk else "#F59E0B"), 2),
-                QBrush(QColor(15, 23, 42, 230)),
-            )
-            lk_txt = self.scene_2d.addText("🔒" if is_lk else "🔓", QFont("Arial", 10, QFont.Weight.Bold))
-            lk_txt.setPos(px * s - 11, -py * s - 15)
+
+
+                # Persistent CAD Dimensions (00-XD-DIM)
+        for dim in story_data.get("dimensions", []):
+            x1, y1 = float(dim.get("x1", 0.0)), float(dim.get("y1", 0.0))
+            x2, y2 = float(dim.get("x2", 0.0)), float(dim.get("y2", 0.0))
+            off = float(dim.get("offset_m", 0.65))
+            dx, dy = x2 - x1, y2 - y1
+            L = max(1e-6, math.hypot(dx, dy))
+            nx, ny = -dy / L, dx / L
+            ox1, oy1 = x1 + nx * off, y1 + ny * off
+            ox2, oy2 = x2 + nx * off, y2 + ny * off
+
+            dim_pen = QPen(QColor("#38BDF8"), 1.2)
+            ext_pen = QPen(QColor("#64748B"), 1.0, Qt.PenStyle.DashLine)
+
+            self.scene_2d.addLine(x1 * s, -y1 * s, (ox1 + nx * 0.15) * s, -(oy1 + ny * 0.15) * s, ext_pen)
+            self.scene_2d.addLine(x2 * s, -y2 * s, (ox2 + nx * 0.15) * s, -(oy2 + ny * 0.15) * s, ext_pen)
+            self.scene_2d.addLine(ox1 * s, -oy1 * s, ox2 * s, -oy2 * s, dim_pen)
+
+            tick_len = 0.12
+            tx, ty = (dx / L) * tick_len, (dy / L) * tick_len
+            tnx, tny = nx * tick_len, ny * tick_len
+            self.scene_2d.addLine((ox1 - tx - tnx) * s, -(oy1 - ty - tny) * s, (ox1 + tx + tnx) * s, -(oy1 + ty + tny) * s, dim_pen)
+            self.scene_2d.addLine((ox2 - tx - tnx) * s, -(oy2 - ty - tny) * s, (ox2 + tx + tnx) * s, -(oy2 + ty + tny) * s, dim_pen)
+
+            mx, my = (ox1 + ox2) / 2.0 + nx * 0.15, (oy1 + oy2) / 2.0 + ny * 0.15
+            txt_str = dim.get("text", f"{L:.2f} m")
+            d_txt = self.scene_2d.addText(txt_str, QFont("Arial", 8, QFont.Weight.Bold))
+            d_txt.setDefaultTextColor(QColor("#E0F2FE"))
+            d_txt.setPos(mx * s - 20, -my * s - 10)
+
+        if self.active_tool in ("DIM_LINEAR", "DIM_ALIGNED") and self._dim_first_pt is not None and self._current_snap_info is not None:
+            p1x, p1y = self._dim_first_pt
+            p2x, p2y = self._current_snap_info["x"], self._current_snap_info["y"]
+            self.scene_2d.addLine(p1x * s, -p1y * s, p2x * s, -p2y * s, QPen(QColor("#38BDF8"), 1.5, Qt.PenStyle.DashLine))
+
+        if self.active_tool == "ZOOM_WINDOW" and self._zoom_win_start and self._zoom_win_curr:
+            zx1, zy1 = self._zoom_win_start
+            zx2, zy2 = self._zoom_win_curr
+            zmin_x, zmax_x = min(zx1, zx2), max(zx1, zx2)
+            zmin_y, zmax_y = min(zy1, zy2), max(zy1, zy2)
+            zrect = QRectF(zmin_x * s, -zmax_y * s, (zmax_x - zmin_x) * s, (zmax_y - zmin_y) * s)
+            self.scene_2d.addRect(zrect, QPen(QColor("#818CF8"), 1.8, Qt.PenStyle.DashLine), QBrush(QColor(99, 102, 241, 30)))
 
         if self._last_measurement is not None:
             p1, p2 = self._last_measurement["p1"], self._last_measurement["p2"]
@@ -1371,6 +1624,9 @@ class StructuralCadCanvas2D(QGraphicsView):
                 marker_rect = QRectF(ox * s - 5, -oy * s - 5, 10, 10)
                 self.scene_2d.addRect(marker_rect, QPen(QColor("#FACC15"), 2), QBrush(Qt.BrushStyle.NoBrush))
 
+
+
+StructuralCanvas2DView = StructuralCadCanvas2D
 
 class XpertStudioMainWindow(QMainWindow):
     def __init__(self, initial_master_project: Optional[Dict[str, Any]] = None):
@@ -1475,33 +1731,34 @@ class XpertStudioMainWindow(QMainWindow):
         m_analyze.addAction(act_all)
 
     def _build_classic_toolbars(self) -> None:
-        top_tb = QToolBar("Main Studio Header", self)
-        top_tb.setMovable(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, top_tb)
+        # Row 1: Project & Workspace Toolbar
+        row1_tb = QToolBar("Project & Workspace Bar", self)
+        row1_tb.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, row1_tb)
 
         btn_new = QPushButton("New Project")
         btn_new.clicked.connect(self.open_new_project_dialog)
-        top_tb.addWidget(btn_new)
+        row1_tb.addWidget(btn_new)
 
         btn_open = QPushButton(f"Open (*{MASTER_FILE_EXT})")
         btn_open.clicked.connect(self.open_existing_project_file_dialog)
-        top_tb.addWidget(btn_open)
+        row1_tb.addWidget(btn_open)
 
         btn_imp_dxf = QPushButton("Import Arch .DXF")
         btn_imp_dxf.clicked.connect(self.import_arch_dxf_for_current_story)
-        top_tb.addWidget(btn_imp_dxf)
+        row1_tb.addWidget(btn_imp_dxf)
 
         btn_save = QPushButton("Save && Sync (Ctrl+S)")
         btn_save.clicked.connect(self.save_and_sync_current_story)
-        top_tb.addWidget(btn_save)
-        top_tb.addSeparator()
+        row1_tb.addWidget(btn_save)
+        row1_tb.addSeparator()
 
-        top_tb.addWidget(QLabel(" Story: "))
+        row1_tb.addWidget(QLabel(" Story: "))
         self.cb_story = QComboBox()
         self.cb_story.setMinimumWidth(210)
         self.cb_story.currentIndexChanged.connect(self._on_story_changed)
-        top_tb.addWidget(self.cb_story)
-        top_tb.addSeparator()
+        row1_tb.addWidget(self.cb_story)
+        row1_tb.addSeparator()
 
         self.view_btn_group = QButtonGroup(self)
         self.view_btn_group.setExclusive(True)
@@ -1521,26 +1778,108 @@ class XpertStudioMainWindow(QMainWindow):
             )
             b.clicked.connect(lambda checked=False, i=idx: self.switch_workspace_mode(i))
             self.view_btn_group.addButton(b, idx)
-            top_tb.addWidget(b)
+            row1_tb.addWidget(b)
 
-        top_tb.addSeparator()
+        row1_tb.addSeparator()
         btn_run_all = QPushButton("Run Analysis && Design (F5)")
         btn_run_all.setStyleSheet("background-color: #16A34A; color: white; font-weight: bold; padding: 5px 12px;")
         btn_run_all.clicked.connect(self.run_analyze_all_beams)
-        top_tb.addWidget(btn_run_all)
+        row1_tb.addWidget(btn_run_all)
 
-        left_tb = QToolBar("BIM Modeling & Modify Tools", self)
+        # Break to Row 2
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+
+        # Row 2 Toolbar A: Modify Toolbar
+        mod_tb = QToolBar("Modify Tools", self)
+        mod_tb.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mod_tb)
+
+        btn_sel = QPushButton("Select")
+        btn_sel.clicked.connect(lambda: self.activate_cad_tool("SELECT"))
+        mod_tb.addWidget(btn_sel)
+
+        btn_al = QPushButton("Align (AL)")
+        btn_al.setStyleSheet("background-color: #0D9488; color: white; font-weight: bold;")
+        btn_al.clicked.connect(lambda: self.activate_cad_tool("ALIGN_ELEMENT"))
+        mod_tb.addWidget(btn_al)
+
+        btn_mv = QPushButton("Move (MV)")
+        btn_mv.clicked.connect(lambda: self.activate_cad_tool("MOVE_ELEMENT"))
+        mod_tb.addWidget(btn_mv)
+
+        btn_mvd = QPushButton("Move ΔX,ΔY")
+        btn_mvd.clicked.connect(self.open_numeric_move_dialog)
+        mod_tb.addWidget(btn_mvd)
+
+        btn_rot = QPushButton("Rotate Col 90° (R)")
+        btn_rot.clicked.connect(lambda: self.activate_cad_tool("ROTATE_COL"))
+        mod_tb.addWidget(btn_rot)
+
+        btn_del = QPushButton("Delete (Del)")
+        btn_del.setStyleSheet("background-color: #DC2626; color: white; font-weight: bold;")
+        btn_del.clicked.connect(self.delete_selected_object)
+        mod_tb.addWidget(btn_del)
+
+        # Row 2 Toolbar B: Dimensions Toolbar
+        dim_tb = QToolBar("Dimensions Tools", self)
+        dim_tb.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, dim_tb)
+
+        btn_dim_lin = QPushButton("Linear Dim")
+        btn_dim_lin.setStyleSheet("background-color: #1E293B; color: #38BDF8; font-weight: bold; border: 1px solid #0284C7;")
+        btn_dim_lin.clicked.connect(lambda: self.activate_cad_tool("DIM_LINEAR"))
+        dim_tb.addWidget(btn_dim_lin)
+
+        btn_dim_aln = QPushButton("Aligned Dim")
+        btn_dim_aln.setStyleSheet("background-color: #1E293B; color: #38BDF8; font-weight: bold; border: 1px solid #0284C7;")
+        btn_dim_aln.clicked.connect(lambda: self.activate_cad_tool("DIM_ALIGNED"))
+        dim_tb.addWidget(btn_dim_aln)
+
+        btn_auto_dims = QPushButton("Auto Exterior Dims")
+        btn_auto_dims.setStyleSheet("background-color: #0369A1; color: white; font-weight: bold;")
+        btn_auto_dims.clicked.connect(self.generate_exterior_dimensions)
+        dim_tb.addWidget(btn_auto_dims)
+
+        btn_meas = QPushButton("Measure (DI)")
+        btn_meas.clicked.connect(lambda: self.activate_cad_tool("MEASURE_DIST"))
+        dim_tb.addWidget(btn_meas)
+
+        btn_clr_dims = QPushButton("Clear Dims")
+        btn_clr_dims.clicked.connect(self.clear_all_dimensions)
+        dim_tb.addWidget(btn_clr_dims)
+
+        # Row 2 Toolbar C: Zoom & View Toolbar
+        zoom_tb = QToolBar("Zoom & View Tools", self)
+        zoom_tb.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, zoom_tb)
+
+        btn_zwin = QPushButton("Zoom Win")
+        btn_zwin.setStyleSheet("background-color: #4338CA; color: white; font-weight: bold;")
+        btn_zwin.clicked.connect(lambda: self.activate_cad_tool("ZOOM_WINDOW"))
+        zoom_tb.addWidget(btn_zwin)
+
+        btn_zext = QPushButton("Zoom Extents")
+        btn_zext.clicked.connect(lambda: self.activate_cad_tool("ZOOM_EXTENTS"))
+        zoom_tb.addWidget(btn_zext)
+
+        btn_pan = QPushButton("Pan")
+        btn_pan.clicked.connect(lambda: self.activate_cad_tool("PAN"))
+        zoom_tb.addWidget(btn_pan)
+
+        btn_zin = QPushButton("Zoom +")
+        btn_zin.clicked.connect(lambda: self.activate_cad_tool("ZOOM_IN"))
+        zoom_tb.addWidget(btn_zin)
+
+        btn_zout = QPushButton("Zoom -")
+        btn_zout.clicked.connect(lambda: self.activate_cad_tool("ZOOM_OUT"))
+        zoom_tb.addWidget(btn_zout)
+
+        # Left Toolbar: Structural BIM Modeling Tools
+        left_tb = QToolBar("BIM Modeling Tools", self)
         left_tb.setOrientation(Qt.Orientation.Vertical)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, left_tb)
 
         for label, tid in [
-            ("Select / Window-Cross", "SELECT"),
-            ("Align Face (AL)", "ALIGN_ELEMENT"),
-            ("Move: Base->Pt (MV)", "MOVE_ELEMENT"),
-            ("Move: ΔX, ΔY Dialog", "MOVE_NUMERIC_DLG"),
-            ("Measure Distance (DI)", "MEASURE_DIST"),
-            ("Rotate Col 90° (R)", "ROTATE_COL"),
-            ("Delete Selected (Del)", "DELETE_SELECTED"),
             ("1. Polyline Boundary", "DRAW_SLAB_EDGE"),
             ("2. Place Column", "DRAW_COL"),
             ("3A. + Hidden Beam", "DRAW_BEAM_HID"),
@@ -1549,22 +1888,10 @@ class XpertStudioMainWindow(QMainWindow):
             ("4B. Pick: Flip Rib", "FLIP_RIB"),
             ("4C. Pick: Opening", "PICK_OPENING"),
             ("Auto-Fill All Slabs", "AUTO_FILL_SLABS"),
-            ("Pan (Hand)", "PAN"),
-            ("Zoom Extents", "ZOOM_EXTENTS"),
             ("Demo Layout", "LOAD_TEMPLATE"),
         ]:
             btn = QPushButton(label)
-            if tid == "DELETE_SELECTED":
-                btn.setStyleSheet("background-color: #DC2626; color: white; font-weight: bold;")
-                btn.clicked.connect(self.delete_selected_object)
-            elif tid == "ALIGN_ELEMENT":
-                btn.setStyleSheet("background-color: #0D9488; color: white; font-weight: bold;")
-                btn.clicked.connect(lambda: self.activate_cad_tool("ALIGN_ELEMENT"))
-            elif tid == "MOVE_NUMERIC_DLG":
-                btn.clicked.connect(self.open_numeric_move_dialog)
-            elif tid == "ROTATE_COL":
-                btn.clicked.connect(self.rotate_selected_or_default_column)
-            elif tid == "AUTO_FILL_SLABS":
+            if tid == "AUTO_FILL_SLABS":
                 btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold;")
                 btn.clicked.connect(lambda: self.activate_cad_tool("AUTO_FILL_SLABS"))
             else:
@@ -1622,6 +1949,7 @@ class XpertStudioMainWindow(QMainWindow):
         self.lbl_calc_thick = QLabel("Calculated Min. Thickness: --")
         self.lbl_calc_thick.setStyleSheet("font-weight: bold; color: #0284C7;")
         self.lbl_gov_member = QLabel("Governing Member: None")
+        self.lbl_gov_member.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self.sp_adopted_thick = QDoubleSpinBox()
         self.sp_adopted_thick.setRange(14.0, 100.0)
@@ -1677,12 +2005,37 @@ class XpertStudioMainWindow(QMainWindow):
         self.cad_canvas = StructuralCadCanvas2D(self)
         self.stack.addWidget(self.cad_canvas)
 
+        # Tab 2: Beams Table + SFD/BMD Diagrams View
+        tab2_widget = QWidget()
+        tab2_vbox = QVBoxLayout(tab2_widget)
+        tab2_vbox.setContentsMargins(4, 4, 4, 4)
+        tab2_vbox.setSpacing(4)
+
+        tab2_top_bar = QHBoxLayout()
+        tab2_top_bar.addWidget(QLabel("Select Beam to View Diagrams (SFD & BMD):"))
+        self.cb_diagram_beam = QComboBox()
+        self.cb_diagram_beam.setMinimumWidth(180)
+        self.cb_diagram_beam.currentIndexChanged.connect(self._on_diagram_beam_changed)
+        tab2_top_bar.addWidget(self.cb_diagram_beam)
+        tab2_top_bar.addStretch(1)
+        tab2_vbox.addLayout(tab2_top_bar)
+
+        tab2_splitter = QSplitter(Qt.Orientation.Vertical)
         self.tbl_beams = QTableWidget(0, 7)
         self.tbl_beams.setHorizontalHeaderLabels([
             "Beam ID", "Type", "Section (m)", "Spans (m)", "Max +Mu (kN.m)", "Face -Mu (kN.m)", "Face Vu (kN)"
         ])
         self.tbl_beams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.stack.addWidget(self.tbl_beams)
+        self.tbl_beams.cellClicked.connect(self._on_beam_table_row_selected)
+        tab2_splitter.addWidget(self.tbl_beams)
+
+        self.beam_diagrams_view = BeamDiagramsViewWidget(self)
+        tab2_splitter.addWidget(self.beam_diagrams_view)
+        tab2_splitter.setStretchFactor(0, 1)
+        tab2_splitter.setStretchFactor(1, 2)
+        tab2_vbox.addWidget(tab2_splitter, 1)
+
+        self.stack.addWidget(tab2_widget)
 
         self.tbl_columns = QTableWidget(0, 7)
         self.tbl_columns.setHorizontalHeaderLabels([
@@ -1702,9 +2055,13 @@ class XpertStudioMainWindow(QMainWindow):
         bot_row.setContentsMargins(8, 3, 8, 3)
         bot_row.setSpacing(8)
 
-        self.chk_osnap_master = QCheckBox("OSNAP [F3]")
+        self.chk_osnap_master = QPushButton("OSNAP [F3]")
+        self.chk_osnap_master.setCheckable(True)
         self.chk_osnap_master.setChecked(True)
-        self.chk_osnap_master.setStyleSheet("font-weight: bold; color: #FACC15;")
+        self.chk_osnap_master.setStyleSheet(
+            "QPushButton { background: #1E293B; color: #94A3B8; border: 1px solid #475569; padding: 3px 8px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:checked { background: #FACC15; color: #000000; border-color: #EAB308; }"
+        )
         self.chk_osnap_master.toggled.connect(self._on_bottom_snap_settings_changed)
         bot_row.addWidget(self.chk_osnap_master)
 
@@ -1728,15 +2085,23 @@ class XpertStudioMainWindow(QMainWindow):
         self.chk_osnap_perp.toggled.connect(self._on_bottom_snap_settings_changed)
         bot_row.addWidget(self.chk_osnap_perp)
 
-        self.chk_ortho_bar = QCheckBox("ORTHO [F8]")
+        self.chk_ortho_bar = QPushButton("ORTHO [F8]")
+        self.chk_ortho_bar.setCheckable(True)
         self.chk_ortho_bar.setChecked(True)
-        self.chk_ortho_bar.setStyleSheet("font-weight: bold; color: #38BDF8;")
+        self.chk_ortho_bar.setStyleSheet(
+            "QPushButton { background: #1E293B; color: #94A3B8; border: 1px solid #475569; padding: 3px 8px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:checked { background: #38BDF8; color: #000000; border-color: #0284C7; }"
+        )
         self.chk_ortho_bar.toggled.connect(self._on_bottom_snap_settings_changed)
         bot_row.addWidget(self.chk_ortho_bar)
 
-        self.chk_grid_snap_bar = QCheckBox("GRID 0.1m [F9]")
+        self.chk_grid_snap_bar = QPushButton("GRID 0.1m [F9]")
+        self.chk_grid_snap_bar.setCheckable(True)
         self.chk_grid_snap_bar.setChecked(True)
-        self.chk_grid_snap_bar.setStyleSheet("font-weight: bold; color: #4ADE80;")
+        self.chk_grid_snap_bar.setStyleSheet(
+            "QPushButton { background: #1E293B; color: #94A3B8; border: 1px solid #475569; padding: 3px 8px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:checked { background: #4ADE80; color: #000000; border-color: #16A34A; }"
+        )
         self.chk_grid_snap_bar.toggled.connect(self._on_bottom_snap_settings_changed)
         bot_row.addWidget(self.chk_grid_snap_bar)
 
@@ -1839,6 +2204,46 @@ class XpertStudioMainWindow(QMainWindow):
                 else:
                     nx, ny = round(ref_pt[0] + length_val, 3), ref_pt[1]
                 self.cad_canvas._handle_left_click_at(nx, ny, nx, ny, "NUMERIC_LEN")
+
+    def _on_beam_table_row_selected(self, row: int, col: int) -> None:
+        item = self.tbl_beams.item(row, 0)
+        if item:
+            bid = item.text()
+            idx = self.cb_diagram_beam.findText(bid)
+            if idx >= 0:
+                self.cb_diagram_beam.setCurrentIndex(idx)
+            else:
+                self._update_beam_diagram_display(bid)
+
+    def _on_diagram_beam_changed(self, idx: int) -> None:
+        bid = self.cb_diagram_beam.currentText()
+        if bid:
+            self._update_beam_diagram_display(bid)
+
+    def _update_beam_diagram_display(self, beam_id: str) -> None:
+        if not hasattr(self, "last_analysis_bundle") or not self.last_analysis_bundle:
+            return
+        b_res = self.last_analysis_bundle.get("beam_results", {}).get(beam_id)
+        if b_res and hasattr(self, "beam_diagrams_view"):
+            self.beam_diagrams_view.set_beam_analysis_data(b_res)
+
+    def generate_exterior_dimensions(self) -> None:
+        if not self.master_project:
+            return
+        count, msg = auto_generate_exterior_dimensions(self.current_story_data)
+        self.save_and_sync_current_story()
+        self.cad_canvas.render_story(self.current_story_data)
+        self.update_contextual_prompt(msg)
+
+    def clear_all_dimensions(self) -> None:
+        if not self.master_project:
+            return
+        dims = self.current_story_data.get("dimensions", [])
+        n = len(dims)
+        self.current_story_data["dimensions"] = []
+        self.save_and_sync_current_story()
+        self.cad_canvas.render_story(self.current_story_data)
+        self.update_contextual_prompt(f"Cleared {n} persistent dimensions.")
 
     def open_numeric_move_dialog(self) -> None:
         if not self.cad_canvas.selected_items:
@@ -2044,6 +2449,43 @@ class XpertStudioMainWindow(QMainWindow):
             self.cad_canvas.zoom_extents()
             return
 
+        if tool_id == "ZOOM_IN":
+            self.cad_canvas.scale(1.2, 1.2)
+            return
+
+        if tool_id == "ZOOM_OUT":
+            self.cad_canvas.scale(1.0 / 1.2, 1.0 / 1.2)
+            return
+
+        if tool_id == "AUTO_DIMS":
+            self.generate_exterior_dimensions()
+            return
+
+        if tool_id == "CLEAR_DIMS":
+            self.clear_all_dimensions()
+            return
+
+        if tool_id == "ROTATE_COL":
+            self.cad_canvas.active_tool = "ROTATE_COL"
+            self.cad_canvas.update_cursor_for_active_tool()
+            self.update_contextual_prompt("Rotate Column [R]: Click directly on any Column (C#) to rotate it 90°.")
+            return
+
+        if tool_id == "ZOOM_WINDOW":
+            self.cad_canvas.active_tool = "ZOOM_WINDOW"
+            self.cad_canvas._zoom_win_start = None
+            self.cad_canvas._zoom_win_curr = None
+            self.cad_canvas.update_cursor_for_active_tool()
+            self.update_contextual_prompt("Zoom Window: Drag a rectangle over the area you want to zoom in on.")
+            return
+
+        if tool_id in ("DIM_LINEAR", "DIM_ALIGNED"):
+            self.cad_canvas.active_tool = tool_id
+            self.cad_canvas._dim_first_pt = None
+            self.cad_canvas.update_cursor_for_active_tool()
+            self.update_contextual_prompt(f"{tool_id}: Click first point on canvas (endpoint/midpoint snap enabled)...")
+            return
+
         if tool_id == "AUTO_FILL_SLABS":
             count, msg = auto_fill_all_story_slabs(self.current_story_data)
             self.save_and_sync_current_story()
@@ -2222,6 +2664,17 @@ class XpertStudioMainWindow(QMainWindow):
             self.tbl_beams.setItem(r_i, 4, QTableWidgetItem(f"{res.get('max_pos_mu_knm', 0.0):.2f}"))
             self.tbl_beams.setItem(r_i, 5, QTableWidgetItem(f"{res.get('max_neg_face_mu_knm', 0.0):.2f}"))
             self.tbl_beams.setItem(r_i, 6, QTableWidgetItem(f"{res.get('max_face_vu_kn', 0.0):.2f}"))
+
+        self.cb_diagram_beam.blockSignals(True)
+        self.cb_diagram_beam.clear()
+        for bm in beams:
+            self.cb_diagram_beam.addItem(bm["id"])
+        self.cb_diagram_beam.blockSignals(False)
+        if beams:
+            self.cb_diagram_beam.setCurrentIndex(0)
+            self._update_beam_diagram_display(beams[0]["id"])
+        else:
+            self.beam_diagrams_view.set_beam_analysis_data(None)
 
         col_recs = self.last_analysis_bundle.get("column_records", [])
         self.tbl_columns.setRowCount(len(col_recs))

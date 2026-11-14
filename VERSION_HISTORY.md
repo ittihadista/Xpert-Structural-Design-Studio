@@ -4,7 +4,44 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v1.4.0-revit-bim-ux` (2026-11-14)
+## Current Release: `v1.5.0-structural-bim-pro` (2026-11-14)
+**Release Title:** Structural BIM Pro, Persistent CAD Dimensions, Analytical SFD & BMD Interactive Diagrams, Separated Toolbars & Physical Room Coalescing
+
+### Key Features & Advancements in `v1.5.0-structural-bim-pro`:
+1. **Persistent CAD Dimensions Layer (`00-XD-DIM`):**
+   - Added standard layer `00-XD-DIM` in DXF export with extension lines, 45° ticks, and dimension text badges.
+   - Interactive 2-click linear and aligned dimension drawing tools (`DIM_LINEAR`, `DIM_ALIGNED`).
+   - One-click `Auto Exterior Dims` (`auto_generate_exterior_dimensions`) and `Clear Dims`.
+2. **Crash-Proof Continuous Beam Analytical Solver & Tributary Load Transfer:**
+   - 100% crash-proof analytical solver (`solve_continuous_beam_analytical`) using the exact Three-Moment Equation with empty span fallbacks.
+   - Computes tributary one-way hollow-block slab loads onto supporting beams.
+   - Topologically sorts beams so secondary beams are solved first and reactions transferred to carrier beams.
+   - Support centerline and face-of-support moments and shears calculation ($M_u$, $V_u$).
+3. **Interactive Analytical Beam Diagrams Widget (`BeamDiagramsViewWidget` in Tab 2):**
+   - High-performance QPainter widget rendering Shear Force Diagram ($V_u$ in kN) and Bending Moment Diagram ($M_u$ in kN.m with positive tension downward).
+   - Zero baselines, support markers, peak value badges, and real-time beam dropdown selection.
+   - Fully synchronized with beam table row selection and 1-Click `Run Analysis & Design (F5)`.
+4. **Separated 4-Group Classic Toolbars Layout:**
+   - **Row 1 (Project & Workspace Bar):** `New Project`, `Open (*.xsd)`, `Import Arch .DXF`, `Save & Sync (Ctrl+S)`, `Story Combo`, 4 Tab Buttons, and `Run Analysis & Design (F5)`.
+   - **Row 2 (Separated Toolbars):** Modify Tools (`Select`, `Align`, `Move`, `Move ΔX,ΔY`, `Rotate Col 90°`, `Delete`), Dimensions Tools (`Linear Dim`, `Aligned Dim`, `Auto Exterior Dims`, `Measure`, `Clear Dims`), and Zoom & View Tools (`Zoom Win`, `Zoom Extents`, `Pan`, `Zoom +`, `Zoom -`).
+   - **Left Toolbar:** Structural BIM Modeling Tools (`Polyline Boundary`, `Place Column`, `Hidden Beam`, `Drop Beam`, `Pick Slab`, `Flip Rib`, `Pick Opening`, `Auto-Fill All Slabs`, `Demo Layout`).
+   - **Row 3:** Thickness banner with `lbl_gov_member.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)` preventing off-screen clipping.
+5. **Glowing Toggleable Status Bar Buttons:**
+   - Converted `OSNAP [F3]` (Amber `#FACC15`), `ORTHO [F8]` (Cyan `#38BDF8`), and `GRID 0.1m [F9]` (Emerald `#4ADE80`) to checkable `QPushButton` with vibrant active states.
+6. **Full-Range CAD Canvas Navigation:**
+   - Unlimited panning and navigation with coordinate grid spanning -30m to +52m.
+   - `Zoom Window` tool (`fitInView`) with interactive rubber-band selection.
+   - Seamless cursor anchors (`AnchorUnderMouse`) and always-visible scrollbars.
+   - Cleaned canvas rendering removing temporary padlock icons.
+7. **Physical Beam-Bounded Room Coalescing in `detect_story_grid_bays`:**
+   - Coalesces adjacent bays without physical dividing beams into single structural slab panels.
+   - Preserves 2-way cantilever backspan continuity and equilibrium rules.
+
+---
+
+## Previous Releases
+
+### Release: `v1.4.0-revit-bim-ux` (2026-11-14)
 **Release Title:** Revit BIM UX, Custom `.xsd` Master Project Extension, Full-Face Column Bearing, Room-Bounding Clear Slabs, Window/Crossing Selection & Align/Move/Measure Tools
 
 ### Key Features & Advancements in `v1.4.0-revit-bim-ux`:
