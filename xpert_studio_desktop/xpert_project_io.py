@@ -27,7 +27,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.7.0-structural-bim-pro"
+STUDIO_VERSION = "v1.8.0-structural-bim-pro"
 
 STANDARD_LAYERS = [
     ("00-XD-EDGE", 4, "Continuous"),       # Cyan: Outer Slab Boundary

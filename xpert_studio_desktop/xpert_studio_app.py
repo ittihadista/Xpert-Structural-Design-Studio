@@ -1,10 +1,11 @@
 """
-Xpert Structural Design Studio (v1.7.0-structural-bim-pro)
+Xpert Structural Design Studio (v1.8.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
 
 from __future__ import annotations
+import copy
 import json
 import math
 import os
@@ -73,6 +74,7 @@ from xpert_structural_engine import (
     rotate_column_90_deg,
     pick_area_create_or_update_slab,
     toggle_slab_rib_by_label_click,
+    flip_slab_rib_by_id,
     delete_selected_element_from_story,
     move_column_and_sync_connected_beams,
     move_beam_within_slab_boundary,
@@ -841,143 +843,84 @@ class StructuralCadCanvas2D(QGraphicsView):
         super().mousePressEvent(event)
 
     def _show_element_context_menu(self, found: Dict[str, Any], raw_x: float, raw_y: float, global_pt) -> None:
+        """
+        Display / Inspection-Only Right-Click Context Menu (v1.8.0 Safety Upgrade):
+        All destructive or modifying commands (Delete, Move, Align, Convert, Flip Rib) are removed
+        from right-click and placed strictly in the top 'Modify' Menu & 'MODIFY' Toolbar.
+        """
         kind = str(found["kind"])
         eid = str(found["id"])
         story = self.studio.current_story_data
         menu = QMenu(self)
         menu.setStyleSheet(
-            "QMenu { background: #0F172A; color: #F8FAFC; border: 1px solid #38BDF8; padding: 4px; font-weight: bold; } "
-            "QMenu::item { padding: 6px 18px; } QMenu::item:selected { background: #0284C7; color: #FFFFFF; }"
+            "QMenu { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; padding: 6px; font-weight: bold; } "
+            "QMenu::item { padding: 6px 18px; color: #0F172A; } "
+            "QMenu::item:selected { background: #0284C7; color: #FFFFFF; } "
+            "QMenu::item:disabled { color: #64748B; }"
         )
 
-        if kind == "column":
-            act_rot = menu.addAction(f"Rotate Column {eid} by 90° (R)")
-            act_mv = menu.addAction(f"Move Column {eid} (Base -> Target)")
-            act_mv_dlg = menu.addAction(f"Move Column {eid} by ΔX, ΔY...")
-            act_al = menu.addAction(f"Align Column {eid} Face (AL)")
-            menu.addSeparator()
-            act_del = menu.addAction(f"Delete Column {eid} (Del)")
-            chosen = menu.exec(global_pt)
-            if chosen == act_rot:
-                ok, msg = rotate_column_90_deg(story, eid)
-                if ok:
-                    self.studio.save_and_sync_current_story()
-                    self.studio.refresh_story_ui()
-                    self.studio.update_contextual_prompt(msg)
-            elif chosen == act_mv:
-                col_obj = next((c for c in story.get("columns", []) if str(c["id"]) == eid), None)
-                self._first_click_pt = (float(col_obj["x"]), float(col_obj["y"])) if col_obj else (raw_x, raw_y)
-                self.active_tool = "MOVE_ELEMENT"
-                self.update_cursor_for_active_tool()
-                self.studio.update_contextual_prompt(f"Move Column {eid}: Click destination point on canvas.")
-            elif chosen == act_mv_dlg:
-                self.studio.open_move_selected_dialog()
-            elif chosen == act_al:
-                self.studio.activate_cad_tool("ALIGN_ELEMENT")
-            elif chosen == act_del:
-                self.studio.delete_selected_object()
-
-        elif kind == "beam":
+        if kind == "beam":
             bm_obj = next((b for b in story.get("beams", []) if str(b["id"]) == eid), None)
-            is_drop = bm_obj is not None and "drop" in str(bm_obj.get("kind", "")).lower()
-            act_conv = menu.addAction(
-                f"Convert {eid} to Hidden Beam (0.40 m × Story h)"
-                if is_drop
-                else f"Convert {eid} to Drop Beam (0.20 m × 0.50 m)"
-            )
-            act_wall_on = menu.addAction(f"Enable Masonry Wall Load on All Spans of {eid}")
-            act_wall_off = menu.addAction(f"Remove Masonry Wall Load from All Spans of {eid}")
+            b_kind_str = str((bm_obj or {}).get("beam_kind", (bm_obj or {}).get("kind", "hidden"))).upper()
+            b_w = float((bm_obj or {}).get("width_m", 0.40))
+            b_h = float((bm_obj or {}).get("depth_m", 0.30))
+            hdr = menu.addAction(f"Beam {eid} — {b_kind_str} ({b_w:.2f} × {b_h:.2f} m)")
+            hdr.setEnabled(False)
+            menu.addSeparator()
             act_inspect = menu.addAction(f"Open {eid} in Beam Analysis (Loads, SFD & BMD)")
             act_rc = menu.addAction(f"Open {eid} in Beam R.C. Design & Elevation")
+            act_sched = menu.addAction("Open Beams & Columns Schedules (Tab 4)")
             menu.addSeparator()
-            act_mv = menu.addAction(f"Move / Offset Beam {eid}")
-            act_al = menu.addAction(f"Align Beam {eid} Face (AL)")
-            menu.addSeparator()
-            act_del = menu.addAction(f"Delete Beam {eid} (Del)")
+            act_zext = menu.addAction("Zoom Extents (Fit Floor Plan)")
             chosen = menu.exec(global_pt)
-            if chosen == act_conv:
-                target_kind = "hidden" if is_drop else "drop"
-                ok, msg = convert_beam_kind_and_section(story, eid, target_kind)
-                if ok:
-                    self.studio.save_and_sync_current_story()
-                    self.studio.refresh_story_ui()
-                    self.studio.update_contextual_prompt(msg)
-            elif chosen in (act_wall_on, act_wall_off):
-                enable_flag = chosen == act_wall_on
-                if bm_obj is not None:
-                    flags = ensure_beam_wall_flags(story, bm_obj)
-                    for k in list(flags.keys()):
-                        flags[k] = enable_flag
-                    bm_obj["has_wall_load"] = enable_flag
-                    self.studio.save_and_sync_current_story()
-                    self.studio.refresh_story_ui()
-                    state_txt = "ENABLED" if enable_flag else "REMOVED"
-                    self.studio.update_contextual_prompt(f"Masonry wall load {state_txt} on all spans of Beam {eid}.")
-            elif chosen == act_inspect:
+            if chosen == act_inspect:
                 self.studio.run_analyze_all_beams(switch_to_tab=1, select_beam_id=eid)
             elif chosen == act_rc:
                 self.studio.run_analyze_all_beams(switch_to_tab=2, select_beam_id=eid)
-            elif chosen == act_mv:
-                self._first_click_pt = (raw_x, raw_y)
-                self.active_tool = "MOVE_ELEMENT"
-                self.update_cursor_for_active_tool()
-                self.studio.update_contextual_prompt(f"Move Beam {eid}: Click destination point on canvas.")
-            elif chosen == act_al:
-                self.studio.activate_cad_tool("ALIGN_ELEMENT")
-            elif chosen == act_del:
-                self.studio.delete_selected_object()
+            elif chosen == act_sched:
+                self.studio.run_analyze_all_beams(switch_to_tab=3, select_beam_id=eid)
+            elif chosen == act_zext:
+                self.zoom_extents()
+
+        elif kind == "column":
+            col_obj = next((c for c in story.get("columns", []) if str(c["id"]) == eid), None)
+            c_b = float((col_obj or {}).get("b_m", 0.20))
+            c_h = float((col_obj or {}).get("h_m", 0.40))
+            hdr = menu.addAction(f"Column {eid} ({c_b:.2f} × {c_h:.2f} m)")
+            hdr.setEnabled(False)
+            menu.addSeparator()
+            act_sched = menu.addAction(f"Inspect Column {eid} in Schedules & Report (Tab 4)")
+            act_zext = menu.addAction("Zoom Extents (Fit Floor Plan)")
+            chosen = menu.exec(global_pt)
+            if chosen == act_sched:
+                self.studio.run_analyze_all_beams(switch_to_tab=3)
+            elif chosen == act_zext:
+                self.zoom_extents()
 
         elif kind == "slab":
-            act_flip = menu.addAction(f"Flip Rib Direction of Slab {eid} (0° ↔ 90°)")
-            act_void = menu.addAction(f"Convert Slab {eid} to Void Opening (Stair / Shaft)")
+            slb_obj = next((s for s in story.get("slabs", []) if str(s.get("id")) == eid), None)
+            ang = int(round(float((slb_obj or {}).get("rib_angle_deg", 0))))
+            lx = float((slb_obj or {}).get("lx_m", 0.0))
+            ly = float((slb_obj or {}).get("ly_m", 0.0))
+            hdr = menu.addAction(f"Slab {eid} ({lx:.2f} × {ly:.2f} m | Ribs {ang}°)")
+            hdr.setEnabled(False)
             menu.addSeparator()
-            act_del = menu.addAction(f"Delete Slab {eid} (Del)")
+            act_sched = menu.addAction("View Story Schedules & Calculation Report (Tab 4)")
+            act_zext = menu.addAction("Zoom Extents (Fit Floor Plan)")
             chosen = menu.exec(global_pt)
-            if chosen == act_flip:
-                slb_obj = next((s for s in story.get("slabs", []) if str(s.get("id")) == eid), None)
-                if slb_obj is not None:
-                    cx = (float(slb_obj.get("min_x", slb_obj.get("x_min", 0.0))) + float(slb_obj.get("max_x", slb_obj.get("x_max", 0.0)))) / 2.0
-                    cy = (float(slb_obj.get("min_y", slb_obj.get("y_min", 0.0))) + float(slb_obj.get("max_y", slb_obj.get("y_max", 0.0)))) / 2.0
-                    ok, msg, _ = toggle_slab_rib_by_label_click(story, cx, cy, hit_radius_m=5.0)
-                    if ok:
-                        self.studio.save_and_sync_current_story()
-                        self.studio.refresh_story_ui()
-                        self.studio.update_contextual_prompt(msg)
-                    elif msg:
-                        QMessageBox.warning(self, "Cantilever & Back-Span Slab Equilibrium Rule", msg)
-            elif chosen == act_void:
-                slb_obj = next((s for s in story.get("slabs", []) if str(s.get("id")) == eid), None)
-                if slb_obj is not None:
-                    cx = (float(slb_obj.get("min_x", 0.0)) + float(slb_obj.get("max_x", 0.0))) / 2.0
-                    cy = (float(slb_obj.get("min_y", 0.0)) + float(slb_obj.get("max_y", 0.0))) / 2.0
-                    pick_area_create_or_update_slab(story, cx, cy, target_mode="TOGGLE_OPENING")
-                    self.studio.save_and_sync_current_story()
-                    self.studio.refresh_story_ui()
-                    self.studio.update_contextual_prompt(f"Converted Slab {eid} bay to Void Opening.")
-            elif chosen == act_del:
-                self.studio.delete_selected_object()
+            if chosen == act_sched:
+                self.studio.run_analyze_all_beams(switch_to_tab=3)
+            elif chosen == act_zext:
+                self.zoom_extents()
 
-        elif kind == "dimension":
-            act_mv_dim = menu.addAction(f"Move / Reposition Dimension {eid} Offset (MV)")
-            act_mv_dlg = menu.addAction(f"Offset Dimension {eid} by ΔX, ΔY...")
+        else:
+            hdr = menu.addAction(f"Selected {kind.upper()}: {eid}")
+            hdr.setEnabled(False)
             menu.addSeparator()
-            act_del = menu.addAction(f"Delete Dimension {eid} (Del)")
+            act_zext = menu.addAction("Zoom Extents (Fit Floor Plan)")
             chosen = menu.exec(global_pt)
-            if chosen == act_mv_dim:
-                self._first_click_pt = (raw_x, raw_y)
-                self.active_tool = "MOVE_ELEMENT"
-                self.update_cursor_for_active_tool()
-                self.studio.update_contextual_prompt(f"Move Dimension {eid}: Click new offset position on canvas.")
-            elif chosen == act_mv_dlg:
-                self.studio.open_move_selected_dialog()
-            elif chosen == act_del:
-                self.studio.delete_selected_object()
-
-        elif kind == "opening":
-            act_del = menu.addAction(f"Delete Void Opening {eid} (Del)")
-            chosen = menu.exec(global_pt)
-            if chosen == act_del:
-                self.studio.delete_selected_object()
+            if chosen == act_zext:
+                self.zoom_extents()
 
     def mouseMoveEvent(self, event) -> None:
         if self._is_panning:
@@ -1115,13 +1058,26 @@ class StructuralCadCanvas2D(QGraphicsView):
             for op in story.get("openings", []):
                 if float(op.get("min_x", 0.0)) <= wx <= float(op.get("max_x", 0.0)) and float(op.get("min_y", 0.0)) <= wy <= float(op.get("max_y", 0.0)):
                     return {"kind": "opening", "id": str(op["id"])}
+            slab_hits: List[Tuple[int, float, float, str]] = []
             for slb in story.get("slabs", []):
-                s_min_x = float(slb.get("clear_min_x", slb.get("min_x", 0.0)))
-                s_max_x = float(slb.get("clear_max_x", slb.get("max_x", 0.0)))
-                s_min_y = float(slb.get("clear_min_y", slb.get("min_y", 0.0)))
-                s_max_y = float(slb.get("clear_max_y", slb.get("max_y", 0.0)))
-                if s_min_x <= wx <= s_max_x and s_min_y <= wy <= s_max_y:
-                    return {"kind": "slab", "id": str(slb["id"])}
+                c_min_x = float(slb.get("clear_min_x", slb.get("min_x", 0.0)))
+                c_max_x = float(slb.get("clear_max_x", slb.get("max_x", 0.0)))
+                c_min_y = float(slb.get("clear_min_y", slb.get("min_y", 0.0)))
+                c_max_y = float(slb.get("clear_max_y", slb.get("max_y", 0.0)))
+                b_min_x = float(slb.get("min_x", c_min_x))
+                b_max_x = float(slb.get("max_x", c_max_x))
+                b_min_y = float(slb.get("min_y", c_min_y))
+                b_max_y = float(slb.get("max_y", c_max_y))
+                in_clear = (c_min_x - 0.02 <= wx <= c_max_x + 0.02) and (c_min_y - 0.02 <= wy <= c_max_y + 0.02)
+                in_bay = (b_min_x - 0.02 <= wx <= b_max_x + 0.02) and (b_min_y - 0.02 <= wy <= b_max_y + 0.02)
+                if in_clear or in_bay:
+                    area = max(0.05, (c_max_x - c_min_x) * (c_max_y - c_min_y))
+                    cx, cy = (c_min_x + c_max_x) / 2.0, (c_min_y + c_max_y) / 2.0
+                    dist = math.hypot(wx - cx, wy - cy)
+                    slab_hits.append((0 if in_clear else 1, area, dist, str(slb["id"])))
+            if slab_hits:
+                slab_hits.sort(key=lambda item: (item[0], item[1], item[2]))
+                return {"kind": "slab", "id": slab_hits[0][3]}
         poly_pts = story.get("slab_edge_polygon", [])
         for idx in range(len(poly_pts)):
             x1, y1 = float(poly_pts[idx][0]), float(poly_pts[idx][1])
@@ -1824,13 +1780,17 @@ class XpertBeamDiagramCanvas(QGraphicsView):
         mv = self._ms[best_i]
         self.owner.update_live_readout(xv, vv, mv)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.owner._redraw_current_beam_if_ready()
+
 
 class BeamDiagramsViewWidget(QWidget):
     """
-    Workspace 1: Classic 'Xpert Beam Analysis (Beta)' Visual Layout:
-    - Top Control Bar: Beam Selector Dropdown + Story Wall Load Policy + Per-Span Wall Load Checkboxes.
-    - Left Splitter Panel: Editable Project Data Table, Distributed/Point Loads Legend, Live Section Readout (X, F, M).
-    - Right White Engineering Sheet: Full Beam Schematic + Reactions + Loads + Hatched SFD + Hatched BMD + Ruler.
+    Workspace 1: Classic 'Xpert Beam Analysis' Visual Layout (v1.8.0 Full-Viewport White Sheet):
+    - Top Control Bar: Clean Light Silver-Slate theme + readable white dropdowns + Story Wall Load Policy.
+    - Left Splitter Panel: Compact Project Data Table, Distributed/Point Loads Legend, Live Section Readout (X, F, M).
+    - Right White Engineering Sheet: Dynamically scales across 92% of the entire viewport width and height!
     """
 
     def __init__(self, parent_studio: "XpertStudioMainWindow"):
@@ -1838,6 +1798,7 @@ class BeamDiagramsViewWidget(QWidget):
         self.studio = parent_studio
         self._updating_table = False
         self._span_wall_checkboxes: List[Tuple[str, QCheckBox]] = []
+        self._last_drawn_args: Optional[Tuple[str, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1845,22 +1806,29 @@ class BeamDiagramsViewWidget(QWidget):
         vbox.setContentsMargins(6, 6, 6, 6)
         vbox.setSpacing(6)
 
-        # Top Bar Row 1: Beam Dropdown + Story Masonry Wall Load Policy
+        combo_light_qss = (
+            "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
+            "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; }"
+        )
+
+        # Top Bar Row 1: Beam Dropdown + Story Masonry Wall Load Policy (Light Silver-Slate Theme)
         top_bar = QFrame()
         top_bar.setStyleSheet(
-            "QFrame { background: #1E293B; border: 1px solid #334155; border-radius: 4px; }"
-            "QLabel { color: #E2E8F0; font-weight: bold; border: none; }"
+            "QFrame { background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 4px; }"
+            "QLabel { color: #0F172A; font-weight: bold; border: none; }"
+            "QDoubleSpinBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; padding: 2px 4px; font-weight: bold; }"
         )
         top_lay = QHBoxLayout(top_bar)
         top_lay.setContentsMargins(8, 5, 8, 5)
         top_lay.setSpacing(8)
 
         lbl_sel = QLabel("Select Beam:")
-        lbl_sel.setStyleSheet("color: #38BDF8; font-weight: bold;")
+        lbl_sel.setStyleSheet("color: #0284C7; font-weight: bold;")
         top_lay.addWidget(lbl_sel)
 
         self.cb_beam_select = QComboBox()
         self.cb_beam_select.setMinimumWidth(290)
+        self.cb_beam_select.setStyleSheet(combo_light_qss)
         self.cb_beam_select.currentIndexChanged.connect(self._on_beam_selected)
         top_lay.addWidget(self.cb_beam_select)
 
@@ -1869,6 +1837,7 @@ class BeamDiagramsViewWidget(QWidget):
         self.cb_wall_policy.addItem("All Beams Carry Wall Load (Typical Story)", "all_beams")
         self.cb_wall_policy.addItem("No Walls Default (Roof / Selective Spans)", "no_walls")
         self.cb_wall_policy.setMinimumWidth(235)
+        self.cb_wall_policy.setStyleSheet(combo_light_qss)
         top_lay.addWidget(self.cb_wall_policy)
 
         top_lay.addWidget(QLabel("Slab q_u (kN/m²):"))
@@ -1899,18 +1868,19 @@ class BeamDiagramsViewWidget(QWidget):
         top_lay.addStretch(1)
         vbox.addWidget(top_bar)
 
-        # Top Bar Row 2: Per-Span Wall Load Checkboxes for Selected Beam + Quick Summary
+        # Top Bar Row 2: Per-Span Wall Load Checkboxes for Selected Beam + Quick Summary (Light Silver-Slate Theme)
         span_bar = QFrame()
         span_bar.setStyleSheet(
-            "QFrame { background: #0F172A; border: 1px solid #334155; border-radius: 4px; }"
-            "QLabel { color: #FACC15; font-weight: bold; border: none; }"
-            "QCheckBox { color: #F8FAFC; font-weight: bold; spacing: 5px; }"
+            "QFrame { background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 4px; }"
+            "QLabel { color: #0F172A; font-weight: bold; border: none; }"
+            "QCheckBox { color: #0F172A; font-weight: bold; spacing: 5px; }"
         )
         self.span_bar_lay = QHBoxLayout(span_bar)
         self.span_bar_lay.setContentsMargins(8, 4, 8, 4)
         self.span_bar_lay.setSpacing(12)
 
         self.lbl_span_wall_title = QLabel("Per-Span Masonry Wall Load on Selected Beam:")
+        self.lbl_span_wall_title.setStyleSheet("color: #0369A1; font-weight: bold;")
         self.span_bar_lay.addWidget(self.lbl_span_wall_title)
 
         self.span_chk_container = QWidget()
@@ -1921,7 +1891,7 @@ class BeamDiagramsViewWidget(QWidget):
 
         self.span_bar_lay.addStretch(1)
         self.lbl_beam_summary = QLabel("Select a beam to inspect loads, reactions, SFD & BMD.")
-        self.lbl_beam_summary.setStyleSheet("color: #4ADE80; font-weight: bold;")
+        self.lbl_beam_summary.setStyleSheet("color: #15803D; font-weight: bold;")
         self.span_bar_lay.addWidget(self.lbl_beam_summary)
         vbox.addWidget(span_bar)
 
@@ -2230,8 +2200,14 @@ class BeamDiagramsViewWidget(QWidget):
             legend_lines.extend(pt_lines)
         self.lbl_legend_box.setText("<br>".join(legend_lines))
 
-        # Draw Classic 'Xpert Beam Analysis' White Sheet Diagrams
+        # Draw Classic 'Xpert Beam Analysis' White Sheet Diagrams (Dynamically Scaled to Full Viewport)
+        self._last_drawn_args = (bid, bm, res, loads_applied)
         self._draw_classic_xpert_beam_sheet(bid, bm, res, loads_applied)
+
+    def _redraw_current_beam_if_ready(self) -> None:
+        if self._last_drawn_args is not None:
+            bid, bm, res, loads_applied = self._last_drawn_args
+            self._draw_classic_xpert_beam_sheet(bid, bm, res, loads_applied)
 
     def _draw_classic_xpert_beam_sheet(
         self, bid: str, bm: Dict[str, Any], res: Dict[str, Any], loads_applied: List[Dict[str, Any]]
@@ -2245,20 +2221,25 @@ class BeamDiagramsViewWidget(QWidget):
         if not xs:
             return
 
+        # Full-Screen Dynamic Viewport Utilization (v1.8.0 Upgrade #3):
+        vp_w = max(980.0, float(self.diag_view.viewport().width()))
+        vp_h = max(680.0, float(self.diag_view.viewport().height()))
+
         tot_l = max(0.5, float(xs[-1]))
-        x0 = 75.0
-        w_px = 820.0
+        x0 = 68.0
+        w_px = max(840.0, vp_w - 135.0)
         scale_x = w_px / tot_l
         self.diag_view.set_curve_data(xs, vs, ms, x0, w_px, tot_l)
 
-        # Y coordinates on the white sheet
-        y_title = 18.0
-        y_beam = 128.0
-        y_sfd_title = 230.0
-        y_sfd = 315.0
-        y_bmd_title = 430.0
-        y_bmd = 505.0
-        y_ruler = 615.0
+        # Proportional vertical layout across the full viewport height
+        y_title = 16.0
+        y_beam = max(130.0, vp_h * 0.19)
+        y_sfd_title = max(235.0, vp_h * 0.35)
+        y_sfd = max(325.0, vp_h * 0.48)
+        y_bmd_title = max(445.0, vp_h * 0.65)
+        y_bmd = max(530.0, vp_h * 0.77)
+        y_ruler = max(635.0, vp_h * 0.91)
+        amp_px = max(64.0, vp_h * 0.105)
 
         # Title Header: "Analysis of B1"
         kind_lbl = str(bm.get("beam_kind", "hidden")).upper()
@@ -2411,14 +2392,14 @@ class BeamDiagramsViewWidget(QWidget):
 
         sc.addLine(x0, y_sfd, x0 + w_px, y_sfd, QPen(QColor("#0F172A"), 1.6))
         max_v = max([abs(v) for v in vs] or [1.0])
-        scale_v = 58.0 / max(1.0, max_v)
+        scale_v = amp_px / max(1.0, max_v)
 
         v_pts = [QPointF(x0, y_sfd)] + [QPointF(x0 + xs[i] * scale_x, y_sfd - vs[i] * scale_v) for i in range(len(xs))] + [QPointF(x0 + w_px, y_sfd)]
         sc.addPolygon(QPolygonF(v_pts), QPen(QColor("#1D70B8"), 2.3), QBrush(QColor(29, 112, 184, 38)))
 
         # Crisp evenly-spaced vertical drop lines inside SFD (matching 9.PNG)
         hatch_v_pen = QPen(QColor(29, 112, 184, 95), 1.0)
-        n_v_lines = 52
+        n_v_lines = 64
         for k_line in range(1, n_v_lines):
             xm_h = tot_l * (k_line / float(n_v_lines))
             vh = interp_curve(xm_h, vs)
@@ -2452,7 +2433,7 @@ class BeamDiagramsViewWidget(QWidget):
 
         sc.addLine(x0, y_bmd, x0 + w_px, y_bmd, QPen(QColor("#0F172A"), 1.6))
         max_m = max([abs(m) for m in ms] or [1.0])
-        scale_m = 58.0 / max(1.0, max_m)
+        scale_m = amp_px / max(1.0, max_m)
 
         m_pts = [QPointF(x0, y_bmd)] + [QPointF(x0 + xs[i] * scale_x, y_bmd + ms[i] * scale_m) for i in range(len(xs))] + [QPointF(x0 + w_px, y_bmd)]
         sc.addPolygon(QPolygonF(m_pts), QPen(QColor("#C81E1E"), 2.3), QBrush(QColor(200, 30, 30, 36)))
@@ -2506,10 +2487,11 @@ class BeamDiagramsViewWidget(QWidget):
 
 class BeamDesignDetailWidget(QWidget):
     """
-    Workspace 2: '3. Beam R.C. Design & Longitudinal Section' (ACI 318-19)
-    - Top bar: Beam Selector Dropdown (no giant table taking half the screen).
-    - Summary cards for each span/support reinforcement.
-    - Full-screen 2D Longitudinal Reinforcement Elevation + Stirrup Spacing Zones + Cross-Section A-A.
+    Workspace 2: '3. Beam R.C. Design & Longitudinal Section' (ACI 318-19) — v1.8.0 White Engineering Sheet:
+    - Clean Light Silver-Slate top bar + Crisp White Engineering Sheet (#FFFFFF) instead of black.
+    - Dynamically utilizes 92% of the full viewport width and height.
+    - Extends physical concrete beam outline and longitudinal steel bars (with 90° standard hooks)
+      all the way to the outer faces of the end supports!
     """
 
     def __init__(self, parent_studio: "XpertStudioMainWindow"):
@@ -2524,33 +2506,43 @@ class BeamDesignDetailWidget(QWidget):
 
         top_bar = QFrame()
         top_bar.setStyleSheet(
-            "QFrame { background: #1E293B; border: 1px solid #334155; border-radius: 4px; }"
-            "QLabel { color: #E2E8F0; font-weight: bold; border: none; }"
+            "QFrame { background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 4px; }"
+            "QLabel { color: #0F172A; font-weight: bold; border: none; }"
         )
         top_lay = QHBoxLayout(top_bar)
         top_lay.setContentsMargins(8, 6, 8, 6)
         top_lay.setSpacing(10)
 
         lbl = QLabel("Select Beam for ACI 318-19 R.C. Design & Longitudinal Elevation:")
-        lbl.setStyleSheet("color: #38BDF8; font-weight: bold;")
+        lbl.setStyleSheet("color: #0284C7; font-weight: bold;")
         top_lay.addWidget(lbl)
 
         self.cb_beam_select = QComboBox()
         self.cb_beam_select.setMinimumWidth(320)
+        self.cb_beam_select.setStyleSheet(
+            "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
+            "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; }"
+        )
         self.cb_beam_select.currentIndexChanged.connect(self._on_beam_selected)
         top_lay.addWidget(self.cb_beam_select)
 
         self.lbl_rc_summary = QLabel("Select a beam to view its longitudinal reinforcement & section.")
-        self.lbl_rc_summary.setStyleSheet("color: #4ADE80; font-weight: bold;")
+        self.lbl_rc_summary.setStyleSheet("color: #15803D; font-weight: bold;")
         top_lay.addWidget(self.lbl_rc_summary, 1)
         vbox.addWidget(top_bar)
 
         self.rc_scene = QGraphicsScene(self)
         self.rc_view = QGraphicsView(self.rc_scene)
         self.rc_view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.rc_view.setBackgroundBrush(QBrush(QColor("#0F172A")))
-        self.rc_view.setStyleSheet("border: 1px solid #334155;")
+        self.rc_view.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
+        self.rc_view.setStyleSheet("border: 1px solid #CBD5E1; background: #FFFFFF;")
         vbox.addWidget(self.rc_view, 1)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        idx = self.cb_beam_select.currentIndex()
+        if idx >= 0 and self.studio.last_analysis_bundle:
+            self._on_beam_selected(idx)
 
     def populate_results(
         self, story_data: Dict[str, Any], bundle: Dict[str, Any], select_beam_id: Optional[str] = None
@@ -2589,77 +2581,115 @@ class BeamDesignDetailWidget(QWidget):
         if not res or not des or bm is None:
             return
 
+        as_pos = des.get("as_pos_req_mm2", des.get("as_pos_req", 0.0))
+        as_neg = des.get("as_neg_req_mm2", des.get("as_neg_req", 0.0))
+        st_txt = des.get("status", "OK (ACI 318-19)")
         self.lbl_rc_summary.setText(
             f"Beam {bid} ({des.get('num_spans', 1)} Spans Excl. Cantilevers): "
-            f"Bot = {des.get('bottom_bars')} ({des.get('as_pos_req_mm2')} mm²) | "
-            f"Top = {des.get('top_bars')} ({des.get('as_neg_req_mm2')} mm²) | "
-            f"Stirrups = {des.get('stirrups')} [{des.get('status')}]"
+            f"Bot = {des.get('bottom_bars')} ({as_pos} mm²) | "
+            f"Top = {des.get('top_bars')} ({as_neg} mm²) | "
+            f"Stirrups = {des.get('stirrups')} [{st_txt}]"
         )
 
         sc = self.rc_scene
         tot_l = max(0.5, float(res.get("total_len", 5.0)))
-        x0 = 70.0
-        w_px = 760.0
+
+        # Full-Viewport Dynamic Scaling (v1.8.0 Upgrade #4):
+        vp_w = max(1080.0, float(self.rc_view.viewport().width()))
+        vp_h = max(620.0, float(self.rc_view.viewport().height()))
+
+        b_m = float(bm.get("width_m", 0.40))
+        h_m = float(bm.get("depth_m", 0.30))
+        sec_w = max(125.0, b_m * 310.0)
+        sec_h = max(115.0, h_m * 310.0)
+
+        x0 = 95.0
+        w_px = max(720.0, vp_w - sec_w - 250.0)
         scale_x = w_px / tot_l
-        y_top = 150.0
-        h_px = 95.0
+        y_top = max(155.0, vp_h * 0.27)
+        h_px = max(125.0, min(210.0, vp_h * 0.25))
         y_bot = y_top + h_px
 
         hdr = sc.addText(
-            f"Longitudinal Reinforcement & Stirrup Elevation — Beam {bid} ({bm.get('beam_kind', 'hidden').upper()} {bm.get('width_m', 0.4):.2f}×{bm.get('depth_m', 0.3):.2f}m)",
-            QFont("Consolas", 12, QFont.Weight.Bold),
+            f"Longitudinal Reinforcement & Stirrup Elevation — Beam {bid} ({bm.get('beam_kind', 'hidden').upper()} {b_m:.2f}×{h_m:.2f}m)",
+            QFont("Arial", 13, QFont.Weight.Bold),
         )
-        hdr.setDefaultTextColor(QColor("#38BDF8"))
-        hdr.setPos(x0, 28)
+        hdr.setDefaultTextColor(QColor("#0B3C5D"))
+        hdr.setPos(x0 - 20, 22)
+
+        sup_table = res.get("support_critical_table", [])
+        c_left = float(bm.get("cantilever_left_m", 0.0))
+        c_right = float(bm.get("cantilever_right_m", 0.0))
+
+        # Upgrade #8: Extend Physical Beam Outline & Reinforcement to Outer Support Faces!
+        ext_left_m = (float(sup_table[0].get("width_m", 0.20)) / 2.0) if (sup_table and c_left <= 1e-3) else 0.0
+        ext_right_m = (float(sup_table[-1].get("width_m", 0.20)) / 2.0) if (sup_table and c_right <= 1e-3) else 0.0
+        x_beam_left = x0 - ext_left_m * scale_x
+        x_beam_right = x0 + (tot_l + ext_right_m) * scale_x
+        w_beam_phys_px = x_beam_right - x_beam_left
+
+        # Draw Concrete Beam Body Outline (Extending from Outer Left Support Face to Outer Right Support Face)
+        beam_rect = QRectF(x_beam_left, y_top, w_beam_phys_px, h_px)
+        sc.addRect(beam_rect, QPen(QColor("#1E293B"), 2.4), QBrush(QColor(241, 245, 249, 235)))
 
         # Draw Supports with True Cross-Section Dimensions (Column Shaft vs Carrier Beam Cross-Section)
-        sup_table = res.get("support_critical_table", [])
         for sup in sup_table:
             sx_px = x0 + float(sup["x_m"]) * scale_x
             sup_w_m = float(sup.get("width_m", 0.30))
             sup_d_m = float(sup.get("depth_m", 0.30))
             sup_kind = str(sup.get("support_kind", "column")).lower()
             sup_id = str(sup.get("target_id", "Sup"))
-            col_w_px = max(18.0, sup_w_m * scale_x)
+            col_w_px = max(22.0, sup_w_m * scale_x)
             if sup_kind == "beam":
-                # Supporting Carrier Beam cross-section block (dashed gold/amber cross-section)
-                bm_h_px = max(36.0, min(95.0, (sup_d_m / max(0.20, float(bm.get("depth_m", 0.30)))) * h_px))
+                # Supporting Carrier Beam cross-section block (h_carrier >= h_supported enforced!)
+                bm_h_px = max(h_px, (sup_d_m / max(0.20, h_m)) * h_px)
                 crect_bm = QRectF(sx_px - col_w_px / 2.0, y_top, col_w_px, bm_h_px)
-                sc.addRect(crect_bm, QPen(QColor("#F59E0B"), 2.0, Qt.PenStyle.DashLine), QBrush(QColor(245, 158, 11, 65)))
-                sc.addLine(sx_px - col_w_px / 2.0, y_top, sx_px + col_w_px / 2.0, y_top + bm_h_px, QPen(QColor("#F59E0B"), 1.2))
-                sc.addLine(sx_px - col_w_px / 2.0, y_top + bm_h_px, sx_px + col_w_px / 2.0, y_top, QPen(QColor("#F59E0B"), 1.2))
+                sc.addRect(crect_bm, QPen(QColor("#D97706"), 2.2, Qt.PenStyle.DashLine), QBrush(QColor(245, 158, 11, 55)))
+                sc.addLine(sx_px - col_w_px / 2.0, y_top, sx_px + col_w_px / 2.0, y_top + bm_h_px, QPen(QColor("#D97706"), 1.4))
+                sc.addLine(sx_px - col_w_px / 2.0, y_top + bm_h_px, sx_px + col_w_px / 2.0, y_top, QPen(QColor("#D97706"), 1.4))
                 clbl = sc.addText(
-                    f"Beam {sup_id} [Roller]\n({sup_w_m:.2f}×{sup_d_m:.2f}m @ {sup['x_m']:.2f}m)",
-                    QFont("Consolas", 8, QFont.Weight.Bold),
+                    f"Carrier Beam {sup_id} [Roller]\n({sup_w_m:.2f}×{sup_d_m:.2f}m @ {sup['x_m']:.2f}m)",
+                    QFont("Arial", 8, QFont.Weight.Bold),
                 )
-                clbl.setDefaultTextColor(QColor("#FBBF24"))
-                clbl.setPos(sx_px - 42, y_bot + 68)
+                clbl.setDefaultTextColor(QColor("#B45309"))
+                clbl.setPos(sx_px - 52, y_top + bm_h_px + 52)
             else:
-                # Column Support shaft below the beam with true column width
-                crect_bot = QRectF(sx_px - col_w_px / 2.0, y_bot, col_w_px, 65.0)
-                sc.addRect(crect_bot, QPen(QColor("#EF4444"), 1.8), QBrush(QColor(239, 68, 68, 45)))
+                # Column Support shaft below the beam (aligned flush with outer beam face)
+                crect_bot = QRectF(sx_px - col_w_px / 2.0, y_bot, col_w_px, 85.0)
+                sc.addRect(crect_bot, QPen(QColor("#DC2626"), 2.0), QBrush(QColor(239, 68, 68, 40)))
                 clbl = sc.addText(
                     f"Col {sup_id} [Hinge]\n(w={sup_w_m:.2f}m @ {sup['x_m']:.2f}m)",
-                    QFont("Consolas", 8, QFont.Weight.Bold),
+                    QFont("Arial", 8, QFont.Weight.Bold),
                 )
-                clbl.setDefaultTextColor(QColor("#F8FAFC"))
-                clbl.setPos(sx_px - 38, y_bot + 68)
-            sc.addLine(sx_px, y_top - 40, sx_px, y_bot + 75, QPen(QColor("#64748B"), 1.0, Qt.PenStyle.DashDotLine))
+                clbl.setDefaultTextColor(QColor("#991B1B"))
+                clbl.setPos(sx_px - 44, y_bot + 90)
+            sc.addLine(sx_px, y_top - 48, sx_px, y_bot + 95, QPen(QColor("#94A3B8"), 1.1, Qt.PenStyle.DashDotLine))
 
-        # Draw Concrete Beam Body Outline
-        beam_rect = QRectF(x0, y_top, w_px, h_px)
-        sc.addRect(beam_rect, QPen(QColor("#E2E8F0"), 2.2), QBrush(QColor(30, 41, 59, 190)))
-
-        # Draw Stirrup Vertical Lines inside Beam
-        stir_pen = QPen(QColor("#10B981"), 1.1)
-        n_stirs = 46
+        # Draw Stirrup Vertical Lines inside Physical Beam
+        stir_pen = QPen(QColor("#059669"), 1.2)
+        n_stirs = 56
         for i_s in range(1, n_stirs):
-            sx = x0 + (w_px * i_s / n_stirs)
-            sc.addLine(sx, y_top + 10, sx, y_bot - 10, stir_pen)
+            sx = x_beam_left + (w_beam_phys_px * i_s / n_stirs)
+            sc.addLine(sx, y_top + 12, sx, y_bot - 12, stir_pen)
 
-        # Draw Bottom Main Steel Bar (Cyan/Green) & Top Support Steel Bars (Yellow/Orange)
-        sc.addLine(x0 + 8, y_bot - 12, x0 + w_px - 8, y_bot - 12, QPen(QColor("#22D3EE"), 3.2))
-        sc.addLine(x0 + 8, y_top + 12, x0 + w_px - 8, y_top + 12, QPen(QColor("#FACC15"), 2.6, Qt.PenStyle.DashLine))
+        # Draw Bottom Main Steel Bar (Blue) & Top Support Steel Bar (Crimson/Orange) with 90° End Hooks at Outer Support Faces
+        cover_px = 10.0
+        bar_x1 = x_beam_left + cover_px
+        bar_x2 = x_beam_right - cover_px
+        bot_bar_y = y_bot - 14.0
+        top_bar_y = y_top + 14.0
+
+        bot_pen = QPen(QColor("#0284C7"), 3.4)
+        sc.addLine(bar_x1, bot_bar_y, bar_x2, bot_bar_y, bot_pen)
+        # 90° standard upward anchorage hooks at ends of bottom bars
+        sc.addLine(bar_x1, bot_bar_y, bar_x1, bot_bar_y - h_px * 0.48, bot_pen)
+        sc.addLine(bar_x2, bot_bar_y, bar_x2, bot_bar_y - h_px * 0.48, bot_pen)
+
+        top_pen = QPen(QColor("#D97706"), 2.8, Qt.PenStyle.DashLine)
+        sc.addLine(bar_x1, top_bar_y, bar_x2, top_bar_y, top_pen)
+        # 90° standard downward anchorage hooks at ends of top bars
+        sc.addLine(bar_x1, top_bar_y, bar_x1, top_bar_y + h_px * 0.48, QPen(QColor("#EA580C"), 3.0))
+        sc.addLine(bar_x2, top_bar_y, bar_x2, top_bar_y + h_px * 0.48, QPen(QColor("#EA580C"), 3.0))
 
         # Per-Span Bottom Reinforcement & Stirrup Callouts
         span_designs = des.get("span_designs", [])
@@ -2672,10 +2702,10 @@ class BeamDesignDetailWidget(QWidget):
 
             blbl = sc.addText(
                 f"{seg['label']} ({seg['length_m']:.2f}m)\nBot: {bot_txt}\nStirrups: {stir_txt}",
-                QFont("Consolas", 8, QFont.Weight.Bold),
+                QFont("Arial", 9, QFont.Weight.Bold),
             )
-            blbl.setDefaultTextColor(QColor("#22D3EE"))
-            blbl.setPos(mx_px - 58, y_bot + 6)
+            blbl.setDefaultTextColor(QColor("#0369A1"))
+            blbl.setPos(mx_px - 62, y_bot + 8)
 
         # Per-Support Top Reinforcement Callouts
         sup_designs = des.get("support_designs", [])
@@ -2684,56 +2714,52 @@ class BeamDesignDetailWidget(QWidget):
             s_des = sup_designs[i_s] if i_s < len(sup_designs) else {}
             top_txt = s_des.get("top_bars", des.get("top_bars", "4 Φ 16"))
             sc.addLine(
-                max(x0 + 6, sx_px - 55),
-                y_top + 16,
-                min(x0 + w_px - 6, sx_px + 55),
-                y_top + 16,
-                QPen(QColor("#F97316"), 3.5),
+                max(bar_x1, sx_px - 65),
+                top_bar_y + 4,
+                min(bar_x2, sx_px + 65),
+                top_bar_y + 4,
+                QPen(QColor("#DC2626"), 3.8),
             )
             tlbl = sc.addText(
                 f"{sup['target_id']} Top:\n{top_txt}\n(-Mu={s_des.get('mu_neg_face_knm', 0.0):.1f}kNm)",
-                QFont("Consolas", 8, QFont.Weight.Bold),
+                QFont("Arial", 8, QFont.Weight.Bold),
             )
-            tlbl.setDefaultTextColor(QColor("#FACC15"))
-            tlbl.setPos(sx_px - 44, y_top - 64)
+            tlbl.setDefaultTextColor(QColor("#B91C1C"))
+            tlbl.setPos(sx_px - 46, y_top - 68)
 
         # Draw Cross-Section A-A on the Right Side
-        sec_x = x0 + w_px + 65.0
-        sec_y = y_top - 10.0
-        b_m = float(bm.get("width_m", 0.40))
-        h_m = float(bm.get("depth_m", 0.30))
-        sec_w = max(90.0, b_m * 240.0)
-        sec_h = max(80.0, h_m * 240.0)
+        sec_x = x_beam_right + 55.0
+        sec_y = y_top
 
-        sec_hdr = sc.addText(f"Section A-A ({b_m:.2f} × {h_m:.2f} m)", QFont("Consolas", 10, QFont.Weight.Bold))
-        sec_hdr.setDefaultTextColor(QColor("#4ADE80"))
+        sec_hdr = sc.addText(f"Section A-A ({b_m:.2f} × {h_m:.2f} m)", QFont("Arial", 10, QFont.Weight.Bold))
+        sec_hdr.setDefaultTextColor(QColor("#0F172A"))
         sec_hdr.setPos(sec_x, sec_y - 32)
 
-        sc.addRect(QRectF(sec_x, sec_y, sec_w, sec_h), QPen(QColor("#F8FAFC"), 2.2), QBrush(QColor("#1E293B")))
+        sc.addRect(QRectF(sec_x, sec_y, sec_w, sec_h), QPen(QColor("#0F172A"), 2.4), QBrush(QColor("#F1F5F9")))
         sc.addRect(
-            QRectF(sec_x + 12, sec_y + 12, sec_w - 24, sec_h - 24),
-            QPen(QColor("#10B981"), 1.8),
+            QRectF(sec_x + 14, sec_y + 14, sec_w - 28, sec_h - 28),
+            QPen(QColor("#059669"), 2.0),
             QBrush(Qt.BrushStyle.NoBrush),
         )
         # Draw 4 top and 4 bottom rebar circles inside Section A-A
         for i_bar in range(4):
-            bx = sec_x + 18 + (sec_w - 36) * (i_bar / 3.0)
-            sc.addEllipse(QRectF(bx - 4, sec_y + 14, 8, 8), QPen(QColor("#FACC15"), 1.2), QBrush(QColor("#FACC15")))
-            sc.addEllipse(QRectF(bx - 4, sec_y + sec_h - 22, 8, 8), QPen(QColor("#22D3EE"), 1.2), QBrush(QColor("#22D3EE")))
+            bx = sec_x + 22 + (sec_w - 44) * (i_bar / 3.0)
+            sc.addEllipse(QRectF(bx - 5, sec_y + 17, 10, 10), QPen(QColor("#991B1B"), 1.2), QBrush(QColor("#DC2626")))
+            sc.addEllipse(QRectF(bx - 5, sec_y + sec_h - 27, 10, 10), QPen(QColor("#0369A1"), 1.2), QBrush(QColor("#0284C7")))
 
         sec_info = sc.addText(
             f"Top: {des.get('top_bars')}\nBot: {des.get('bottom_bars')}\nStir: {des.get('stirrups')}",
-            QFont("Consolas", 9, QFont.Weight.Bold),
+            QFont("Arial", 9, QFont.Weight.Bold),
         )
-        sec_info.setDefaultTextColor(QColor("#E2E8F0"))
+        sec_info.setDefaultTextColor(QColor("#0F172A"))
         sec_info.setPos(sec_x, sec_y + sec_h + 12)
 
-        sc.setSceneRect(0, 0, sec_x + sec_w + 50, y_bot + 135)
+        sc.setSceneRect(0, 0, sec_x + sec_w + 45, max(vp_h - 20.0, y_bot + 150.0))
 
 
 class SchedulesAndReportsWidget(QWidget):
     """
-    Workspace 3: '4. Schedules & Engineering Report'
+    Workspace 3: '4. Schedules & Engineering Report' (v1.8.0 Clean Light Theme)
     Dedicated schedules & reporting workspace with 3 sub-tabs:
       1. Beams Reinforcement Schedule (ACI 318-19) — with 'No. of Spans' strictly between 'Beam ID' and 'Section (b × h)',
          excluding cantilevers from the span count, and one row per span/cantilever zone for multi-span clarity.
@@ -2753,9 +2779,9 @@ class SchedulesAndReportsWidget(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(
-            "QTabWidget::pane { border: 1px solid #334155; background: #0F172A; }"
-            "QTabBar::tab { background: #1E293B; color: #CBD5E1; font-weight: bold; padding: 8px 18px; border: 1px solid #334155; }"
-            "QTabBar::tab:selected { background: #0284C7; color: #FFFFFF; border-bottom: 2px solid #38BDF8; }"
+            "QTabWidget::pane { border: 1px solid #CBD5E1; background: #FFFFFF; }"
+            "QTabBar::tab { background: #E2E8F0; color: #0F172A; font-weight: bold; padding: 8px 18px; border: 1px solid #CBD5E1; }"
+            "QTabBar::tab:selected { background: #0284C7; color: #FFFFFF; border-bottom: 2px solid #0369A1; }"
         )
 
         # Sub-Tab 1: Beams Reinforcement Schedule
@@ -2776,8 +2802,8 @@ class SchedulesAndReportsWidget(QWidget):
         ])
         self.tbl_beam_schedule.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl_beam_schedule.setStyleSheet(
-            "QTableWidget { background: #0F172A; color: #F8FAFC; gridline-color: #334155; font-size: 11px; }"
-            "QHeaderView::section { background: #1E293B; color: #38BDF8; font-weight: bold; padding: 5px; border: 1px solid #334155; }"
+            "QTableWidget { background: #FFFFFF; color: #0F172A; gridline-color: #CBD5E1; font-size: 11px; }"
+            "QHeaderView::section { background: #F1F5F9; color: #0F172A; font-weight: bold; padding: 5px; border: 1px solid #CBD5E1; }"
         )
         self.tabs.addTab(self.tbl_beam_schedule, "1. Beams Reinforcement Schedule (ACI 318-19)")
 
@@ -2794,8 +2820,8 @@ class SchedulesAndReportsWidget(QWidget):
         ])
         self.tbl_columns.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl_columns.setStyleSheet(
-            "QTableWidget { background: #0F172A; color: #F8FAFC; gridline-color: #334155; font-size: 11px; }"
-            "QHeaderView::section { background: #1E293B; color: #4ADE80; font-weight: bold; padding: 5px; border: 1px solid #334155; }"
+            "QTableWidget { background: #FFFFFF; color: #0F172A; gridline-color: #CBD5E1; font-size: 11px; }"
+            "QHeaderView::section { background: #F1F5F9; color: #15803D; font-weight: bold; padding: 5px; border: 1px solid #CBD5E1; }"
         )
         self.tabs.addTab(self.tbl_columns, "2. Columns & 4-Way Framing Schedule")
 
@@ -2919,12 +2945,11 @@ class SchedulesAndReportsWidget(QWidget):
 
 class XpertStudioMainWindow(QMainWindow):
     """
-    Main Studio Workspace for Xpert Structural Design Studio (v1.6.0-structural-bim-pro).
-    - Four Distinct Top-Level Workspaces (with Context-Specific Toolbars):
-      0. `1. 2D Structural Drawing` (shows Draw, Modify, Dimensions, Zoom toolbars & CAD bars)
-      1. `2. Beam Analysis (Loads, SFD & BMD)` (classic Xpert Beam Analysis white sheet + wall load policies)
-      2. `3. Beam R.C. Design & Elevation` (longitudinal reinforcement & stirrup elevation + cross-section A-A)
-      3. `4. Schedules & Engineering Report` (Beams Schedule with 'No. of Spans' between ID and Section, Columns Schedule, Report)
+    Main Studio Workspace for Xpert Structural Design Studio (v1.8.0-structural-bim-pro).
+    - Clean Silver-Slate & White Engineering UI Theme (no black chrome or black-on-black dropdowns).
+    - Workflow-Ordered Top Menu Bar: File > View > Draw > Modify > Dimensions > Analysis & Design.
+    - Multi-Step Undo (Ctrl+Z) & Redo (Ctrl+Y) across all drawing and modification operations.
+    - Right-Click Context Menu strictly for Display/Inspection; all modifications live in Modify Menu & Toolbar.
     """
 
     def __init__(self, initial_master_project: Optional[Dict[str, Any]] = None):
@@ -2933,10 +2958,34 @@ class XpertStudioMainWindow(QMainWindow):
         self.resize(1580, 950)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
 
+        # Global Light Silver-Slate Engineering Chrome + Crisp White Dropdown Menus (Upgrades #1 & #2)
+        self.setStyleSheet(
+            "QMainWindow, QWidget { background-color: #F8FAFC; color: #0F172A; } "
+            "QMenuBar { background-color: #F1F5F9; color: #0F172A; font-weight: bold; border-bottom: 1px solid #CBD5E1; } "
+            "QMenuBar::item { background: transparent; color: #0F172A; padding: 5px 12px; } "
+            "QMenuBar::item:selected { background: #0284C7; color: #FFFFFF; border-radius: 3px; } "
+            "QMenu { background-color: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; padding: 4px; font-weight: bold; } "
+            "QMenu::item { padding: 6px 20px; color: #0F172A; } "
+            "QMenu::item:selected { background-color: #0284C7; color: #FFFFFF; } "
+            "QToolBar { background-color: #F1F5F9; border: 1px solid #CBD5E1; spacing: 4px; padding: 3px; } "
+            "QPushButton { background-color: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 4px 8px; font-weight: bold; } "
+            "QPushButton:hover { background-color: #E2E8F0; } "
+            "QComboBox { background-color: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
+            "QComboBox:hover { border-color: #0284C7; } "
+            "QComboBox QAbstractItemView { background-color: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; outline: 0px; } "
+            "QDoubleSpinBox, QSpinBox, QLineEdit { background-color: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 2px 6px; font-weight: bold; } "
+            "QStatusBar { background-color: #F1F5F9; color: #0F172A; font-weight: bold; border-top: 1px solid #CBD5E1; }"
+        )
+
         self.master_project: Optional[Dict[str, Any]] = initial_master_project
         self.current_story_index: int = 0
         self.current_story_data: Dict[str, Any] = {}
         self.last_analysis_bundle: Optional[Dict[str, Any]] = None
+
+        # Multi-step Undo / Redo stacks (Upgrade #10)
+        self._undo_stack: List[str] = []
+        self._redo_stack: List[str] = []
+        self._last_saved_snapshot: Optional[str] = None
 
         self._build_classic_menu_bar()
         self._build_separated_toolbars()
@@ -2949,8 +2998,13 @@ class XpertStudioMainWindow(QMainWindow):
             )
 
     def _build_classic_menu_bar(self) -> None:
+        """
+        Top Menu Bar strictly ordered by structural workflow stages (Upgrade #11):
+        File > View > Draw > Modify > Dimensions > Analysis & Design
+        """
         mbar = self.menuBar()
 
+        # 1. FILE MENU
         m_file = mbar.addMenu("&File")
         act_new = QAction("New Structural Project...", self)
         act_new.setShortcut("Ctrl+N")
@@ -2972,31 +3026,8 @@ class XpertStudioMainWindow(QMainWindow):
         act_save.triggered.connect(self.save_and_sync_current_story)
         m_file.addAction(act_save)
 
-        m_modify = mbar.addMenu("&Modify")
-        for lbl, cb in [
-            ("Align Element Face to Edge (AL)", lambda: self.activate_cad_tool("ALIGN_ELEMENT")),
-            ("Move Selected by Base-Point -> Second-Point (MV)", lambda: self.activate_cad_tool("MOVE_ELEMENT")),
-            ("Move Selected by Numeric ΔX, ΔY Dialog...", self.open_numeric_move_dialog),
-            ("Rotate Selected or Clicked Column 90° (R)", self.rotate_selected_or_default_column),
-            ("Delete Selected Elements (Del)", self.delete_selected_object),
-        ]:
-            act = QAction(lbl, self)
-            act.triggered.connect(cb)
-            m_modify.addAction(act)
-
-        m_dims = mbar.addMenu("&Dimensions")
-        for lbl, tid in [
-            ("Linear Dimension Horizontal/Vertical (DLI)", "DIM_LINEAR"),
-            ("Aligned Dimension (DAL)", "DIM_ALIGNED"),
-            ("Auto-Generate Exterior && Grid Dimensions (1-Click)", "DIM_AUTO_EXTERIOR"),
-            ("Measure Distance && Angle (DI)", "MEASURE_DIST"),
-            ("Clear All Story Dimensions", "DIM_CLEAR_ALL"),
-        ]:
-            act = QAction(lbl, self)
-            act.triggered.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
-            m_dims.addAction(act)
-
-        m_view = mbar.addMenu("&View && Zoom")
+        # 2. VIEW MENU
+        m_view = mbar.addMenu("&View")
         for lbl, tid in [
             ("Zoom Window (Drag Box)", "ZOOM_WINDOW"),
             ("Zoom Extents (Fit All)", "ZOOM_EXTENTS"),
@@ -3008,6 +3039,7 @@ class XpertStudioMainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             m_view.addAction(act)
 
+        # 3. DRAW MENU
         m_draw = mbar.addMenu("&Draw")
         for label, tool_id in [
             ("Select / Box-Select Elements", "SELECT"),
@@ -3016,7 +3048,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("Step 3A: Draw Hidden Beam 0.40m Width", "DRAW_BEAM_HID"),
             ("Step 3B: Draw Drop Beam 0.20m Width", "DRAW_BEAM_DROP"),
             ("Step 4A: Pick Area -> Create Slab", "PICK_SLAB"),
-            ("Step 4B: Pick Area -> Flip Slab Rib Direction", "FLIP_RIB"),
+            ("Step 4B: Flip Selected or Picked Slab Rib (0° ↔ 90°)", "FLIP_RIB"),
             ("Step 4C: Pick Area -> Toggle Void Opening", "PICK_OPENING"),
             ("Auto-Fill All Story Slabs (1-Click)", "AUTO_FILL_SLABS"),
             ("Convert Columns from Imported Arch .DXF", "CONVERT_ARCH_COLS"),
@@ -3026,15 +3058,64 @@ class XpertStudioMainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, tid=tool_id: self.activate_cad_tool(tid))
             m_draw.addAction(act)
 
-        m_analyze = mbar.addMenu("&Analyze && Design")
+        # 4. MODIFY MENU (Includes Undo/Redo, Convert Beam Hidden <-> Drop, Flip Slab Rib, Wall Load, Move, Align, Delete)
+        m_modify = mbar.addMenu("&Modify")
+        act_undo = QAction("Undo Last Action (Ctrl+Z)", self)
+        act_undo.setShortcut(QKeySequence("Ctrl+Z"))
+        act_undo.triggered.connect(self.undo_action)
+        m_modify.addAction(act_undo)
+
+        act_redo = QAction("Redo Action (Ctrl+Y)", self)
+        act_redo.setShortcut(QKeySequence("Ctrl+Y"))
+        act_redo.triggered.connect(self.redo_action)
+        m_modify.addAction(act_redo)
+        m_modify.addSeparator()
+
+        for lbl, cb in [
+            ("Convert Selected Beam: Hidden ↔ Drop", self.convert_selected_beam_kind),
+            ("Flip Selected Slab Rib Direction (0° ↔ 90°)", self.flip_selected_or_pick_slab_rib),
+            ("Toggle Masonry Wall Load on Selected Beam", self.toggle_selected_beam_wall_load),
+            ("Align Element Face to Edge (AL)", lambda: self.activate_cad_tool("ALIGN_ELEMENT")),
+            ("Move Selected by Base-Point -> Second-Point (MV)", lambda: self.activate_cad_tool("MOVE_ELEMENT")),
+            ("Move Selected by Numeric ΔX, ΔY Dialog...", self.open_numeric_move_dialog),
+            ("Rotate Selected or Clicked Column 90° (R)", self.rotate_selected_or_default_column),
+            ("Delete Selected Elements (Del)", self.delete_selected_object),
+        ]:
+            act = QAction(lbl, self)
+            act.triggered.connect(cb)
+            m_modify.addAction(act)
+
+        # 5. DIMENSIONS MENU
+        m_dims = mbar.addMenu("Di&mensions")
+        for lbl, tid in [
+            ("Linear Dimension Horizontal/Vertical (DLI)", "DIM_LINEAR"),
+            ("Aligned Dimension (DAL)", "DIM_ALIGNED"),
+            ("Auto-Generate Exterior && Grid Dimensions (1-Click)", "DIM_AUTO_EXTERIOR"),
+            ("Measure Distance && Angle (DI)", "MEASURE_DIST"),
+            ("Clear All Story Dimensions", "DIM_CLEAR_ALL"),
+        ]:
+            act = QAction(lbl, self)
+            act.triggered.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
+            m_dims.addAction(act)
+
+        # 6. ANALYSIS & DESIGN MENU
+        m_analyze = mbar.addMenu("&Analysis && Design")
         act_all = QAction("Run Full Story Analysis && ACI 318 Design (F5)", self)
         act_all.setShortcut("F5")
         act_all.triggered.connect(lambda: self.run_analyze_all_beams(switch_to_tab=1))
         m_analyze.addAction(act_all)
 
+        act_rc_tab = QAction("Open Beam R.C. Design & Longitudinal Section (Tab 3)", self)
+        act_rc_tab.triggered.connect(lambda: self.run_analyze_all_beams(switch_to_tab=2))
+        m_analyze.addAction(act_rc_tab)
+
+        act_sched_tab = QAction("Open Schedules & Calculation Report (Tab 4)", self)
+        act_sched_tab.triggered.connect(lambda: self.run_analyze_all_beams(switch_to_tab=3))
+        m_analyze.addAction(act_sched_tab)
+
     def _build_separated_toolbars(self) -> None:
         # ======================================================================
-        # TOP ROW 1: Project File Actions + Story Selector + 4 Distinct Workspaces + Run Analysis
+        # TOP ROW 1: Project File Actions + Undo/Redo + Story Selector + 4 Workspaces + Run Analysis
         # ======================================================================
         self.top_tb = QToolBar("Project & Workspace Toolbar", self)
         self.top_tb.setMovable(False)
@@ -3045,6 +3126,8 @@ class XpertStudioMainWindow(QMainWindow):
             (f"Open (*{MASTER_FILE_EXT})", self.open_existing_project_file_dialog),
             ("Import Arch .DXF", self.import_arch_dxf_for_current_story),
             ("Save && Sync (Ctrl+S)", self.save_and_sync_current_story),
+            ("↶ Undo", self.undo_action),
+            ("↷ Redo", self.redo_action),
         ]:
             b = QPushButton(lbl)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -3074,8 +3157,8 @@ class XpertStudioMainWindow(QMainWindow):
             if idx == 0:
                 b.setChecked(True)
             b.setStyleSheet(
-                "QPushButton { padding: 4px 10px; font-weight: bold; border: 1px solid #334155; background: #1E293B; color: #E2E8F0; } "
-                "QPushButton:checked { background: #0284C7; color: white; border-color: #38BDF8; }"
+                "QPushButton { padding: 4px 10px; font-weight: bold; border: 1px solid #94A3B8; background: #E2E8F0; color: #0F172A; border-radius: 3px; } "
+                "QPushButton:checked { background: #0284C7; color: #FFFFFF; border-color: #0369A1; }"
             )
             b.clicked.connect(lambda checked=False, i=idx: self.switch_workspace_mode(i))
             self.view_btn_group.addButton(b, idx)
@@ -3098,9 +3181,9 @@ class XpertStudioMainWindow(QMainWindow):
 
         # 1. Dedicated ZOOM Toolbar
         self.zoom_tb = QToolBar("Zoom & Navigation Toolbar", self)
-        self.zoom_tb.setStyleSheet("QToolBar { spacing: 4px; padding: 2px 6px; }")
+        self.zoom_tb.setStyleSheet("QToolBar { spacing: 4px; padding: 2px 6px; background: #F1F5F9; }")
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.zoom_tb)
-        lbl_z = QLabel(" ZOOM: ")
+        lbl_z = QLabel(" VIEW / ZOOM: ")
         lbl_z.setStyleSheet("font-weight: bold; color: #0284C7;")
         self.zoom_tb.addWidget(lbl_z)
         for lbl, tid in [
@@ -3116,15 +3199,17 @@ class XpertStudioMainWindow(QMainWindow):
             btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             self.zoom_tb.addWidget(btn)
 
-        # 2. Dedicated MODIFY Toolbar
+        # 2. Dedicated MODIFY Toolbar (Includes Convert Beam Hidden<->Drop & Flip Slab Rib)
         self.modify_tb = QToolBar("Modify Toolbar", self)
-        self.modify_tb.setStyleSheet("QToolBar { spacing: 4px; padding: 2px 6px; }")
+        self.modify_tb.setStyleSheet("QToolBar { spacing: 4px; padding: 2px 6px; background: #F1F5F9; }")
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.modify_tb)
         lbl_m = QLabel(" MODIFY: ")
         lbl_m.setStyleSheet("font-weight: bold; color: #0D9488;")
         self.modify_tb.addWidget(lbl_m)
         for lbl, tid in [
             ("Select / Box", "SELECT"),
+            ("Convert Beam (Hid↔Drop)", "CONVERT_BEAM_KIND"),
+            ("Flip Slab Rib (0°↔90°)", "FLIP_SLAB_RIB_NOW"),
             ("Align Face (AL)", "ALIGN_ELEMENT"),
             ("Move: Pt->Pt (MV)", "MOVE_ELEMENT"),
             ("Move: ΔX, ΔY", "MOVE_NUMERIC_DLG"),
@@ -3139,6 +3224,12 @@ class XpertStudioMainWindow(QMainWindow):
             elif tid == "ALIGN_ELEMENT":
                 btn.setStyleSheet("background-color: #0D9488; color: white; font-weight: bold; padding: 3px 8px;")
                 btn.clicked.connect(lambda: self.activate_cad_tool("ALIGN_ELEMENT"))
+            elif tid == "CONVERT_BEAM_KIND":
+                btn.setStyleSheet("background-color: #E0F2FE; color: #0369A1; border: 1px solid #0284C7; font-weight: bold; padding: 3px 8px;")
+                btn.clicked.connect(self.convert_selected_beam_kind)
+            elif tid == "FLIP_SLAB_RIB_NOW":
+                btn.setStyleSheet("background-color: #FEF3C7; color: #92400E; border: 1px solid #D97706; font-weight: bold; padding: 3px 8px;")
+                btn.clicked.connect(self.flip_selected_or_pick_slab_rib)
             elif tid == "MOVE_NUMERIC_DLG":
                 btn.setStyleSheet("padding: 3px 8px; font-weight: bold;")
                 btn.clicked.connect(self.open_numeric_move_dialog)
@@ -3152,10 +3243,10 @@ class XpertStudioMainWindow(QMainWindow):
 
         # 3. Dedicated DIMENSIONS Toolbar
         self.dim_tb = QToolBar("Dimensions Toolbar", self)
-        self.dim_tb.setStyleSheet("QToolBar { spacing: 4px; padding: 2px 6px; }")
+        self.dim_tb.setStyleSheet("QToolBar { spacing: 4px; padding: 2px 6px; background: #F1F5F9; }")
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.dim_tb)
         lbl_d = QLabel(" DIMENSIONS: ")
-        lbl_d.setStyleSheet("font-weight: bold; color: #8B5CF6;")
+        lbl_d.setStyleSheet("font-weight: bold; color: #7C3AED;")
         self.dim_tb.addWidget(lbl_d)
         for lbl, tid in [
             ("Linear Dim", "DIM_LINEAR"),
@@ -3175,7 +3266,7 @@ class XpertStudioMainWindow(QMainWindow):
         # ======================================================================
         self.draw_tb = QToolBar("Draw Structural Elements Toolbar", self)
         self.draw_tb.setOrientation(Qt.Orientation.Vertical)
-        self.draw_tb.setStyleSheet("QToolBar { spacing: 5px; padding: 6px 4px; }")
+        self.draw_tb.setStyleSheet("QToolBar { spacing: 5px; padding: 6px 4px; background: #F1F5F9; }")
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.draw_tb)
 
         lbl_draw_hdr = QLabel(" DRAW TOOLS")
@@ -3209,18 +3300,18 @@ class XpertStudioMainWindow(QMainWindow):
         vbox.setSpacing(3)
         vbox.setContentsMargins(4, 4, 4, 4)
 
-        # Bar 1: Clipping-Free Contextual Prompt & Column/Alignment Options Bar (2D Drawing Mode)
+        # Bar 1: Clipping-Free Contextual Prompt & Column/Alignment Options Bar (Light Silver-Slate Theme)
         self.ctx_frame = QFrame()
         self.ctx_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        self.ctx_frame.setStyleSheet("background-color: #0F172A; color: #F8FAFC; border: 1px solid #334155;")
+        self.ctx_frame.setStyleSheet("background-color: #F1F5F9; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 3px;")
         ctx_row = QHBoxLayout(self.ctx_frame)
         ctx_row.setContentsMargins(8, 3, 8, 3)
         ctx_row.setSpacing(8)
 
         self.lbl_ctx_prompt = QLabel(
-            "Ready (SELECT): Click element, Right-click for Context Menu, or drag Window/Crossing box."
+            "Ready (SELECT): Click element to select, Right-click to inspect, or use Modify toolbar."
         )
-        self.lbl_ctx_prompt.setStyleSheet("color: #38BDF8; font-weight: bold;")
+        self.lbl_ctx_prompt.setStyleSheet("color: #0369A1; font-weight: bold; border: none;")
         self.lbl_ctx_prompt.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_ctx_prompt.setMinimumWidth(240)
         ctx_row.addWidget(self.lbl_ctx_prompt, 1)
@@ -3245,16 +3336,18 @@ class XpertStudioMainWindow(QMainWindow):
         ctx_row.addWidget(self.cb_align_face_mode)
         vbox.addWidget(self.ctx_frame)
 
-        # Bar 2: ACI 318 Thickness & Layer Visibility Bar (2D Drawing Mode)
+        # Bar 2: ACI 318 Thickness & Layer Visibility Bar (Light Silver-Slate Theme)
         self.thick_frame = QFrame()
         self.thick_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.thick_frame.setStyleSheet("background-color: #F8FAFC; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 3px;")
         thick_row = QHBoxLayout(self.thick_frame)
         thick_row.setContentsMargins(8, 2, 8, 2)
         thick_row.setSpacing(6)
 
         self.lbl_calc_thick = QLabel("Calculated Min. Thickness: --")
-        self.lbl_calc_thick.setStyleSheet("font-weight: bold; color: #0284C7;")
+        self.lbl_calc_thick.setStyleSheet("font-weight: bold; color: #0284C7; border: none;")
         self.lbl_gov_member = QLabel("Governing Member: None")
+        self.lbl_gov_member.setStyleSheet("color: #334155; font-weight: bold; border: none;")
         self.lbl_gov_member.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_gov_member.setMinimumWidth(180)
 
@@ -3335,10 +3428,10 @@ class XpertStudioMainWindow(QMainWindow):
         self.report_browser = self.schedules_view.report_browser
         self.stack.addWidget(self.schedules_view)
 
-        # Bar 3: Upgraded AutoCAD/Revit Bottom Status Bar (2D Drawing Mode)
+        # Bar 3: Upgraded AutoCAD/Revit Bottom Status Bar (Light Silver-Slate Theme)
         self.bot_frame = QFrame()
         self.bot_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        self.bot_frame.setStyleSheet("background-color: #0F172A; color: #E2E8F0; border-top: 1px solid #334155;")
+        self.bot_frame.setStyleSheet("background-color: #F1F5F9; color: #0F172A; border-top: 1px solid #CBD5E1;")
         bot_row = QHBoxLayout(self.bot_frame)
         bot_row.setContentsMargins(8, 3, 8, 3)
         bot_row.setSpacing(5)
@@ -3349,9 +3442,9 @@ class XpertStudioMainWindow(QMainWindow):
             btn.setChecked(True)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setStyleSheet(
-                f"QPushButton {{ background-color: #1E293B; color: #94A3B8; border: 1px solid #475569; "
+                f"QPushButton {{ background-color: #E2E8F0; color: #475569; border: 1px solid #94A3B8; "
                 f"border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 11px; }} "
-                f"QPushButton:checked {{ background-color: {active_bg}; color: {active_fg}; border-color: #F8FAFC; }}"
+                f"QPushButton:checked {{ background-color: {active_bg}; color: {active_fg}; border-color: #0F172A; }}"
             )
             btn.toggled.connect(self._on_bottom_snap_settings_changed)
             return btn
@@ -3378,19 +3471,19 @@ class XpertStudioMainWindow(QMainWindow):
         bot_row.addWidget(self.btn_grid_snap_bar)
 
         self.lbl_coords_bar = QLabel("X: 0.00, Y: 0.00 m")
-        self.lbl_coords_bar.setStyleSheet("color: #E2E8F0; font-family: Consolas, monospace; font-size: 11px; padding-left: 6px;")
+        self.lbl_coords_bar.setStyleSheet("color: #0F172A; font-family: Consolas, monospace; font-size: 11px; font-weight: bold; padding-left: 6px; border: none;")
         self.lbl_coords_bar.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_coords_bar.setMinimumWidth(170)
         bot_row.addWidget(self.lbl_coords_bar, 1)
 
         lbl_cmd = QLabel("Cmd / ΔX,ΔY:")
-        lbl_cmd.setStyleSheet("color: #38BDF8; font-weight: bold;")
+        lbl_cmd.setStyleSheet("color: #0369A1; font-weight: bold; border: none;")
         bot_row.addWidget(lbl_cmd)
 
         self.ed_command_input = QLineEdit()
         self.ed_command_input.setPlaceholderText("e.g. 0.50, 0.00 or AL / MV / DI")
         self.ed_command_input.setFixedWidth(185)
-        self.ed_command_input.setStyleSheet("background-color: #1E293B; color: #F8FAFC; padding: 3px 6px; border: 1px solid #475569;")
+        self.ed_command_input.setStyleSheet("background-color: #FFFFFF; color: #0F172A; padding: 3px 6px; border: 1px solid #94A3B8;")
         self.ed_command_input.returnPressed.connect(self.execute_bottom_command_or_numeric_input)
         bot_row.addWidget(self.ed_command_input)
 
@@ -3416,6 +3509,100 @@ class XpertStudioMainWindow(QMainWindow):
         self.cad_canvas.ortho_enabled = self.btn_ortho_bar.isChecked()
         self.cad_canvas.grid_snap_enabled = self.btn_grid_snap_bar.isChecked()
 
+    def undo_action(self) -> None:
+        if not self._undo_stack:
+            self.update_contextual_prompt("Undo (Ctrl+Z): Nothing to undo on active story.")
+            return
+        cur_snap = json.dumps(self.current_story_data, sort_keys=True)
+        self._redo_stack.append(cur_snap)
+        prev_snap = self._undo_stack.pop()
+        self.current_story_data = json.loads(prev_snap)
+        self._last_saved_snapshot = prev_snap
+        self.save_and_sync_current_story(record_undo=False)
+        self.refresh_story_ui()
+        self.update_contextual_prompt(f"Undo complete ({len(self._undo_stack)} undo steps remaining).")
+
+    def redo_action(self) -> None:
+        if not self._redo_stack:
+            self.update_contextual_prompt("Redo (Ctrl+Y): Nothing to redo on active story.")
+            return
+        cur_snap = json.dumps(self.current_story_data, sort_keys=True)
+        self._undo_stack.append(cur_snap)
+        next_snap = self._redo_stack.pop()
+        self.current_story_data = json.loads(next_snap)
+        self._last_saved_snapshot = next_snap
+        self.save_and_sync_current_story(record_undo=False)
+        self.refresh_story_ui()
+        self.update_contextual_prompt(f"Redo complete ({len(self._redo_stack)} redo steps remaining).")
+
+    def convert_selected_beam_kind(self) -> None:
+        """
+        Bidirectionally converts selected beam(s) between Hidden Beam and Drop Beam (Upgrade #5).
+        Checks both `beam_kind` and `kind` so a Drop Beam always converts to a Hidden Beam and vice versa.
+        """
+        beam_ids = [eid for kind, eid in self.cad_canvas.selected_items if kind == "beam"]
+        if not beam_ids:
+            self.update_contextual_prompt(
+                "Convert Beam (Hidden ↔ Drop): Select one or more Beams (B#) on the canvas first, then click Convert Beam."
+            )
+            return
+        last_msg = ""
+        converted = 0
+        for bid in beam_ids:
+            bm_obj = next((b for b in self.current_story_data.get("beams", []) if str(b.get("id")) == str(bid)), None)
+            if bm_obj is None:
+                continue
+            cur_kind = str(bm_obj.get("beam_kind", bm_obj.get("kind", "hidden"))).lower()
+            target_kind = "hidden" if "drop" in cur_kind else "drop"
+            ok, msg = convert_beam_kind_and_section(self.current_story_data, str(bid), target_kind)
+            if ok:
+                converted += 1
+                last_msg = msg
+        if converted > 0:
+            self.save_and_sync_current_story()
+            self.refresh_story_ui()
+            self.update_contextual_prompt(last_msg)
+
+    def flip_selected_or_pick_slab_rib(self) -> None:
+        """
+        Flips the exact selected slab(s) by ID if any slab is selected (Upgrade #7);
+        otherwise activates the interactive `FLIP_RIB` pick tool.
+        """
+        slab_ids = [eid for kind, eid in self.cad_canvas.selected_items if kind == "slab"]
+        if slab_ids:
+            last_msg = ""
+            flipped_any = False
+            for sid in slab_ids:
+                ok, msg, _ = flip_slab_rib_by_id(self.current_story_data, str(sid))
+                if ok:
+                    flipped_any = True
+                    last_msg = msg
+                elif msg:
+                    QMessageBox.warning(self, "Cantilever & Back-Span Slab Equilibrium Rule", msg)
+            if flipped_any:
+                self.save_and_sync_current_story()
+                self.refresh_story_ui()
+                self.update_contextual_prompt(last_msg)
+            return
+        self.activate_cad_tool("FLIP_RIB")
+
+    def toggle_selected_beam_wall_load(self) -> None:
+        beam_ids = [eid for kind, eid in self.cad_canvas.selected_items if kind == "beam"]
+        if not beam_ids:
+            self.update_contextual_prompt("Select a Beam (B#) on the canvas first to toggle its Masonry Wall Load.")
+            return
+        for bid in beam_ids:
+            bm_obj = next((b for b in self.current_story_data.get("beams", []) if str(b.get("id")) == str(bid)), None)
+            if bm_obj is not None:
+                flags = ensure_beam_wall_flags(self.current_story_data, bm_obj)
+                new_state = not bool(bm_obj.get("has_wall_load", True))
+                for k in list(flags.keys()):
+                    flags[k] = new_state
+                bm_obj["has_wall_load"] = new_state
+        self.save_and_sync_current_story()
+        self.refresh_story_ui()
+        self.update_contextual_prompt(f"Toggled Masonry Wall Load on {', '.join(beam_ids)}.")
+
     def execute_bottom_command_or_numeric_input(self) -> None:
         raw = self.ed_command_input.text().strip()
         if not raw:
@@ -3423,6 +3610,12 @@ class XpertStudioMainWindow(QMainWindow):
         self.ed_command_input.clear()
         upper = raw.upper()
 
+        if upper in ("U", "UNDO"):
+            self.undo_action()
+            return
+        if upper in ("REDO",):
+            self.redo_action()
+            return
         if upper in ("AL", "ALIGN"):
             self.activate_cad_tool("ALIGN_ELEMENT")
             return
@@ -3642,6 +3835,9 @@ class XpertStudioMainWindow(QMainWindow):
         if os.path.isfile(jpath):
             with open(jpath, "r", encoding="utf-8") as f:
                 self.current_story_data = json.load(f)
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._last_saved_snapshot = json.dumps(self.current_story_data, sort_keys=True)
         self.refresh_story_ui()
         self.cad_canvas.zoom_extents()
 
@@ -3695,6 +3891,13 @@ class XpertStudioMainWindow(QMainWindow):
 
     def activate_cad_tool(self, tool_id: str) -> None:
         self.switch_workspace_mode(0)
+
+        if tool_id == "FLIP_RIB":
+            # Upgrade #7: If a slab is ALREADY selected, immediately flip that exact slab by ID!
+            slab_ids = [eid for kind, eid in self.cad_canvas.selected_items if kind == "slab"]
+            if slab_ids:
+                self.flip_selected_or_pick_slab_rib()
+                return
 
         if tool_id == "ZOOM_EXTENTS":
             self.cad_canvas.zoom_extents()
@@ -3775,7 +3978,7 @@ class XpertStudioMainWindow(QMainWindow):
             ]
             self.current_story_data["beams"] = [
                 {
-                    "id": "B1", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B1", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
                     "start_x": 0.0, "start_y": 8.40, "end_x": 10.0, "end_y": 8.40,
                     "spans": [5.1, 4.7],
                     "supports": [
@@ -3785,7 +3988,7 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B2", "beam_kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "room_bounding": True,
+                    "id": "B2", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "room_bounding": True,
                     "start_x": 0.0, "start_y": 4.20, "end_x": 10.0, "end_y": 4.20,
                     "spans": [5.1, 4.7],
                     "supports": [
@@ -3795,7 +3998,7 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B3", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B3", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
                     "start_x": 0.0, "start_y": 0.10, "end_x": 10.0, "end_y": 0.10,
                     "spans": [5.1, 4.7],
                     "supports": [
@@ -3805,7 +4008,7 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B4", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B4", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
                     "start_x": 0.10, "start_y": 0.0, "end_x": 0.10, "end_y": 8.5,
                     "spans": [4.0, 4.1],
                     "supports": [
@@ -3815,7 +4018,7 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B5", "beam_kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "room_bounding": True,
+                    "id": "B5", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "room_bounding": True,
                     "start_x": 5.20, "start_y": 0.0, "end_x": 5.20, "end_y": 8.5,
                     "spans": [4.0, 4.1],
                     "supports": [
@@ -3825,7 +4028,7 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B6", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B6", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
                     "start_x": 9.90, "start_y": 0.0, "end_x": 9.90, "end_y": 8.5,
                     "spans": [4.0, 4.1],
                     "supports": [
@@ -3856,7 +4059,7 @@ class XpertStudioMainWindow(QMainWindow):
         self.cad_canvas.render_story(self.current_story_data)
 
         prompts = {
-            "SELECT": "SELECT Mode: Click any element (or Right-Click for Context Menu), or drag Window (Blue) / Crossing (Green).",
+            "SELECT": "SELECT Mode: Click any element (Right-Click to Inspect in Analysis/Design), or drag Window (Blue) / Crossing (Green).",
             "ZOOM_WINDOW": "Zoom Window: Click and drag a rectangle over the area you want to zoom into.",
             "PAN": "Pan Mode (Hand): Click and drag anywhere on the canvas to pan smoothly in any direction.",
             "ROTATE_COL": "Rotate Column 90° [R]: Click directly on any Column (C#) on the canvas to rotate it 90°.",
@@ -3875,9 +4078,17 @@ class XpertStudioMainWindow(QMainWindow):
         }
         self.update_contextual_prompt(prompts.get(tool_id, f"Activated Tool: {tool_id}"))
 
-    def save_and_sync_current_story(self) -> None:
+    def save_and_sync_current_story(self, record_undo: bool = True) -> None:
         if not self.master_project:
             return
+        new_snap = json.dumps(self.current_story_data, sort_keys=True)
+        if record_undo and self._last_saved_snapshot is not None and new_snap != self._last_saved_snapshot:
+            self._undo_stack.append(self._last_saved_snapshot)
+            if len(self._undo_stack) > 40:
+                self._undo_stack.pop(0)
+            self._redo_stack.clear()
+        self._last_saved_snapshot = new_snap
+
         st_meta = self.master_project["stories"][self.current_story_index]
         jpath = st_meta["json_file"]
         dpath = st_meta["dxf_file"]

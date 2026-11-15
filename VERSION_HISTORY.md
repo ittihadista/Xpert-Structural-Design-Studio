@@ -4,7 +4,23 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v1.7.0-structural-bim-pro` (2026-11-15)
+## Current Release: `v1.8.0-structural-bim-pro` (2026-11-15)
+**Release Title:** Carrier Beam Depth Hierarchy Auto-Enforcement, Isolated Sub-Slab Rib Flipping & Robust Bidirectional Beam Type Conversion
+
+### Key Features & Advancements in `v1.8.0-structural-bim-pro`:
+1. **Carrier Beam Depth Hierarchy Auto-Enforcement (`h_carrier >= max(h_supported)`):**
+   - Implements Eng. Yousef's core structural rule #9: a primary carrier beam supporting secondary beams must have a cross-section depth greater than or equal to any secondary beam resting on it.
+   - Automatically upgrades the carrier beam depth (`depth_m`) and updates all corresponding support dimension records (`depth_m`) on secondary beams during analytical topological resolution.
+2. **Bidirectional Beam Type & Section Conversion (`Hidden <-> Drop`):**
+   - `convert_beam_kind_and_section` fully synchronizes both `beam["beam_kind"]` and `beam["kind"]` keys when toggling Drop $\leftrightarrow$ Hidden, ensuring zero divergence between UI representation, CAD canvas rendering, and engine solvers.
+3. **Targeted Sub-Slab Rib Flipping (`flip_slab_rib_by_id` & `toggle_slab_rib_by_label_click`):**
+   - Enables independent flipping of small sub-slab panels (such as `S5` adjacent to internal stair openings) without unintentionally triggering re-alignment or flipping of neighboring primary slabs (e.g. `S3`).
+4. **Reference v1.7.0 Backup Preserved:**
+   - Standalone reference backup of the previous release maintained in `xpert_studio_desktop/reference_v1_7_0/`.
+
+---
+
+## Previous Release: `v1.7.0-structural-bim-pro` (2026-11-15)
 **Release Title:** Single .XSD Master Standard, Crash-Proof Carrier Beam Deletion, Strict Cantilever Rib Locking, 90° Vertical SFD Jumps & Modular Multi-Workspace Architecture
 
 ### Key Features & Advancements in `v1.7.0-structural-bim-pro`:

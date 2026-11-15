@@ -514,8 +514,114 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertEqual(res["support_critical_table"][0]["support_kind"], "column")
         self.assertIn("formula_str", res["loads_applied"][0])
 
+    def test_v180_carrier_beam_depth_hierarchy_and_slab_flip_and_beam_convert(self):
+        """
+        Verifies v1.8.0 upgrades:
+        1. Carrier Beam Depth Hierarchy (`h_carrier >= max(h_supported)`): When secondary beam B7 (depth 0.55m)
+           rests on carrier beam B6 (initial depth 0.40m), B6 is automatically upgraded to depth >= 0.55m
+           and B7's support entry for B6 records `depth_m >= 0.55m`.
+        2. Bidirectional Beam Conversion (`Hidden <-> Drop`): `convert_beam_kind_and_section` synchronizes
+           both `beam["beam_kind"]` and `beam["kind"]` when toggling drop -> hidden -> drop.
+        3. Small Sub-Slab Rib Flipping (`S5` vs `S3`): `flip_slab_rib_by_id` and `toggle_slab_rib_by_label_click`
+           flip only the target small slab `S5` next to an interior stair opening without flipping `S3`.
+        """
+        from xpert_structural_engine import convert_beam_kind_and_section, flip_slab_rib_by_id
+
+        story = {
+            "adopted_slab_thickness_cm": 30.0,
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 8.5], [0.0, 8.5]],
+            "columns": [
+                {"id": "C1", "x": 0.10, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 5.20, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 9.90, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.10, "y": 4.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 5.20, "y": 4.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C6", "x": 9.90, "y": 4.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C7", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C8", "x": 5.20, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C9", "x": 9.90, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {
+                    "id": "B6", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.40,
+                    "start_x": 0.10, "start_y": 4.20, "end_x": 9.90, "end_y": 4.20,
+                    "spans": [5.10, 4.70],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.20, "center_coord_m": 0.10},
+                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.20, "center_coord_m": 5.20},
+                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.20, "center_coord_m": 9.90},
+                    ],
+                },
+                {
+                    "id": "B5", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.50,
+                    "start_x": 0.10, "start_y": 0.20, "end_x": 9.90, "end_y": 0.20,
+                    "spans": [5.10, 4.70],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C7", "width_m": 0.20, "center_coord_m": 0.10},
+                        {"support_index": 2, "kind": "column", "target_id": "C8", "width_m": 0.20, "center_coord_m": 5.20},
+                        {"support_index": 3, "kind": "column", "target_id": "C9", "width_m": 0.20, "center_coord_m": 9.90},
+                    ],
+                },
+                {
+                    "id": "B7", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.55,
+                    "start_x": 6.10, "start_y": 0.20, "end_x": 6.10, "end_y": 4.20,
+                    "spans": [4.00],
+                    "supports": [
+                        {"support_index": 1, "kind": "beam", "target_id": "B5", "width_m": 0.20, "center_coord_m": 0.20},
+                        {"support_index": 2, "kind": "beam", "target_id": "B6", "width_m": 0.20, "center_coord_m": 4.20},
+                    ],
+                },
+            ],
+            "slabs": [
+                {
+                    "id": "S3", "min_x": 0.10, "max_x": 5.20, "min_y": 0.20, "max_y": 4.20,
+                    "clear_min_x": 0.20, "clear_max_x": 5.10, "clear_min_y": 0.30, "clear_max_y": 4.10,
+                    "lx_m": 4.90, "ly_m": 3.80, "rib_angle_deg": 0, "rib_direction_deg": 0,
+                },
+                {
+                    "id": "S5", "min_x": 5.20, "max_x": 6.10, "min_y": 0.20, "max_y": 4.20,
+                    "clear_min_x": 5.30, "clear_max_x": 6.00, "clear_min_y": 0.30, "clear_max_y": 4.10,
+                    "lx_m": 0.70, "ly_m": 3.80, "rib_angle_deg": 0, "rib_direction_deg": 0,
+                },
+            ],
+            "openings": [],
+        }
+
+        # 1. Test Carrier Beam Hierarchy Rule (B6 depth must be upgraded from 0.40m to >= 0.55m to carry B7)
+        bundle = analyze_all_story_beams_and_columns(story, 25.0, 420.0)
+        b6_obj = next(b for b in story["beams"] if b["id"] == "B6")
+        self.assertGreaterEqual(float(b6_obj["depth_m"]), 0.55)
+        b7_res = bundle["beam_results"]["B7"]
+        b6_sup_in_b7 = next(s for s in b7_res["support_critical_table"] if s["target_id"] == "B6")
+        self.assertGreaterEqual(float(b6_sup_in_b7["depth_m"]), 0.55)
+
+        # Verify design_beam_aci318 returns non-None required steel areas and status
+        b7_des = bundle["beam_designs"]["B7"]
+        self.assertIsNotNone(b7_des.get("as_pos_req_mm2"))
+        self.assertIsNotNone(b7_des.get("as_neg_req_mm2"))
+        self.assertIn("OK", str(b7_des.get("status", "")))
+
+        # 2. Test Bidirectional Convert Beam (Drop -> Hidden -> Drop)
+        ok_h, _ = convert_beam_kind_and_section(story, "B6", "hidden")
+        self.assertTrue(ok_h)
+        self.assertEqual(b6_obj["beam_kind"], "hidden")
+        self.assertEqual(b6_obj["kind"], "hidden")
+        ok_d, _ = convert_beam_kind_and_section(story, "B6", "drop")
+        self.assertTrue(ok_d)
+        self.assertEqual(b6_obj["beam_kind"], "drop")
+        self.assertEqual(b6_obj["kind"], "drop")
+
+        # 3. Test flipping S5 by ID and by click (must flip S5 and NEVER flip S3!)
+        ok_f, _, flipped_s = flip_slab_rib_by_id(story, "S5")
+        self.assertTrue(ok_f)
+        self.assertEqual(flipped_s["id"], "S5")
+        self.assertEqual(flipped_s["rib_angle_deg"], 90)
+        s3_obj = next(s for s in story["slabs"] if s["id"] == "S3")
+        self.assertEqual(s3_obj["rib_angle_deg"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

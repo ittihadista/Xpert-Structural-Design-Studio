@@ -660,13 +660,98 @@ def analyze_all_story_beams_and_columns(
     for idx_b, b in enumerate(beams):
         bid = b["id"]
         b_copy = dict(b)
+        # Synchronize 'beam_kind' and 'kind' keys so UI and engine never diverge
+        b_kind_norm = str(b_copy.get("beam_kind", b_copy.get("kind", "hidden"))).lower()
+        b_kind_norm = "drop" if "drop" in b_kind_norm else "hidden"
+        b_copy["beam_kind"] = b_kind_norm
+        b_copy["kind"] = b_kind_norm
+        if idx_b < len(orig_beams):
+            orig_beams[idx_b]["beam_kind"] = b_kind_norm
+            orig_beams[idx_b]["kind"] = b_kind_norm
+
         raw_spans = [float(s) for s in b_copy.get("spans", []) if float(s) > 0.15]
         if not raw_spans:
             sx, sy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
             ex, ey = float(b_copy.get("end_x", 4.0)), float(b_copy.get("end_y", 0.0))
             raw_spans = [round(max(0.50, math.hypot(ex - sx, ey - sy)), 3)]
         b_copy["spans"] = raw_spans
+        beam_map[bid] = b_copy
 
+    # Topological Sort FIRST: Secondary supported beams MUST be processed before the primary carrier beams they rest on!
+    ordered_ids: List[str] = []
+    visited = set()
+    temp_visiting = set()
+
+    dependents_on_carrier: Dict[str, List[str]] = {b["id"]: [] for b in beams}
+    for b in beams:
+        for sup in b.get("supports", []):
+            if sup.get("kind") == "beam" and sup.get("target_id") in dependents_on_carrier:
+                dependents_on_carrier[sup["target_id"]].append(b["id"])
+
+    def visit_with_prereqs(bid: str):
+        if bid in visited or bid not in beam_map:
+            return
+        if bid in temp_visiting:
+            return
+        temp_visiting.add(bid)
+        for sec_id in dependents_on_carrier.get(bid, []):
+            visit_with_prereqs(sec_id)
+        temp_visiting.remove(bid)
+        visited.add(bid)
+        ordered_ids.append(bid)
+
+    for b in beams:
+        visit_with_prereqs(b["id"])
+
+    # STRUCTURAL CARRIER HIERARCHY RULE (Eng. Yousef Rule #9):
+    # A supporting (carrier) beam MUST have a section depth >= any supported (secondary) beam resting on it!
+    # Propagate along `ordered_ids` (from supported beams to carrier beams) so multi-level transfers also work.
+    for sec_id in ordered_ids:
+        sec_bm = beam_map[sec_id]
+        sec_d = float(sec_bm.get("depth_m", 0.30))
+        sec_w = float(sec_bm.get("width_m", 0.20))
+        for sup in sec_bm.get("supports", []):
+            if sup.get("kind") == "beam":
+                car_id = sup.get("target_id")
+                if car_id in beam_map:
+                    car_bm = beam_map[car_id]
+                    car_d = float(car_bm.get("depth_m", 0.30))
+                    if car_d < sec_d:
+                        car_bm["depth_m"] = round(sec_d, 3)
+                    if car_bm.get("beam_kind") == "drop" and sec_bm.get("beam_kind") == "drop":
+                        if float(car_bm.get("width_m", 0.20)) < sec_w:
+                            car_bm["width_m"] = round(sec_w, 3)
+                    # Write upgraded section back to story_data['beams']
+                    for orig_b in orig_beams:
+                        if orig_b.get("id") == car_id:
+                            orig_b["depth_m"] = car_bm["depth_m"]
+                            orig_b["width_m"] = car_bm["width_m"]
+                            break
+
+    # Populate accurate support dimensions (Column b_m/h_m or Carrier Beam width_m/depth_m) on all beam supports
+    col_obj_map = {c["id"]: c for c in columns if "id" in c}
+    for bid, b_copy in beam_map.items():
+        bsx, bsy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
+        bex, bey = float(b_copy.get("end_x", 0.0)), float(b_copy.get("end_y", 0.0))
+        b_horiz = abs(bex - bsx) >= abs(bey - bsy)
+        for sup in b_copy.get("supports", []):
+            tid = sup.get("target_id")
+            if sup.get("kind") == "beam" and tid in beam_map:
+                car_bm = beam_map[tid]
+                sup["width_m"] = round(float(car_bm.get("width_m", 0.20)), 3)
+                sup["depth_m"] = round(float(car_bm.get("depth_m", 0.50)), 3)
+            elif sup.get("kind") == "column" and tid in col_obj_map:
+                c_obj = col_obj_map[tid]
+                w_along = float(c_obj.get("b_m", 0.20)) if b_horiz else float(c_obj.get("h_m", 0.40))
+                d_perp = float(c_obj.get("h_m", 0.40)) if b_horiz else float(c_obj.get("b_m", 0.20))
+                sup["width_m"] = round(max(0.15, w_along), 3)
+                sup["depth_m"] = round(max(0.15, d_perp), 3)
+
+    # Now compute distributed loads (Self-Weight + Tributary Slab Loads + Wall Loads) using finalized beam sections
+    for idx_b, b in enumerate(beams):
+        bid = b["id"]
+        b_copy = beam_map[bid]
+        raw_spans = b_copy["spans"]
         c_left = max(0.0, float(b_copy.get("cantilever_left_m", 0.0)))
         c_right = max(0.0, float(b_copy.get("cantilever_right_m", 0.0)))
         tot_l = round(c_left + sum(raw_spans) + c_right, 3)
@@ -787,36 +872,7 @@ def analyze_all_story_beams_and_columns(
                 orig_beams[idx_b]["span_wall_flags"] = dict(flags)
                 orig_beams[idx_b]["loads"] = [dict(x) for x in computed_loads]
                 orig_beams[idx_b]["load_breakdown"] = [dict(x) for x in breakdown_list]
-
-        beam_map[bid] = b_copy
-
-    # Topological Sort: Secondary supported beams MUST be solved before the primary carrier beams they rest on!
-    ordered_ids: List[str] = []
-    visited = set()
-    temp_visiting = set()
-
-    # Map carrier_id -> list of secondary beam_ids that rest on carrier_id
-    dependents_on_carrier: Dict[str, List[str]] = {b["id"]: [] for b in beams}
-    for b in beams:
-        for sup in b.get("supports", []):
-            if sup.get("kind") == "beam" and sup.get("target_id") in dependents_on_carrier:
-                dependents_on_carrier[sup["target_id"]].append(b["id"])
-
-    def visit_with_prereqs(bid: str):
-        if bid in visited or bid not in beam_map:
-            return
-        if bid in temp_visiting:
-            return
-        temp_visiting.add(bid)
-        # First solve all secondary beams that rest on `bid`
-        for sec_id in dependents_on_carrier.get(bid, []):
-            visit_with_prereqs(sec_id)
-        temp_visiting.remove(bid)
-        visited.add(bid)
-        ordered_ids.append(bid)
-
-    for b in beams:
-        visit_with_prereqs(b["id"])
+                orig_beams[idx_b]["supports"] = [dict(s) for s in b_copy.get("supports", [])]
 
     beam_results: Dict[str, Dict[str, Any]] = {}
     beam_designs: Dict[str, Dict[str, Any]] = {}
@@ -866,6 +922,7 @@ def analyze_all_story_beams_and_columns(
                     "source_beam": bid,
                     "is_transferred_reaction": True,
                     "label": f"P = {r_kn:.2f} kN (from {bid} @ {pos_x:.2f}m)",
+                    "formula_str": f"P({bid}) = {r_kn:.2f} kN transferred at x = {pos_x:.2f} m",
                 }]
 
     column_records = []
@@ -1015,6 +1072,7 @@ def design_beam_aci318(
             "x_m": sup.get("x_m", 0.0),
             "reaction_ru_kn": sup.get("reaction_ru_kn", 0.0),
             "face_neg_mu_knm": sup.get("face_neg_mu_knm", 0.0),
+            "mu_neg_face_knm": sup.get("face_neg_mu_knm", 0.0),
             "face_vu_kn": v_f,
             "top_ast_mm2": a_t,
             "top_n_bars": nb_t,
@@ -1063,13 +1121,16 @@ def design_beam_aci318(
         "h_mm": round(h_mm),
         "d_mm": round(d_mm),
         "bottom_ast_mm2": ast_bot,
+        "as_pos_req_mm2": ast_bot,
         "bottom_n_bars": n_bot,
         "bottom_bars": bars_bot,
         "top_ast_mm2": ast_top,
+        "as_neg_req_mm2": ast_top,
         "top_n_bars": n_top,
         "top_bars": bars_top,
         "phi_vc_kn": round(phi_vc, 1),
         "stirrups": stirrups,
+        "status": "OK (ACI 318-19)",
         "span_designs": span_designs,
         "support_designs": support_designs,
     }
@@ -1843,11 +1904,14 @@ def _detect_cantilever_free_side(
             return "West"
 
     # Check if this bay is an overhanging balcony/cantilever projecting on the OUTER perimeter of the building
-    # (meaning there is NO bay on the free side, while an interior back-span bay exists on the opposite side).
+    # (meaning there is NO bay on the free side, it lies on the outer building perimeter, and an interior back-span bay exists on the opposite side).
     cols = [c for c in story_data.get("columns", []) if c.get("active", True)]
     tmin_x, tmax_x = float(target_bay["min_x"]), float(target_bay["max_x"])
     tmin_y, tmax_y = float(target_bay["min_y"]), float(target_bay["max_y"])
     lx, ly = float(target_bay["lx_m"]), float(target_bay["ly_m"])
+    has_bnd, poly_min_x, poly_min_y, poly_max_x, poly_max_y = get_slab_bounding_box(
+        story_data.get("slab_edge_polygon", [])
+    )
 
     def has_col_near_edge(x1: float, y1: float, x2: float, y2: float) -> bool:
         is_h = abs(x2 - x1) >= abs(y2 - y1)
@@ -1861,26 +1925,30 @@ def _detect_cantilever_free_side(
 
     if ly <= 2.60:
         if (
-            not has_col_near_edge(tmin_x, tmin_y, tmax_x, tmin_y)
+            (not has_bnd or abs(tmin_y - poly_min_y) <= 0.35)
+            and not has_col_near_edge(tmin_x, tmin_y, tmax_x, tmin_y)
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "North")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "South")
         ):
             return "South"
         if (
-            not has_col_near_edge(tmin_x, tmax_y, tmax_x, tmax_y)
+            (not has_bnd or abs(tmax_y - poly_max_y) <= 0.35)
+            and not has_col_near_edge(tmin_x, tmax_y, tmax_x, tmax_y)
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "South")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "North")
         ):
             return "North"
     if lx <= 2.60:
         if (
-            not has_col_near_edge(tmax_x, tmin_y, tmax_x, tmax_y)
+            (not has_bnd or abs(tmax_x - poly_max_x) <= 0.35)
+            and not has_col_near_edge(tmax_x, tmin_y, tmax_x, tmax_y)
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "West")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "East")
         ):
             return "East"
         if (
-            not has_col_near_edge(tmin_x, tmin_y, tmin_x, tmax_y)
+            (not has_bnd or abs(tmin_x - poly_min_x) <= 0.35)
+            and not has_col_near_edge(tmin_x, tmin_y, tmin_x, tmax_y)
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "East")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "West")
         ):
@@ -1962,14 +2030,25 @@ def reconcile_and_split_slabs_after_beam_change(story_data: Dict[str, Any]) -> T
             for b in new_bays:
                 bcx = (b["min_x"] + b["max_x"]) / 2.0
                 bcy = (b["min_y"] + b["max_y"]) / 2.0
-                if (omin_x - 0.15) <= bcx <= (omax_x + 0.15) and (omin_y - 0.15) <= bcy <= (omax_y + 0.15):
+                if (
+                    (omin_x - 0.15) <= bcx <= (omax_x + 0.15)
+                    and (omin_y - 0.15) <= bcy <= (omax_y + 0.15)
+                    and float(b["min_x"]) >= (omin_x - 0.45)
+                    and float(b["max_x"]) <= (omax_x + 0.45)
+                    and float(b["min_y"]) >= (omin_y - 0.45)
+                    and float(b["max_y"]) <= (omax_y + 0.45)
+                ):
                     if b["beam_count"] >= 3:
                         matching_bays.append(b)
+
+            if not matching_bays:
+                reconciled_slabs.append(dict(old_s))
+                continue
 
             if len(matching_bays) > 1:
                 split_count += len(matching_bays)
 
-            for mb in matching_bays:
+            for idx_mb, mb in enumerate(matching_bays):
                 bkey = mb["bay_key"]
                 if bkey in used_bay_keys:
                     continue
@@ -1980,8 +2059,9 @@ def reconcile_and_split_slabs_after_beam_change(story_data: Dict[str, Any]) -> T
                 rib_dir = old_dir
                 is_cant = bool(c_side is not None and rib_dir == c_perp)
                 axis_span = lx if rib_dir == 0 else ly
+                preserved_id = str(old_s.get("id", f"S{len(reconciled_slabs) + 1}")) if len(matching_bays) == 1 else f"S{len(reconciled_slabs) + 1}"
                 reconciled_slabs.append({
-                    "id": f"S{len(reconciled_slabs) + 1}",
+                    "id": preserved_id,
                     "bay_key": bkey,
                     "min_x": mb["min_x"],
                     "max_x": mb["max_x"],
@@ -1994,6 +2074,7 @@ def reconcile_and_split_slabs_after_beam_change(story_data: Dict[str, Any]) -> T
                     "lx_m": lx,
                     "ly_m": ly,
                     "rib_direction_deg": rib_dir,
+                    "rib_angle_deg": rib_dir,
                     "axis_span_m": axis_span,
                     "left_support_w_m": 0.30,
                     "right_support_w_m": 0.30,
@@ -2138,14 +2219,27 @@ def pick_area_create_or_update_slab(
     if not bays:
         return False, "Draw Outer Slab Boundary and Beams first before using Pick Area.", None
 
-    target_bay = None
+    # Find all candidate bays containing (click_x, click_y) and prioritize:
+    # 1) strictly inside clear bounds, 2) smallest area (lx_m * ly_m), 3) closest center distance
+    candidate_bays: List[Tuple[int, float, float, Dict[str, Any]]] = []
     for b in bays:
-        if b["min_x"] <= click_x <= b["max_x"] and b["min_y"] <= click_y <= b["max_y"]:
-            target_bay = b
-            break
+        if b["min_x"] - 0.02 <= click_x <= b["max_x"] + 0.02 and b["min_y"] - 0.02 <= click_y <= b["max_y"] + 0.02:
+            cmin_x = float(b.get("clear_min_x", b["min_x"]))
+            cmax_x = float(b.get("clear_max_x", b["max_x"]))
+            cmin_y = float(b.get("clear_min_y", b["min_y"]))
+            cmax_y = float(b.get("clear_max_y", b["max_y"]))
+            in_clear = 0 if (cmin_x <= click_x <= cmax_x and cmin_y <= click_y <= cmax_y) else 1
+            area = float(b["lx_m"]) * float(b["ly_m"])
+            bcx = (float(b["min_x"]) + float(b["max_x"])) / 2.0
+            bcy = (float(b["min_y"]) + float(b["max_y"])) / 2.0
+            dist = math.hypot(click_x - bcx, click_y - bcy)
+            candidate_bays.append((in_clear, area, dist, b))
 
-    if not target_bay:
+    if not candidate_bays:
         return False, f"Clicked point ({click_x:.2f}, {click_y:.2f}) is outside bounded slab bays.", None
+
+    candidate_bays.sort(key=lambda item: (item[0], item[1], item[2]))
+    target_bay = candidate_bays[0][3]
 
     beam_count = target_bay["beam_count"]
     if beam_count < 3:
@@ -2161,14 +2255,25 @@ def pick_area_create_or_update_slab(
 
     existing_slab = next((s for s in slabs if s.get("bay_key") == bay_key), None)
     if existing_slab is None:
-        # Also match by center coordinate in case bay_key changed after a beam edit
+        # Match by closest center coordinate AND matching bay dimensions so an unsplit larger slab never hijacks a smaller bay
         tcx = (target_bay["min_x"] + target_bay["max_x"]) / 2.0
         tcy = (target_bay["min_y"] + target_bay["max_y"]) / 2.0
+        best_match = None
+        best_dist = 1e9
         for s in slabs:
-            if "min_x" in s and float(s["min_x"]) <= tcx <= float(s["max_x"]) and float(s["min_y"]) <= tcy <= float(s["max_y"]):
-                existing_slab = s
-                existing_slab["bay_key"] = bay_key
-                break
+            if "min_x" in s:
+                smin_x, smax_x = float(s["min_x"]), float(s["max_x"])
+                smin_y, smax_y = float(s["min_y"]), float(s["max_y"])
+                scx, scy = (smin_x + smax_x) / 2.0, (smin_y + smax_y) / 2.0
+                slx, sly = smax_x - smin_x, smax_y - smin_y
+                if abs(slx - target_bay["lx_m"]) <= 0.65 and abs(sly - target_bay["ly_m"]) <= 0.65:
+                    d = math.hypot(tcx - scx, tcy - scy)
+                    if d <= 0.65 and d < best_dist:
+                        best_dist = d
+                        best_match = s
+        if best_match is not None:
+            existing_slab = best_match
+            existing_slab["bay_key"] = bay_key
 
     existing_open = next((o for o in openings if o.get("bay_key") == bay_key), None)
 
@@ -2368,6 +2473,7 @@ def pick_area_create_or_update_slab(
             "lx_m": lx,
             "ly_m": ly,
             "rib_direction_deg": chosen_dir,
+            "rib_angle_deg": chosen_dir,
             "axis_span_m": axis_span_m,
             "is_cantilever": is_cantilever,
             "cantilever_free_edge": cant_free_side if is_cantilever else None,
@@ -2391,6 +2497,7 @@ def pick_area_create_or_update_slab(
             "lx_m": lx,
             "ly_m": ly,
             "rib_direction_deg": chosen_dir,
+            "rib_angle_deg": chosen_dir,
             "axis_span_m": axis_span_m,
             "left_support_w_m": 0.30,
             "right_support_w_m": 0.30,
@@ -2414,6 +2521,65 @@ def pick_area_create_or_update_slab(
     )
 
 
+def flip_slab_rib_by_id(
+    story_data: Dict[str, Any],
+    slab_id: str,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """
+    Directly flips the rib direction (0° <-> 90°) of a specific selected Slab by its exact ID (`slab_id`),
+    never accidentally targeting a neighboring or larger overlapping slab!
+    """
+    slabs = story_data.get("slabs", [])
+    target_slb = next((s for s in slabs if str(s.get("id")) == str(slab_id)), None)
+    if target_slb is None:
+        return False, f"Slab '{slab_id}' not found.", None
+
+    smin_x = float(target_slb.get("min_x", target_slb.get("x_min", 0.0)))
+    smax_x = float(target_slb.get("max_x", target_slb.get("x_max", 4.0)))
+    smin_y = float(target_slb.get("min_y", target_slb.get("y_min", 0.0)))
+    smax_y = float(target_slb.get("max_y", target_slb.get("y_max", 4.0)))
+    cx = (smin_x + smax_x) / 2.0
+    cy = (smin_y + smax_y) / 2.0
+
+    bays = detect_story_grid_bays(story_data)
+    if bays:
+        slb_lx = float(target_slb.get("lx_m", smax_x - smin_x))
+        slb_ly = float(target_slb.get("ly_m", smax_y - smin_y))
+        matching_bay = next(
+            (
+                b for b in bays
+                if (
+                    b.get("bay_key") == target_slb.get("bay_key")
+                    or (
+                        abs(float(b["min_x"]) - smin_x) <= 0.35
+                        and abs(float(b["max_x"]) - smax_x) <= 0.35
+                        and abs(float(b["min_y"]) - smin_y) <= 0.35
+                        and abs(float(b["max_y"]) - smax_y) <= 0.35
+                    )
+                )
+                and abs(float(b["lx_m"]) - slb_lx) <= 0.50
+                and abs(float(b["ly_m"]) - slb_ly) <= 0.50
+            ),
+            None,
+        )
+        if matching_bay is not None:
+            ok, msg, updated = pick_area_create_or_update_slab(story_data, cx, cy, target_mode="FLIP_RIB")
+            if ok and updated is not None and str(updated.get("id")) == str(slab_id):
+                updated["rib_angle_deg"] = int(updated.get("rib_direction_deg", 0))
+                return ok, msg, updated
+            if not ok and ("Cantilever" in msg or "امتداد الكابولي" in msg):
+                return ok, msg, updated
+
+    cur_dir = int(target_slb.get("rib_direction_deg", target_slb.get("rib_angle_deg", 0)))
+    new_dir = 90 if cur_dir == 0 else 0
+    target_slb["rib_direction_deg"] = new_dir
+    target_slb["rib_angle_deg"] = new_dir
+    lx = float(target_slb.get("lx_m", smax_x - smin_x))
+    ly = float(target_slb.get("ly_m", smax_y - smin_y))
+    target_slb["axis_span_m"] = lx if new_dir == 0 else ly
+    return True, f"Slab {slab_id} ({lx:.2f}×{ly:.2f} m) flipped to Rib Direction = {new_dir}°.", target_slb
+
+
 def toggle_slab_rib_by_label_click(
     story_data: Dict[str, Any],
     click_x: float,
@@ -2422,21 +2588,40 @@ def toggle_slab_rib_by_label_click(
 ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
     Checks if the user clicked near any Slab's center rib label/arrow on the canvas (or inside the slab).
-    If so, flips its rib direction (0 deg <-> 90 deg) while strictly enforcing
-    cantilever & back-span continuity rules!
+    Prioritizes:
+      1) Slabs whose clear interior bounds contain `(click_x, click_y)`,
+      2) Smallest slab area (`lx * ly`),
+      3) Closest distance from `(click_x, click_y)` to the slab's center `(cx, cy)`.
+    This guarantees clicking inside or on a small sub-slab (like S5 next to a stair) NEVER flips S3 or S2!
     """
+    candidates: List[Tuple[int, float, float, Dict[str, Any]]] = []
     for slb in story_data.get("slabs", []):
-        if "min_x" not in slb:
+        if "min_x" not in slb and "x_min" not in slb:
             continue
-        smin_x, smax_x = float(slb["min_x"]), float(slb["max_x"])
-        smin_y, smax_y = float(slb["min_y"]), float(slb["max_y"])
+        smin_x = float(slb.get("min_x", slb.get("x_min", 0.0)))
+        smax_x = float(slb.get("max_x", slb.get("x_max", 0.0)))
+        smin_y = float(slb.get("min_y", slb.get("y_min", 0.0)))
+        smax_y = float(slb.get("max_y", slb.get("y_max", 0.0)))
+        cmin_x = float(slb.get("clear_min_x", smin_x))
+        cmax_x = float(slb.get("clear_max_x", smax_x))
+        cmin_y = float(slb.get("clear_min_y", smin_y))
+        cmax_y = float(slb.get("clear_max_y", smax_y))
         cx = (smin_x + smax_x) / 2.0
         cy = (smin_y + smax_y) / 2.0
-        if math.hypot(click_x - cx, click_y - cy) <= hit_radius_m or (
-            smin_x <= click_x <= smax_x and smin_y <= click_y <= smax_y
-        ):
-            return pick_area_create_or_update_slab(story_data, cx, cy, target_mode="FLIP_RIB")
-    return False, "", None
+        dist = math.hypot(click_x - cx, click_y - cy)
+        in_clear = cmin_x <= click_x <= cmax_x and cmin_y <= click_y <= cmax_y
+        in_bounds = smin_x <= click_x <= smax_x and smin_y <= click_y <= smax_y
+        if in_clear or in_bounds or dist <= hit_radius_m:
+            area = max(0.1, (smax_x - smin_x) * (smax_y - smin_y))
+            rank = 0 if in_clear else (1 if in_bounds else 2)
+            candidates.append((rank, area, dist, slb))
+
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        best_slb = candidates[0][3]
+        return flip_slab_rib_by_id(story_data, str(best_slb.get("id")))
+
+    return pick_area_create_or_update_slab(story_data, click_x, click_y, target_mode="FLIP_RIB")
 
 
 def delete_selected_element_from_story(
@@ -3068,21 +3253,32 @@ def convert_beam_kind_and_section(
     if not bm:
         return False, f"Beam {beam_id} not found."
 
-    cur_kind = bm.get("beam_kind", "hidden")
+    cur_kind_raw = str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower()
+    cur_kind = "drop" if "drop" in cur_kind_raw else "hidden"
     target_kind = new_kind if new_kind in ("hidden", "drop") else ("drop" if cur_kind == "hidden" else "hidden")
     bm["beam_kind"] = target_kind
+    bm["kind"] = target_kind
+
+    # Check if any secondary beam rests on `beam_id` so carrier depth >= supported depth
+    min_supported_depth = 0.25
+    for other_b in beams:
+        if other_b.get("id") == beam_id:
+            continue
+        for sup in other_b.get("supports", []):
+            if sup.get("kind") == "beam" and sup.get("target_id") == beam_id:
+                min_supported_depth = max(min_supported_depth, float(other_b.get("depth_m", 0.30)))
 
     if new_width_m is not None and new_depth_m is not None:
         bm["width_m"] = round(max(0.12, float(new_width_m)), 3)
-        bm["depth_m"] = round(max(0.20, float(new_depth_m)), 3)
+        bm["depth_m"] = round(max(min_supported_depth, float(new_depth_m)), 3)
     else:
         slab_t_m = round(float(story_data.get("adopted_slab_thickness_cm", 25.0)) / 100.0, 3)
         if target_kind == "drop":
             bm["width_m"] = 0.20
-            bm["depth_m"] = max(0.50, round(slab_t_m + 0.25, 2))
+            bm["depth_m"] = max(0.50, round(slab_t_m + 0.25, 2), min_supported_depth)
         else:
             bm["width_m"] = 0.40
-            bm["depth_m"] = max(0.25, slab_t_m)
+            bm["depth_m"] = max(0.25, slab_t_m, min_supported_depth)
 
     bm.pop("manual_loads_override", None)
     move_beam_within_slab_boundary(story_data, beam_id, 0.0, 0.0)
