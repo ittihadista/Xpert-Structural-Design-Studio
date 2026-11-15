@@ -607,26 +607,27 @@ def analyze_all_story_beams_and_columns(
     fy_mpa: float = 350.0,
 ) -> Dict[str, Any]:
     """
-    1-Click Story Analysis (v1.7.0):
-    - Dynamically computes span-by-span distributed loads (Beam Self-Weight + Tributary One-Way Slab Load
-      based on current Slab Rib Directions + Per-Span Masonry Wall Load Policy) with realistic default loads
-      (q_slab = 8.5 kN/m², w_wall = 10.0 kN/m) and full mathematical equation breakdowns.
+    1-Click Story Analysis (v1.9.0):
+    - First reconciles all beam supports and spans against the active columns and perpendicular carrier beams
+      so deleted or moved columns are 100% reflected in beam spans and supports.
+    - Dynamically computes piecewise distributed loads along each span (splitting spans at slab and void-opening
+      boundaries so an opening carries 0.00 kN/m slab load while an adjacent sub-slab like S5 applies its exact
+      tributary load only over its true physical extent).
     - Topologically sorts beams so secondary supported beams are solved before their carrier beams.
     - Transfers secondary beam reactions onto primary carrier beams at exact distances measured strictly
       from Support Centerlines.
-    - Solves all beams with exact vertical (90°) shear jumps and computes ACI 318 reinforcement design.
     """
+    reconcile_all_story_beams_supports_and_spans(story_data)
     orig_beams = story_data.get("beams", [])
     beams = [dict(b) for b in orig_beams]
     columns = [dict(c) for c in story_data.get("columns", [])]
     slabs = story_data.get("slabs", [])
+    openings = story_data.get("openings", [])
     story_h = float(story_data.get("height_m", 3.0))
 
     # Realistic default slab load (8.5 kN/m²) and wall load (10.0 kN/m) matching classic Xpert Beam Analysis (~30-35 kN/m)
     slab_wu_kpa = float(story_data.get("slab_factored_wu_kpa", 8.5))
     default_wall_w = float(story_data.get("default_wall_load_kn_m", 10.0))
-    has_geometric_slabs = bool(slabs)
-    has_wall_policy = ("wall_load_policy" in story_data) or any("span_wall_flags" in b for b in beams)
 
     # Helper to find the world coordinate of Support 1's centerline for any beam
     col_coord_map = {c["id"]: (float(c["x"]), float(c["y"])) for c in columns if "id" in c}
@@ -640,6 +641,8 @@ def analyze_all_story_beams_and_columns(
             s0 = sups[0]
             if "center_coord_m" in s0:
                 return float(s0["center_coord_m"])
+            if "coord" in s0:
+                return float(s0["coord"])
             tid = s0.get("target_id")
             if tid in col_coord_map:
                 return col_coord_map[tid][0] if b_horiz else col_coord_map[tid][1]
@@ -660,7 +663,6 @@ def analyze_all_story_beams_and_columns(
     for idx_b, b in enumerate(beams):
         bid = b["id"]
         b_copy = dict(b)
-        # Synchronize 'beam_kind' and 'kind' keys so UI and engine never diverge
         b_kind_norm = str(b_copy.get("beam_kind", b_copy.get("kind", "hidden"))).lower()
         b_kind_norm = "drop" if "drop" in b_kind_norm else "hidden"
         b_copy["beam_kind"] = b_kind_norm
@@ -703,9 +705,10 @@ def analyze_all_story_beams_and_columns(
     for b in beams:
         visit_with_prereqs(b["id"])
 
-    # STRUCTURAL CARRIER HIERARCHY RULE (Eng. Yousef Rule #9):
-    # A supporting (carrier) beam MUST have a section depth >= any supported (secondary) beam resting on it!
-    # Propagate along `ordered_ids` (from supported beams to carrier beams) so multi-level transfers also work.
+    # STRUCTURAL CARRIER HIERARCHY RULE (Eng. Yousef Rule #9 & Drop-on-Hidden Prevention):
+    # 1. A supporting (carrier) beam MUST have a section depth >= any supported (secondary) beam resting on it!
+    # 2. A Drop Beam CANNOT rest on a Hidden Beam; if legacy data has a Drop Beam on a Hidden Beam,
+    #    automatically upgrade the carrier beam to a Drop Beam so structural equilibrium is valid!
     for sec_id in ordered_ids:
         sec_bm = beam_map[sec_id]
         sec_d = float(sec_bm.get("depth_m", 0.30))
@@ -716,14 +719,19 @@ def analyze_all_story_beams_and_columns(
                 if car_id in beam_map:
                     car_bm = beam_map[car_id]
                     car_d = float(car_bm.get("depth_m", 0.30))
+                    if sec_bm.get("beam_kind") == "drop" and car_bm.get("beam_kind") == "hidden":
+                        car_bm["beam_kind"] = "drop"
+                        car_bm["kind"] = "drop"
+                        car_bm["width_m"] = min(float(car_bm.get("width_m", 0.20)), 0.25)
                     if car_d < sec_d:
                         car_bm["depth_m"] = round(sec_d, 3)
                     if car_bm.get("beam_kind") == "drop" and sec_bm.get("beam_kind") == "drop":
                         if float(car_bm.get("width_m", 0.20)) < sec_w:
                             car_bm["width_m"] = round(sec_w, 3)
-                    # Write upgraded section back to story_data['beams']
                     for orig_b in orig_beams:
                         if orig_b.get("id") == car_id:
+                            orig_b["beam_kind"] = car_bm["beam_kind"]
+                            orig_b["kind"] = car_bm["kind"]
                             orig_b["depth_m"] = car_bm["depth_m"]
                             orig_b["width_m"] = car_bm["width_m"]
                             break
@@ -747,14 +755,29 @@ def analyze_all_story_beams_and_columns(
                 sup["width_m"] = round(max(0.15, w_along), 3)
                 sup["depth_m"] = round(max(0.15, d_perp), 3)
 
-    # Now compute distributed loads (Self-Weight + Tributary Slab Loads + Wall Loads) using finalized beam sections
+    # Helper to clip a 1D interval [a, b] against a list of void-opening intervals [(v1, v2), ...]
+    def subtract_void_intervals(a: float, b: float, voids: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        segs = [(a, b)]
+        for v1, v2 in voids:
+            next_segs: List[Tuple[float, float]] = []
+            for s1, s2 in segs:
+                if v2 <= s1 + 1e-4 or v1 >= s2 - 1e-4:
+                    next_segs.append((s1, s2))
+                else:
+                    if v1 - s1 >= 0.30:
+                        next_segs.append((s1, v1))
+                    if s2 - v2 >= 0.30:
+                        next_segs.append((v2, s2))
+            segs = next_segs
+        return segs
+
+    # Now compute piecewise distributed loads (Self-Weight + Exact Sub-Interval Slab Loads + Wall Loads)
     for idx_b, b in enumerate(beams):
         bid = b["id"]
         b_copy = beam_map[bid]
         raw_spans = b_copy["spans"]
         c_left = max(0.0, float(b_copy.get("cantilever_left_m", 0.0)))
         c_right = max(0.0, float(b_copy.get("cantilever_right_m", 0.0)))
-        tot_l = round(c_left + sum(raw_spans) + c_right, 3)
 
         bsx, bsy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
         bex, bey = float(b_copy.get("end_x", 0.0)), float(b_copy.get("end_y", 0.0))
@@ -783,9 +806,29 @@ def analyze_all_story_beams_and_columns(
                 w_min, w_max = min(w_coord1, w_coord2), max(w_coord1, w_coord2)
                 seg_len = max(0.20, w_max - w_min)
 
-                w_slab_seg = 0.0
-                slab_tags: List[str] = []
-                slab_eq_parts: List[str] = []
+                # Identify void openings bordering this beam on Pos (+Y or +X) and Neg (-Y or -X) sides
+                voids_pos: List[Tuple[float, float]] = []
+                voids_neg: List[Tuple[float, float]] = []
+                for op in openings:
+                    omin_x, omax_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
+                    omin_y, omax_y = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
+                    if b_horiz:
+                        ov1, ov2 = max(w_min, omin_x), min(w_max, omax_x)
+                        if ov2 - ov1 >= 0.30:
+                            if abs(bsy - omin_y) <= 0.55 and (omin_y + omax_y) / 2.0 >= bsy:
+                                voids_pos.append((ov1, ov2))
+                            elif abs(bsy - omax_y) <= 0.55 and (omin_y + omax_y) / 2.0 < bsy:
+                                voids_neg.append((ov1, ov2))
+                    else:
+                        ov1, ov2 = max(w_min, omin_y), min(w_max, omax_y)
+                        if ov2 - ov1 >= 0.30:
+                            if abs(bsx - omin_x) <= 0.55 and (omin_x + omax_x) / 2.0 >= bsx:
+                                voids_pos.append((ov1, ov2))
+                            elif abs(bsx - omax_x) <= 0.55 and (omin_x + omax_x) / 2.0 < bsx:
+                                voids_neg.append((ov1, ov2))
+
+                # Collect exact slab load intervals [(ov1, ov2, add_w, tag_str, eq_str)] along [w_min, w_max]
+                slab_intervals: List[Tuple[float, float, float, str, str]] = []
                 for slb in slabs:
                     if slb.get("is_void", False):
                         continue
@@ -795,73 +838,133 @@ def analyze_all_story_beams_and_columns(
                     smin_x, smax_x, smin_y, smax_y = s_bounds
                     lx = max(0.5, smax_x - smin_x)
                     ly = max(0.5, smax_y - smin_y)
-                    rib_dir = int(slb.get("rib_direction_deg", 0))
+                    rib_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
                     is_cant_slb = bool(slb.get("is_cantilever", False))
                     sid_lbl = str(slb.get("id", "S"))
 
                     if b_horiz and rib_dir == 90:
                         if abs(bsy - smin_y) <= 0.55 or abs(bsy - smax_y) <= 0.55:
-                            ov = min(w_max, smax_x) - max(w_min, smin_x)
-                            if ov >= min(0.35, seg_len * 0.25):
+                            ov1, ov2 = max(w_min, smin_x), min(w_max, smax_x)
+                            if ov2 - ov1 >= 0.40:
+                                is_pos_side = ((smin_y + smax_y) / 2.0) >= bsy
+                                side_voids = voids_pos if is_pos_side else voids_neg
                                 trib_m = ly if is_cant_slb else (ly * 0.50)
-                                ratio = min(1.0, ov / seg_len)
-                                add_w = round(slab_wu_kpa * trib_m * ratio, 2)
-                                w_slab_seg = round(w_slab_seg + add_w, 2)
-                                slab_tags.append(f"{sid_lbl}({add_w:.2f})")
+                                add_w = round(slab_wu_kpa * trib_m, 2)
                                 factor_txt = f"{ly:.2f}m[Cant]" if is_cant_slb else f"({ly:.2f}/2)m"
-                                slab_eq_parts.append(f"{sid_lbl}: {slab_wu_kpa:.1f}×{factor_txt}={add_w:.2f}")
+                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.1f}×{factor_txt}={add_w:.2f}"
+                                for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
+                                    slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
                     elif (not b_horiz) and rib_dir == 0:
                         if abs(bsx - smin_x) <= 0.55 or abs(bsx - smax_x) <= 0.55:
-                            ov = min(w_max, smax_y) - max(w_min, smin_y)
-                            if ov >= min(0.35, seg_len * 0.25):
+                            ov1, ov2 = max(w_min, smin_y), min(w_max, smax_y)
+                            if ov2 - ov1 >= 0.40:
+                                is_pos_side = ((smin_x + smax_x) / 2.0) >= bsx
+                                side_voids = voids_pos if is_pos_side else voids_neg
                                 trib_m = lx if is_cant_slb else (lx * 0.50)
-                                ratio = min(1.0, ov / seg_len)
-                                add_w = round(slab_wu_kpa * trib_m * ratio, 2)
-                                w_slab_seg = round(w_slab_seg + add_w, 2)
-                                slab_tags.append(f"{sid_lbl}({add_w:.2f})")
+                                add_w = round(slab_wu_kpa * trib_m, 2)
                                 factor_txt = f"{lx:.2f}m[Cant]" if is_cant_slb else f"({lx:.2f}/2)m"
-                                slab_eq_parts.append(f"{sid_lbl}: {slab_wu_kpa:.1f}×{factor_txt}={add_w:.2f}")
+                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.1f}×{factor_txt}={add_w:.2f}"
+                                for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
+                                    slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
+
+                # Build clean breakpoints along [w_min, w_max], snapping within 0.25m of span ends/joints
+                raw_cuts = [w_min, w_max]
+                for c1, c2, _, _, _ in slab_intervals:
+                    raw_cuts.extend([c1, c2])
+                for v1, v2 in (voids_pos + voids_neg):
+                    raw_cuts.extend([max(w_min, v1), min(w_max, v2)])
+                raw_cuts.sort()
+
+                clean_cuts = [w_min]
+                for pt in raw_cuts:
+                    if pt <= w_min + 0.25:
+                        continue
+                    if pt >= w_max - 0.25:
+                        continue
+                    if pt - clean_cuts[-1] >= 0.30:
+                        clean_cuts.append(round(pt, 3))
+                clean_cuts.append(w_max)
 
                 wall_on = bool(flags.get(skey, True))
                 w_wall_seg = round(default_wall_w if wall_on else 0.0, 2)
-                w_total_seg = round(w_sw + w_slab_seg + w_wall_seg, 2)
 
-                parts = [f"SW={w_sw:.2f}"]
-                if w_slab_seg > 0.01:
-                    parts.append(f"Slabs[{'+'.join(slab_tags)}]={w_slab_seg:.2f}")
-                else:
-                    parts.append("Slabs=0.00")
-                if w_wall_seg > 0.01:
-                    parts.append(f"Wall={w_wall_seg:.2f}")
-                else:
-                    parts.append("Wall=0.00")
-                desc_label = f"{seg['label']}: {' + '.join(parts)} = {w_total_seg:.2f} kN/m"
-                formula_detail = (
-                    f"w_total = w_SW ({w_sw:.2f}) + w_Slab ({w_slab_seg:.2f}"
-                    f"{' [' + '; '.join(slab_eq_parts) + ']' if slab_eq_parts else ''}) + w_Wall ({w_wall_seg:.2f}) = {w_total_seg:.2f} kN/m"
-                )
+                sub_records: List[Dict[str, Any]] = []
+                for k_sub in range(len(clean_cuts) - 1):
+                    sw1, sw2 = clean_cuts[k_sub], clean_cuts[k_sub + 1]
+                    mid_w = (sw1 + sw2) / 2.0
+                    w_slab_sub = 0.0
+                    slab_tags: List[str] = []
+                    slab_eq_parts: List[str] = []
+                    for c1, c2, add_w, tag_s, eq_s in slab_intervals:
+                        if c1 - 0.05 <= mid_w <= c2 + 0.05:
+                            w_slab_sub = round(w_slab_sub + add_w, 2)
+                            slab_tags.append(tag_s)
+                            slab_eq_parts.append(eq_s)
 
-                computed_loads.append({
-                    "type": "D",
-                    "span_key": skey,
-                    "span_label": seg["label"],
-                    "x1": round(sx1, 3),
-                    "x2": round(sx2, 3),
-                    "start": round(sx1, 3),
-                    "end": round(sx2, 3),
-                    "val": w_total_seg,
-                    "mag": w_total_seg,
-                    "w_sw": w_sw,
-                    "sw_eq": sw_eq_str,
-                    "w_slab": w_slab_seg,
-                    "slab_eq_parts": slab_eq_parts,
-                    "w_wall": w_wall_seg,
-                    "wall_enabled": wall_on,
-                    "label": desc_label,
-                    "formula_str": formula_detail,
-                    "source_note": f"[{' + '.join(parts)}]",
-                })
-                breakdown_list.append(computed_loads[-1])
+                    sub_x1 = round(sx1 + (sw1 - w_min), 3)
+                    sub_x2 = round(sx1 + (sw2 - w_min), 3)
+                    if sub_Records_can_merge := (
+                        sub_records
+                        and abs(sub_records[-1]["w_slab"] - w_slab_sub) < 0.01
+                        and sub_records[-1]["slab_tags"] == slab_tags
+                    ):
+                        sub_records[-1]["x2"] = sub_x2
+                        sub_records[-1]["end"] = sub_x2
+                    else:
+                        sub_records.append({
+                            "x1": sub_x1,
+                            "x2": sub_x2,
+                            "start": sub_x1,
+                            "end": sub_x2,
+                            "w_slab": w_slab_sub,
+                            "slab_tags": slab_tags,
+                            "slab_eq_parts": slab_eq_parts,
+                        })
+
+                for idx_sub, sr in enumerate(sub_records):
+                    w_slab_seg = sr["w_slab"]
+                    slab_tags = sr["slab_tags"]
+                    slab_eq_parts = sr["slab_eq_parts"]
+                    w_total_seg = round(w_sw + w_slab_seg + w_wall_seg, 2)
+
+                    parts = [f"SW={w_sw:.2f}"]
+                    if w_slab_seg > 0.01:
+                        parts.append(f"Slabs[{'+'.join(slab_tags)}]={w_slab_seg:.2f}")
+                    else:
+                        parts.append("Slabs=0.00")
+                    if w_wall_seg > 0.01:
+                        parts.append(f"Wall={w_wall_seg:.2f}")
+                    else:
+                        parts.append("Wall=0.00")
+
+                    lbl_prefix = seg["label"] if len(sub_records) == 1 else f"{seg['label']} [{sr['x1']:.2f}->{sr['x2']:.2f}m]"
+                    desc_label = f"{lbl_prefix}: {' + '.join(parts)} = {w_total_seg:.2f} kN/m"
+                    formula_detail = (
+                        f"w_total = w_SW ({w_sw:.2f}) + w_Slab ({w_slab_seg:.2f}"
+                        f"{' [' + '; '.join(slab_eq_parts) + ']' if slab_eq_parts else ''}) + w_Wall ({w_wall_seg:.2f}) = {w_total_seg:.2f} kN/m"
+                    )
+
+                    computed_loads.append({
+                        "type": "D",
+                        "span_key": skey,
+                        "span_label": lbl_prefix,
+                        "x1": sr["x1"],
+                        "x2": sr["x2"],
+                        "start": sr["start"],
+                        "end": sr["end"],
+                        "val": w_total_seg,
+                        "mag": w_total_seg,
+                        "w_sw": w_sw,
+                        "sw_eq": sw_eq_str,
+                        "w_slab": w_slab_seg,
+                        "slab_eq_parts": slab_eq_parts,
+                        "w_wall": w_wall_seg,
+                        "wall_enabled": wall_on,
+                        "label": desc_label,
+                        "formula_str": formula_detail,
+                        "source_note": f"[{' + '.join(parts)}]",
+                    })
+                    breakdown_list.append(computed_loads[-1])
 
             for cld in b_copy.get("custom_loads", []):
                 computed_loads.append(dict(cld))
@@ -1284,6 +1387,214 @@ def check_duplicate_column(
     return None
 
 
+def renumber_story_columns_sequentially(story_data: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Ensures all active columns in `story_data['columns']` are numbered sequentially
+    `C1, C2, C3, ..., Cn` with ZERO gaps (e.g., after deleting C4, C5..C9 become C4..C8),
+    and updates all column support references (`target_id`) across `story_data['beams']`.
+    Returns a dictionary mapping `{old_col_id: new_col_id}`.
+    """
+    cols = story_data.get("columns", [])
+    active_cols = [c for c in cols if c.get("active", True)]
+    id_map: Dict[str, str] = {}
+    for idx, col in enumerate(active_cols):
+        old_id = str(col.get("id", f"C{idx + 1}"))
+        new_id = f"C{idx + 1}"
+        id_map[old_id] = new_id
+        col["id"] = new_id
+
+    story_data["columns"] = active_cols
+    for bm in story_data.get("beams", []):
+        for sup in bm.get("supports", []):
+            if sup.get("kind") == "column":
+                old_tid = str(sup.get("target_id", ""))
+                if old_tid in id_map:
+                    sup["target_id"] = id_map[old_tid]
+    return id_map
+
+
+def reconcile_all_story_beams_supports_and_spans(story_data: Dict[str, Any]) -> None:
+    """
+    Dynamically re-evaluates all beams' supports (`columns` and perpendicular carrier `beams`),
+    `spans`, and `cantilever_left_m` / `cantilever_right_m` from live 2D geometry in `story_data`.
+    Fixes:
+    1. When a column in the middle of a 2-span beam (e.g. B6) is deleted, B6 immediately becomes
+       a 1-span beam (`[9.30m]`) between its remaining end columns (`C7` and `C8`/`C9`), and any
+       perpendicular beam (e.g. B5) that used to frame into that deleted column automatically
+       switches its support to Carrier Beam B6 (`Roller`)!
+    2. Preserves synthetic unit-test beams that have no 2D coordinates or no story columns.
+    """
+    beams = story_data.get("beams", [])
+    if not beams:
+        return
+    active_cols = [c for c in story_data.get("columns", []) if c.get("active", True)]
+    if not active_cols and len(beams) <= 1:
+        return
+
+    # First pass: determine which beams have column supports and 2D geometry
+    for bm in beams:
+        sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+        ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+        total_len = round(math.hypot(ex - sx, ey - sy), 3)
+        if total_len < 0.40:
+            continue
+
+        is_horizontal = abs(ex - sx) >= abs(ey - sy)
+        if is_horizontal and sx > ex:
+            sx, ex = ex, sx
+        elif (not is_horizontal) and sy > ey:
+            sy, ey = ey, sy
+
+        width_m = float(bm.get("width_m", 0.30))
+        half_w = width_m / 2.0
+        snap_tol = max(0.45, half_w + 0.28)
+        prev_sup_beam_ids = {
+            str(s.get("target_id"))
+            for s in bm.get("supports", [])
+            if s.get("kind") == "beam"
+        }
+
+        supports_raw: List[Dict[str, Any]] = []
+        for col in active_cols:
+            cx, cy = float(col["x"]), float(col["y"])
+            b_col = float(col.get("b_m", 0.20))
+            h_col = float(col.get("h_m", 0.40))
+            if is_horizontal:
+                if abs(cy - sy) <= max(snap_tol, h_col / 2.0 + half_w + 0.15) and (sx - b_col / 2.0 - 0.35) <= cx <= (ex + b_col / 2.0 + 0.35):
+                    supports_raw.append({
+                        "coord": cx,
+                        "x": cx,
+                        "y": sy,
+                        "kind": "column",
+                        "target_id": str(col["id"]),
+                        "width_m": b_col,
+                        "depth_m": h_col,
+                    })
+            else:
+                if abs(cx - sx) <= max(snap_tol, b_col / 2.0 + half_w + 0.15) and (sy - h_col / 2.0 - 0.35) <= cy <= (ey + h_col / 2.0 + 0.35):
+                    supports_raw.append({
+                        "coord": cy,
+                        "x": sx,
+                        "y": cy,
+                        "kind": "column",
+                        "target_id": str(col["id"]),
+                        "width_m": h_col,
+                        "depth_m": b_col,
+                    })
+
+        # Second: check perpendicular beams for T-junction or previously-registered carrier beam supports
+        for ob in beams:
+            if ob.get("id") == bm.get("id"):
+                continue
+            osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
+            oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
+            if math.hypot(oex - osx, oey - osy) < 0.40:
+                continue
+            ob_horiz = abs(oex - osx) >= abs(oey - osy)
+            if is_horizontal and not ob_horiz:
+                bx = osx
+                omin_y, omax_y = min(osy, oey), max(osy, oey)
+                if (sx - 0.30) <= bx <= (ex + 0.30) and (omin_y - 0.30) <= sy <= (omax_y + 0.30):
+                    if any(abs(s["coord"] - bx) < 0.35 for s in supports_raw):
+                        continue
+                    d_bm_end = min(abs(bx - sx), abs(bx - ex))
+                    d_ob_end = min(abs(sy - omin_y), abs(sy - omax_y))
+                    # ob is Carrier if bm terminates on ob's interior (T-junction) OR ob was already supporting bm
+                    is_t_junction_on_ob = (d_bm_end <= 0.55 and d_ob_end > 0.45)
+                    ob_supports_bm_already = (str(ob.get("id")) in prev_sup_beam_ids) and not (d_ob_end <= 0.55 and d_bm_end > 0.45)
+                    if is_t_junction_on_ob or ob_supports_bm_already:
+                        supports_raw.append({
+                            "coord": bx,
+                            "x": bx,
+                            "y": sy,
+                            "kind": "beam",
+                            "target_id": str(ob["id"]),
+                            "width_m": float(ob.get("width_m", 0.30)),
+                            "depth_m": float(ob.get("depth_m", 0.30)),
+                            "pos_on_carrier_m": round(abs(sy - omin_y), 3),
+                        })
+            elif (not is_horizontal) and ob_horiz:
+                by = osy
+                omin_x, omax_x = min(osx, oex), max(osx, oex)
+                if (sy - 0.30) <= by <= (ey + 0.30) and (omin_x - 0.30) <= sx <= (omax_x + 0.30):
+                    if any(abs(s["coord"] - by) < 0.35 for s in supports_raw):
+                        continue
+                    d_bm_end = min(abs(by - sy), abs(by - ey))
+                    d_ob_end = min(abs(sx - omin_x), abs(sx - omax_x))
+                    is_t_junction_on_ob = (d_bm_end <= 0.55 and d_ob_end > 0.45)
+                    ob_supports_bm_already = (str(ob.get("id")) in prev_sup_beam_ids) and not (d_ob_end <= 0.55 and d_bm_end > 0.45)
+                    if is_t_junction_on_ob or ob_supports_bm_already:
+                        supports_raw.append({
+                            "coord": by,
+                            "x": sx,
+                            "y": by,
+                            "kind": "beam",
+                            "target_id": str(ob["id"]),
+                            "width_m": float(ob.get("width_m", 0.30)),
+                            "depth_m": float(ob.get("depth_m", 0.30)),
+                            "pos_on_carrier_m": round(abs(sx - omin_x), 3),
+                        })
+
+        supports_raw.sort(key=lambda s: s["coord"])
+        if not supports_raw:
+            continue
+
+        first_sup = supports_raw[0]
+        last_sup = supports_raw[-1]
+        first_outer_edge = round(first_sup["coord"] - float(first_sup["width_m"]) / 2.0, 3)
+        last_outer_edge = round(last_sup["coord"] + float(last_sup["width_m"]) / 2.0, 3)
+
+        start_coord = sx if is_horizontal else sy
+        end_coord = ex if is_horizontal else ey
+        raw_cant_left = round(first_sup["coord"] - start_coord, 3)
+        raw_cant_right = round(end_coord - last_sup["coord"], 3)
+        overhang_beyond_first_face = round(first_outer_edge - start_coord, 3)
+        overhang_beyond_last_face = round(end_coord - last_outer_edge, 3)
+
+        cant_left = raw_cant_left if overhang_beyond_first_face > 0.25 else 0.0
+        cant_right = raw_cant_right if overhang_beyond_last_face > 0.25 else 0.0
+
+        new_spans: List[float] = []
+        for idx in range(len(supports_raw) - 1):
+            sp = round(supports_raw[idx + 1]["coord"] - supports_raw[idx]["coord"], 3)
+            if sp >= 0.30:
+                new_spans.append(sp)
+
+        if not new_spans:
+            if cant_left > 0.35:
+                new_spans = [cant_left]
+            elif cant_right > 0.35:
+                new_spans = [cant_right]
+            else:
+                new_spans = [round(max(0.50, total_len), 3)]
+
+        formatted_supports = []
+        for idx, sup in enumerate(supports_raw):
+            entry: Dict[str, Any] = {
+                "support_index": idx + 1,
+                "kind": sup["kind"],
+                "target_id": sup["target_id"],
+                "width_m": round(float(sup["width_m"]), 3),
+                "depth_m": round(float(sup.get("depth_m", 0.30)), 3),
+                "coord": round(float(sup["coord"]), 3),
+                "center_coord_m": round(float(sup["coord"]), 3),
+            }
+            if "pos_on_carrier_m" in sup:
+                entry["pos_on_carrier_m"] = sup["pos_on_carrier_m"]
+            formatted_supports.append(entry)
+
+        old_spans = [round(float(x), 2) for x in bm.get("spans", [])]
+        new_spans_rounded = [round(float(x), 2) for x in new_spans]
+        bm["supports"] = formatted_supports
+        bm["spans"] = new_spans
+        bm["cantilever_left_m"] = cant_left if len(supports_raw) >= 2 else 0.0
+        bm["cantilever_right_m"] = cant_right if len(supports_raw) >= 2 else 0.0
+
+        if old_spans != new_spans_rounded:
+            bm.pop("manual_loads_override", None)
+            ensure_beam_wall_flags(story_data, bm)
+
+
 def validate_and_build_beam_with_cantilevers(
     beam_id: str,
     start_pt: Tuple[float, float],
@@ -1294,24 +1605,26 @@ def validate_and_build_beam_with_cantilevers(
     columns: List[Dict[str, Any]],
     existing_beams: List[Dict[str, Any]],
     slab_edge_polygon: List[List[float]],
+    is_tie_beam_story: bool = False,
 ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """
     Validates strict Revit-style structural beam rules:
-    1. Outer Slab Boundary (Polyline) must exist.
-    2. Full Outer-Face Column Bearing: When a user clicks the center of a start column and
-       an end column, the physical beam automatically extends from the OUTER FACE of the first
-       column to the OUTER FACE of the last column (`sx = cx1 - b1/2` to `ex = cx2 + b2/2`),
-       so the beam never stops awkwardly at the column center!
-    3. Full-Width Beam Boundary Shift: If the beam's lateral outer face (+/- width_m / 2)
-       protrudes outside the building boundary, the beam axis is automatically shifted inward so its
-       outer face sits 100% flush with the building boundary.
-    4. Duplicate Overlapping Beam Prevention: Rejects drawing a beam on top of an existing collinear beam.
-    5. Continuous Multi-Span Recognition from 2 Clicks: Automatically detects all intermediate columns/beams.
-    6. Cantilever Overhang Validation: Overhang beyond the outer face of the end column is valid ONLY if its tip
-       is a Free End at the building perimeter.
+    1. Outer Slab Boundary (Polyline) must exist on Slab stories, UNLESS `is_tie_beam_story=True`
+       (00_TieBeams / مسقط السملات), where Tie Beams can be drawn directly between columns without a boundary!
+    2. On `00_TieBeams`, only Drop Beams (Tie Beams / سملات) are allowed (Hidden Beams are forbidden).
+    3. Structural Hierarchy Rule: A Drop Beam (`drop`) CANNOT rest on a Hidden Beam (`hidden`)!
+    4. Full Outer-Face Column Bearing & Full-Width Beam Boundary Shift.
+    5. Duplicate Overlapping Beam Prevention & Continuous Multi-Span Recognition.
     """
+    if is_tie_beam_story and str(beam_kind).lower() == "hidden":
+        return (
+            False,
+            None,
+            "Tie-Beams Story Rule (مسقط السملات): Hidden beams are not allowed in the Tie-Beams story. Use Drop Beam (Tie Beam / سمل).",
+        )
+
     has_bnd, min_x, min_y, max_x, max_y = get_slab_bounding_box(slab_edge_polygon)
-    if not has_bnd:
+    if not has_bnd and not is_tie_beam_story:
         return False, None, "Draw the Outer Building Boundary Polyline (00-XD-EDGE) first before drawing beams."
 
     active_cols = [c for c in columns if c.get("active", True)]
@@ -1322,10 +1635,11 @@ def validate_and_build_beam_with_cantilevers(
     ex, ey = round(float(end_pt[0]), 3), round(float(end_pt[1]), 3)
 
     tol = 0.35
-    if sx < min_x - tol or sx > max_x + tol or sy < min_y - tol or sy > max_y + tol:
-        return False, None, f"Beam start point ({sx:.2f}, {sy:.2f}) is outside the Building Boundary."
-    if ex < min_x - tol or ex > max_x + tol or ey < min_y - tol or ey > max_y + tol:
-        return False, None, f"Beam end point ({ex:.2f}, {ey:.2f}) is outside the Building Boundary."
+    if has_bnd:
+        if sx < min_x - tol or sx > max_x + tol or sy < min_y - tol or sy > max_y + tol:
+            return False, None, f"Beam start point ({sx:.2f}, {sy:.2f}) is outside the Building Boundary."
+        if ex < min_x - tol or ex > max_x + tol or ey < min_y - tol or ey > max_y + tol:
+            return False, None, f"Beam end point ({ex:.2f}, {ey:.2f}) is outside the Building Boundary."
 
     half_w = float(width_m) / 2.0
     shifted_note = ""
@@ -1334,24 +1648,23 @@ def validate_and_build_beam_with_cantilevers(
         if sx > ex:
             sx, ex = ex, sx
         is_horizontal = True
-        clamped_y = min(max(sy, min_y + half_w), max_y - half_w)
-        if abs(clamped_y - sy) > 1e-4:
-            shifted_note = f" [Shifted beam axis Y from {sy:.2f}m to {clamped_y:.2f}m so full width ({width_m:.2f}m) stays inside building boundary]"
-            sy = ey = round(clamped_y, 3)
+        if has_bnd:
+            clamped_y = min(max(sy, min_y + half_w), max_y - half_w)
+            if abs(clamped_y - sy) > 1e-4:
+                shifted_note = f" [Shifted beam axis Y from {sy:.2f}m to {clamped_y:.2f}m so full width ({width_m:.2f}m) stays inside building boundary]"
+                sy = ey = round(clamped_y, 3)
     else:
         ex = sx
         if sy > ey:
             sy, ey = ey, sy
         is_horizontal = False
-        clamped_x = min(max(sx, min_x + half_w), max_x - half_w)
-        if abs(clamped_x - sx) > 1e-4:
-            shifted_note = f" [Shifted beam axis X from {sx:.2f}m to {clamped_x:.2f}m so full width ({width_m:.2f}m) stays inside building boundary]"
-            sx = ex = round(clamped_x, 3)
+        if has_bnd:
+            clamped_x = min(max(sx, min_x + half_w), max_x - half_w)
+            if abs(clamped_x - sx) > 1e-4:
+                shifted_note = f" [Shifted beam axis X from {sx:.2f}m to {clamped_x:.2f}m so full width ({width_m:.2f}m) stays inside building boundary]"
+                sx = ex = round(clamped_x, 3)
 
     # Discover all supporting columns and perpendicular beams along the beam path
-    # Rule: If ANY part of a column's rectangular cross-section [cx-b/2, cx+b/2] x [cy-h/2, cy+h/2]
-    # touches or overlaps the beam's physical footprint (or is within snap tolerance), that column
-    # acts as a valid support for the beam while keeping the beam strictly orthogonal (0° or 90°)!
     supports_raw: List[Dict[str, Any]] = []
     snap_tol = max(0.45, half_w + 0.28)
 
@@ -1388,42 +1701,66 @@ def validate_and_build_beam_with_cantilevers(
         osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
         oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
         ob_horiz = abs(oex - osx) >= abs(oey - osy)
+        ob_kind = "drop" if "drop" in str(ob.get("beam_kind", ob.get("kind", "hidden"))).lower() else "hidden"
         if is_horizontal and not ob_horiz:
             bx = osx
-            if (sx - 0.28) <= bx <= (ex + 0.28) and min(osy, oey) - 0.28 <= sy <= max(osy, oey) + 0.28:
+            omin_y, omax_y = min(osy, oey), max(osy, oey)
+            if (sx - 0.28) <= bx <= (ex + 0.28) and omin_y - 0.28 <= sy <= omax_y + 0.28:
                 if not any(abs(s["coord"] - bx) < 0.30 for s in supports_raw):
-                    supports_raw.append({
-                        "coord": bx,
-                        "x": bx,
-                        "y": sy,
-                        "kind": "beam",
-                        "target_id": ob["id"],
-                        "width_m": float(ob.get("width_m", 0.30)),
-                        "depth_m": float(ob.get("depth_m", 0.30)),
-                        "pos_on_carrier_m": round(abs(sy - min(osy, oey)), 3),
-                    })
+                    d_bm_end = min(abs(bx - sx), abs(bx - ex))
+                    d_ob_end = min(abs(sy - omin_y), abs(sy - omax_y))
+                    if not (d_ob_end <= 0.45 and d_bm_end > 0.45):
+                        supports_raw.append({
+                            "coord": bx,
+                            "x": bx,
+                            "y": sy,
+                            "kind": "beam",
+                            "target_id": ob["id"],
+                            "beam_kind": ob_kind,
+                            "width_m": float(ob.get("width_m", 0.30)),
+                            "depth_m": float(ob.get("depth_m", 0.30)),
+                            "pos_on_carrier_m": round(abs(sy - omin_y), 3),
+                        })
         elif not is_horizontal and ob_horiz:
             by = osy
-            if (sy - 0.28) <= by <= (ey + 0.28) and min(osx, oex) - 0.28 <= sx <= max(osx, oex) + 0.28:
+            omin_x, omax_x = min(osx, oex), max(osx, oex)
+            if (sy - 0.28) <= by <= (ey + 0.28) and omin_x - 0.28 <= sx <= omax_x + 0.28:
                 if not any(abs(s["coord"] - by) < 0.30 for s in supports_raw):
-                    supports_raw.append({
-                        "coord": by,
-                        "x": sx,
-                        "y": by,
-                        "kind": "beam",
-                        "target_id": ob["id"],
-                        "width_m": float(ob.get("width_m", 0.30)),
-                        "depth_m": float(ob.get("depth_m", 0.30)),
-                        "pos_on_carrier_m": round(abs(sx - min(osx, oex)), 3),
-                    })
+                    d_bm_end = min(abs(by - sy), abs(by - ey))
+                    d_ob_end = min(abs(sx - omin_x), abs(sx - omax_x))
+                    if not (d_ob_end <= 0.45 and d_bm_end > 0.45):
+                        supports_raw.append({
+                            "coord": by,
+                            "x": sx,
+                            "y": by,
+                            "kind": "beam",
+                            "target_id": ob["id"],
+                            "beam_kind": ob_kind,
+                            "width_m": float(ob.get("width_m", 0.30)),
+                            "depth_m": float(ob.get("depth_m", 0.30)),
+                            "pos_on_carrier_m": round(abs(sx - omin_x), 3),
+                        })
 
     supports_raw.sort(key=lambda s: s["coord"])
     if len(supports_raw) == 0:
         return False, None, "Beam must rest on at least one Column or Supporting Beam."
 
+    # STRICT STRUCTURAL RULE: A Drop Beam CANNOT rest on a Hidden Beam!
+    if str(beam_kind).lower() == "drop":
+        hidden_carriers = [
+            str(s["target_id"])
+            for s in supports_raw
+            if s.get("kind") == "beam" and s.get("beam_kind") == "hidden"
+        ]
+        if hidden_carriers:
+            return (
+                False,
+                None,
+                f"Structural Hierarchy Error (خطأ إنشائي): Drop Beam {beam_id} cannot rest on Hidden Beam(s) {', '.join(hidden_carriers)}! "
+                f"Convert {', '.join(hidden_carriers)} to a Drop Beam first, or draw {beam_id} as a Hidden Beam.",
+            )
+
     # REVIT FULL-COLUMN-FACE EXTENSION + STRICT BOUNDARY CLAMPING:
-    # Extend the physical beam start/end across the full width/depth of the first and last support,
-    # and strictly clamp within [min_x, max_x] x [min_y, max_y] so no beam ever protrudes outside the slab boundary!
     first_sup = supports_raw[0]
     last_sup = supports_raw[-1]
     first_outer_edge = round(first_sup["coord"] - float(first_sup["width_m"]) / 2.0, 3)
@@ -1431,20 +1768,26 @@ def validate_and_build_beam_with_cantilevers(
 
     if is_horizontal:
         if sx >= first_outer_edge - 0.05 and abs(sx - first_sup["coord"]) <= float(first_sup["width_m"]) + 0.30:
-            sx = max(min_x, first_outer_edge)
+            sx = max(min_x, first_outer_edge) if has_bnd else first_outer_edge
         if ex <= last_outer_edge + 0.05 and abs(ex - last_sup["coord"]) <= float(last_sup["width_m"]) + 0.30:
-            ex = min(max_x, last_outer_edge)
-        sx = round(min(max(sx, min_x), max_x), 3)
-        ex = round(min(max(ex, min_x), max_x), 3)
-        sy = ey = round(min(max(sy, min_y + half_w), max_y - half_w), 3)
+            ex = min(max_x, last_outer_edge) if has_bnd else last_outer_edge
+        if has_bnd:
+            sx = round(min(max(sx, min_x), max_x), 3)
+            ex = round(min(max(ex, min_x), max_x), 3)
+            sy = ey = round(min(max(sy, min_y + half_w), max_y - half_w), 3)
+        else:
+            sx, ex, sy, ey = round(sx, 3), round(ex, 3), round(sy, 3), round(ey, 3)
     else:
         if sy >= first_outer_edge - 0.05 and abs(sy - first_sup["coord"]) <= float(first_sup["width_m"]) + 0.30:
-            sy = max(min_y, first_outer_edge)
+            sy = max(min_y, first_outer_edge) if has_bnd else first_outer_edge
         if ey <= last_outer_edge + 0.05 and abs(ey - last_sup["coord"]) <= float(last_sup["width_m"]) + 0.30:
-            ey = min(max_y, last_outer_edge)
-        sy = round(min(max(sy, min_y), max_y), 3)
-        ey = round(min(max(ey, min_y), max_y), 3)
-        sx = ex = round(min(max(sx, min_x + half_w), max_x - half_w), 3)
+            ey = min(max_y, last_outer_edge) if has_bnd else last_outer_edge
+        if has_bnd:
+            sy = round(min(max(sy, min_y), max_y), 3)
+            ey = round(min(max(ey, min_y), max_y), 3)
+            sx = ex = round(min(max(sx, min_x + half_w), max_x - half_w), 3)
+        else:
+            sx, ex, sy, ey = round(sx, 3), round(ex, 3), round(sy, 3), round(ey, 3)
 
     total_len = round(math.hypot(ex - sx, ey - sy), 3)
     if total_len < 0.40:
@@ -1484,7 +1827,7 @@ def validate_and_build_beam_with_cantilevers(
     cant_right = raw_cant_right if overhang_beyond_last_face > 0.25 else 0.0
 
     edge_margin = 0.45
-    if cant_left > 0.35:
+    if has_bnd and cant_left > 0.35:
         tip_at_boundary = (abs(sx - min_x) <= edge_margin) if is_horizontal else (abs(sy - min_y) <= edge_margin)
         if not tip_at_boundary:
             return (
@@ -1493,7 +1836,7 @@ def validate_and_build_beam_with_cantilevers(
                 f"Invalid Interior Cantilever: Left overhang ({cant_left:.2f} m) ends inside the slab at ({sx:.2f}, {sy:.2f}). "
                 "A cantilever must terminate at a free outer slab boundary edge or rest on a support.",
             )
-    if cant_right > 0.35:
+    if has_bnd and cant_right > 0.35:
         tip_at_boundary = (abs(ex - max_x) <= edge_margin) if is_horizontal else (abs(ey - max_y) <= edge_margin)
         if not tip_at_boundary:
             return (
@@ -2632,11 +2975,15 @@ def delete_selected_element_from_story(
     """
     Crash-proof universal deletion algorithm for any selected object (`column`, `beam`, `slab`, `opening`,
     `dimension`, or `slab_edge`) from `story_data`:
+    - When deleting a Column `C_del`:
+      1. Removes `C_del` from `story_data['columns']`.
+      2. Renumbers remaining active columns sequentially `C1, C2, ..., Cn` with zero gaps.
+      3. Reconciles all beams' supports & spans (`reconcile_all_story_beams_supports_and_spans`) so multi-span
+         beams (like B6) merge spans into a single span (`9.30m`) and intersecting beams (like B5) switch their
+         support to the perpendicular carrier beam (`B6`).
     - When deleting a Beam `B_del` that has secondary beams resting on it:
       automatically cleans up support references & transferred point loads in those secondary beams
       and recalculates their spans safely so the app NEVER crashes!
-    - When deleting a Slab `S_del`: removes `S_del` cleanly and clears any stale cantilever links on adjacent slabs.
-    - When deleting a Dimension `D_del`: removes `D_del` cleanly.
     """
     try:
         eid = str(element_id)
@@ -2645,20 +2992,20 @@ def delete_selected_element_from_story(
             before = len(cols)
             story_data["columns"] = [c for c in cols if str(c.get("id")) != eid]
             if len(story_data["columns"]) < before:
-                # Clean up column support references in beams safely
                 for bm in story_data.get("beams", []):
                     sups = [s for s in bm.get("supports", []) if not (s.get("kind") == "column" and str(s.get("target_id")) == eid)]
                     for idx_s, s_obj in enumerate(sups):
                         s_obj["support_index"] = idx_s + 1
                     bm["supports"] = sups
-                return True, f"Deleted Column {eid}."
+                renumber_story_columns_sequentially(story_data)
+                reconcile_all_story_beams_supports_and_spans(story_data)
+                return True, f"Deleted Column {eid} (Renumbered remaining columns C1..C{len(story_data['columns'])} & updated connected beam spans)."
 
         elif kind == "beam":
             beams = story_data.get("beams", [])
             before = len(beams)
             story_data["beams"] = [b for b in beams if str(b.get("id")) != eid]
             if len(story_data["beams"]) < before:
-                # Clean up any secondary beams that were resting on this deleted beam!
                 detached_beams: List[str] = []
                 for ob in story_data["beams"]:
                     old_sups = ob.get("supports", [])
@@ -2671,7 +3018,6 @@ def delete_selected_element_from_story(
                         for idx_s, s_obj in enumerate(new_sups):
                             s_obj["support_index"] = idx_s + 1
                         ob["supports"] = new_sups
-                        # Recompute spans safely from remaining supports
                         coords = sorted(float(s.get("coord", s.get("center_coord_m", 0.0))) for s in new_sups)
                         valid_spans = [
                             round(coords[k + 1] - coords[k], 3)
@@ -2684,13 +3030,13 @@ def delete_selected_element_from_story(
                             bsx, bsy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
                             bex, bey = float(ob.get("end_x", 4.0)), float(ob.get("end_y", 0.0))
                             ob["spans"] = [round(max(0.50, math.hypot(bex - bsx, bey - bsy)), 3)]
-                    # Also remove any transferred point loads that came from the deleted beam
                     if "loads" in ob and isinstance(ob["loads"], list):
                         ob["loads"] = [
                             ld for ld in ob["loads"]
                             if str(ld.get("source_beam", ld.get("source_beam_id", ""))) != eid
                         ]
 
+                reconcile_all_story_beams_supports_and_spans(story_data)
                 reconcile_and_split_slabs_after_beam_change(story_data)
                 note = f" (Updated supported beam(s): {', '.join(detached_beams)})" if detached_beams else ""
                 return True, f"Deleted Beam {eid}{note}."
@@ -2700,7 +3046,6 @@ def delete_selected_element_from_story(
             before = len(slabs)
             story_data["slabs"] = [s for s in slabs if str(s.get("id")) != eid]
             if len(story_data["slabs"]) < before:
-                # Refresh remaining slabs' cantilever/back-span flags safely
                 bays = detect_story_grid_bays(story_data)
                 bay_by_key = {b["bay_key"]: b for b in bays}
                 for s_rem in story_data["slabs"]:
@@ -2798,23 +3143,7 @@ def move_column_and_sync_connected_beams(
                 bm["start_y"] = round(min(max(float(bm["start_y"]), min_y), max_y), 3)
                 bm["end_y"] = round(min(max(float(bm["end_y"]), min_y), max_y), 3)
 
-        col_coords = []
-        for s in bm.get("supports", []):
-            if s.get("kind") == "column":
-                c_obj = next((c for c in columns if c["id"] == s.get("target_id")), None)
-                if c_obj:
-                    c_val = float(c_obj["x"]) if is_horiz else float(c_obj["y"])
-                    s["coord"] = c_val
-                    col_coords.append(c_val)
-        col_coords.sort()
-        valid_spans = [
-            round(col_coords[k + 1] - col_coords[k], 3)
-            for k in range(len(col_coords) - 1)
-            if (col_coords[k + 1] - col_coords[k]) >= 0.35
-        ]
-        if valid_spans:
-            bm["spans"] = valid_spans
-
+    reconcile_all_story_beams_supports_and_spans(story_data)
     return True, msg
 
 
@@ -2825,11 +3154,10 @@ def move_beam_within_slab_boundary(
     dy: float,
 ) -> Tuple[bool, str]:
     """
-    Moves a beam by (dx, dy) while clamping its full width (width_m) strictly inside the Outer Slab Boundary.
+    Moves a beam by (dx, dy) while clamping its full width (width_m) strictly inside the Outer Slab Boundary
+    (when a boundary exists; on Tie-Beams story without a boundary, moves freely).
     """
     has_bnd, min_x, min_y, max_x, max_y = get_slab_bounding_box(story_data.get("slab_edge_polygon", []))
-    if not has_bnd:
-        return False, "No Outer Slab Boundary defined."
 
     beams = story_data.get("beams", [])
     bm = next((b for b in beams if b.get("id") == beam_id), None)
@@ -2842,18 +3170,25 @@ def move_beam_within_slab_boundary(
     is_horiz = abs(ex - sx) >= abs(ey - sy)
 
     if is_horiz:
-        sx = min(max(sx, min_x), max_x)
-        ex = min(max(ex, min_x), max_x)
-        sy = ey = min(max(sy, min_y + half_w), max_y - half_w)
+        if has_bnd:
+            sx = min(max(sx, min_x), max_x)
+            ex = min(max(ex, min_x), max_x)
+            sy = ey = min(max(sy, min_y + half_w), max_y - half_w)
+        else:
+            ey = sy
     else:
-        sy = min(max(sy, min_y), max_y)
-        ey = min(max(ey, min_y), max_y)
-        sx = ex = min(max(sx, min_x + half_w), max_x - half_w)
+        if has_bnd:
+            sy = min(max(sy, min_y), max_y)
+            ey = min(max(ey, min_y), max_y)
+            sx = ex = min(max(sx, min_x + half_w), max_x - half_w)
+        else:
+            ex = sx
 
     bm["start_x"] = round(sx, 3)
     bm["start_y"] = round(sy, 3)
     bm["end_x"] = round(ex, 3)
     bm["end_y"] = round(ey, 3)
+    reconcile_all_story_beams_supports_and_spans(story_data)
     return True, f"Beam {beam_id} moved to ({bm['start_x']:.2f}, {bm['start_y']:.2f}) -> ({bm['end_x']:.2f}, {bm['end_y']:.2f})."
 
 
@@ -3247,7 +3582,11 @@ def convert_beam_kind_and_section(
     """
     Converts a beam between Hidden Beam ('hidden', e.g., 0.40x0.30m) and Drop Beam ('drop', e.g., 0.20x0.50m)
     or updates its cross-section, clamps it inside the building boundary, and reconciles adjacent slabs.
+    Enforces the Strict Structural Hierarchy Rule:
+    - A Carrier Beam (e.g. B6) CANNOT be converted to a Hidden Beam if any Secondary Drop Beam (e.g. B7) rests on it!
+    - A Secondary Beam (e.g. B7) CANNOT be converted to a Drop Beam if it rests on a Hidden Carrier Beam (e.g. B6)!
     """
+    reconcile_all_story_beams_supports_and_spans(story_data)
     beams = story_data.get("beams", [])
     bm = next((b for b in beams if b.get("id") == beam_id), None)
     if not bm:
@@ -3256,6 +3595,46 @@ def convert_beam_kind_and_section(
     cur_kind_raw = str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower()
     cur_kind = "drop" if "drop" in cur_kind_raw else "hidden"
     target_kind = new_kind if new_kind in ("hidden", "drop") else ("drop" if cur_kind == "hidden" else "hidden")
+
+    beam_by_id = {str(b.get("id")): b for b in beams if b.get("id")}
+
+    # Rule A: Prevent converting Carrier Beam `beam_id` to Hidden if any Secondary Drop Beam rests on it
+    if target_kind == "hidden":
+        supported_drop_beams: List[str] = []
+        for other_b in beams:
+            if other_b.get("id") == beam_id:
+                continue
+            other_kind = "drop" if "drop" in str(other_b.get("beam_kind", other_b.get("kind", "hidden"))).lower() else "hidden"
+            if other_kind == "drop":
+                for sup in other_b.get("supports", []):
+                    if sup.get("kind") == "beam" and str(sup.get("target_id")) == str(beam_id):
+                        supported_drop_beams.append(str(other_b.get("id")))
+                        break
+        if supported_drop_beams:
+            return (
+                False,
+                f"Structural Hierarchy Error (خطأ إنشائي - كمرة ساقطة على مدفونة): Cannot convert Carrier Beam {beam_id} to a Hidden Beam "
+                f"because Drop Beam(s) {', '.join(supported_drop_beams)} rest on it! Convert {', '.join(supported_drop_beams)} to Hidden Beam(s) first.",
+            )
+
+    # Rule B: Prevent converting Secondary Beam `beam_id` to Drop if it rests on any Hidden Carrier Beam
+    if target_kind == "drop":
+        hidden_carriers: List[str] = []
+        for sup in bm.get("supports", []):
+            if sup.get("kind") == "beam":
+                car_id = str(sup.get("target_id", ""))
+                car_bm = beam_by_id.get(car_id)
+                if car_bm is not None:
+                    car_kind = "drop" if "drop" in str(car_bm.get("beam_kind", car_bm.get("kind", "hidden"))).lower() else "hidden"
+                    if car_kind == "hidden":
+                        hidden_carriers.append(car_id)
+        if hidden_carriers:
+            return (
+                False,
+                f"Structural Hierarchy Error (خطأ إنشائي - كمرة ساقطة على مدفونة): Cannot convert Beam {beam_id} to a Drop Beam "
+                f"because it rests on Hidden Carrier Beam(s) {', '.join(hidden_carriers)}! Convert {', '.join(hidden_carriers)} to a Drop Beam first.",
+            )
+
     bm["beam_kind"] = target_kind
     bm["kind"] = target_kind
 

@@ -391,9 +391,9 @@ class TestXpertStudioEngine(unittest.TestCase):
             "openings": [],
             "dimensions": [],
         }
-        # Carrier beam B1 (horizontal at Y=4.0 from C1 to C2)
+        # Carrier beam B1 (horizontal at Y=4.0 from C1 to C2 — Drop beam carrying Drop beam B2)
         ok1, b1, _ = validate_and_build_beam_with_cantilevers(
-            "B1", (0.10, 4.0), (9.90, 4.0), "hidden", 0.40, 0.30, story["columns"], story["beams"], story["slab_edge_polygon"]
+            "B1", (0.10, 4.0), (9.90, 4.0), "drop", 0.20, 0.50, story["columns"], story["beams"], story["slab_edge_polygon"]
         )
         self.assertTrue(ok1)
         story["beams"].append(b1)
@@ -601,7 +601,15 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertIsNotNone(b7_des.get("as_neg_req_mm2"))
         self.assertIn("OK", str(b7_des.get("status", "")))
 
-        # 2. Test Bidirectional Convert Beam (Drop -> Hidden -> Drop)
+        # 2. Test Bidirectional Convert Beam (Drop -> Hidden -> Drop) and Drop-on-Hidden rejection
+        # Since B7 is currently a Drop beam resting on B6, converting B6 to Hidden MUST be rejected!
+        ok_h_blocked, msg_blocked = convert_beam_kind_and_section(story, "B6", "hidden")
+        self.assertFalse(ok_h_blocked)
+        self.assertIn("B7", msg_blocked)
+
+        # Once B7 is converted to Hidden, B6 CAN be converted to Hidden and back to Drop!
+        ok_b7_hid, _ = convert_beam_kind_and_section(story, "B7", "hidden")
+        self.assertTrue(ok_b7_hid)
         ok_h, _ = convert_beam_kind_and_section(story, "B6", "hidden")
         self.assertTrue(ok_h)
         self.assertEqual(b6_obj["beam_kind"], "hidden")
@@ -619,9 +627,140 @@ class TestXpertStudioEngine(unittest.TestCase):
         s3_obj = next(s for s in story["slabs"] if s["id"] == "S3")
         self.assertEqual(s3_obj["rib_angle_deg"], 0)
 
+    def test_v190_column_delete_reconcile_drop_on_hidden_piecewise_loads_and_tie_beams(self):
+        """
+        Verifies all v1.9.0 structural engineering upgrades requested by Eng. Yousef:
+        1. Deleting an intermediate column (e.g. C5 in the middle of B6 and at the bottom of B5):
+           - Renumbers active columns sequentially C1..C8 with zero gaps.
+           - Reconciles B6 from 2 spans (4.5m + 4.8m) to 1 span (9.30m) supported only at its left & right end columns.
+           - Reconciles B5 so its bottom end now rests on Carrier Beam B6 (Roller) instead of the deleted column!
+           - Re-evaluates story minimum slab thickness so Hidden Beam B6 (9.30m single span, Ln=9.10m, L/16) governs (~56.9 cm).
+        2. Piecewise Slab & Void-Opening Load Distribution along Beam Spans:
+           - Where an opening (OP1) or parallel-rib slab (S2 at 0°) borders B6, w_Slab = 0.0 kN/m (only w_SW + w_Wall).
+           - Where perpendicular-rib slab S5 (90°) borders B6 over [7.30m, 9.30m], S5's full tributary load acts strictly on [7.30m, 9.30m].
+        3. Tie-Beams Story (00_TieBeams) allows drawing Drop Tie-Beams directly between columns with NO outer boundary polyline.
+        """
+        from xpert_structural_engine import (
+            convert_beam_kind_and_section,
+            delete_selected_element_from_story,
+            evaluate_story_thickness_and_optimization,
+        )
+
+        story = {
+            "story_id": "02_Ground_Floor",
+            "adopted_slab_thickness_cm": 30.0,
+            "slab_factored_wu_kpa": 10.0,
+            "default_wall_load_kn_m": 10.0,
+            "wall_load_policy": "all_beams",
+            "slab_edge_polygon": [[0.0, 0.0], [9.50, 0.0], [9.50, 8.50], [0.0, 8.50]],
+            "columns": [
+                {"id": "C1", "x": 0.10, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 4.60, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 9.40, "y": 8.30, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.10, "y": 4.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 4.60, "y": 4.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C6", "x": 9.40, "y": 4.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {
+                    "id": "B6", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
+                    "start_x": 0.10, "start_y": 4.20, "end_x": 9.40, "end_y": 4.20,
+                    "spans": [4.50, 4.80],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.20, "center_coord_m": 0.10},
+                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.20, "center_coord_m": 4.60},
+                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.20, "center_coord_m": 9.40},
+                    ],
+                },
+                {
+                    "id": "B5", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
+                    "start_x": 4.60, "start_y": 4.20, "end_x": 4.60, "end_y": 8.30,
+                    "spans": [4.10],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C5", "width_m": 0.40, "center_coord_m": 4.20},
+                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.40, "center_coord_m": 8.30},
+                    ],
+                },
+            ],
+            "slabs": [
+                {
+                    "id": "S1", "min_x": 0.10, "max_x": 4.60, "min_y": 4.20, "max_y": 8.30,
+                    "lx_m": 4.50, "ly_m": 4.10, "rib_angle_deg": 90, "rib_direction_deg": 90,
+                },
+                {
+                    "id": "S2", "min_x": 4.60, "max_x": 9.40, "min_y": 4.20, "max_y": 8.30,
+                    "lx_m": 4.80, "ly_m": 4.10, "rib_angle_deg": 0, "rib_direction_deg": 0,
+                },
+                {
+                    "id": "S6", "min_x": 0.10, "max_x": 5.40, "min_y": 0.0, "max_y": 4.20,
+                    "lx_m": 5.30, "ly_m": 4.20, "rib_angle_deg": 90, "rib_direction_deg": 90,
+                },
+                {
+                    "id": "S5", "min_x": 7.40, "max_x": 9.40, "min_y": 2.20, "max_y": 4.20,
+                    "lx_m": 2.00, "ly_m": 2.00, "rib_angle_deg": 90, "rib_direction_deg": 90,
+                },
+            ],
+            "openings": [
+                {"id": "OP1", "min_x": 5.40, "max_x": 7.40, "min_y": 2.20, "max_y": 4.20},
+            ],
+        }
+
+        # Delete central column C5 (at 4.60, 4.20)
+        ok_del, _ = delete_selected_element_from_story(story, "column", "C5")
+        self.assertTrue(ok_del)
+
+        # 1A. Verify active columns are sequentially numbered C1..C5 with zero gaps
+        col_ids = [c["id"] for c in story["columns"]]
+        self.assertEqual(col_ids, ["C1", "C2", "C3", "C4", "C5"])
+
+        # 1B. Verify B6 is now a 1-span beam (9.30m) supported on C4 (left) and C5 (right, formerly C6)
+        b6 = next(b for b in story["beams"] if b["id"] == "B6")
+        self.assertEqual(len(b6["spans"]), 1)
+        self.assertAlmostEqual(b6["spans"][0], 9.30, places=2)
+        self.assertEqual([s["target_id"] for s in b6["supports"]], ["C4", "C5"])
+
+        # 1C. Verify B5 now rests on Carrier Beam B6 (kind='beam') at its bottom support and C2 at its top support!
+        b5 = next(b for b in story["beams"] if b["id"] == "B5")
+        self.assertEqual(b5["supports"][0]["kind"], "beam")
+        self.assertEqual(b5["supports"][0]["target_id"], "B6")
+        self.assertEqual(b5["supports"][1]["kind"], "column")
+        self.assertEqual(b5["supports"][1]["target_id"], "C2")
+
+        # 1D. Verify Hidden Beam B6 (single 9.30m span) now governs minimum slab thickness (> 50 cm)
+        eval_thick = evaluate_story_thickness_and_optimization(story, 420.0)
+        self.assertIn("B6", eval_thick["governing_member"])
+        self.assertGreater(eval_thick["calculated_min_thickness_cm"], 50.0)
+
+        # 2. Verify Piecewise Distributed Loads on B6:
+        #    - [0.00, 4.50]: S1 (90°) + S6 (90°)
+        #    - [4.50, 5.30]: S6 (90°) only (S2 is 0° parallel)
+        #    - [5.30, 7.30]: Opening OP1 below & S2 (0°) above -> w_Slab = 0.0 kN/m!
+        #    - [7.30, 9.30]: S5 (90°, Ly=2.0m -> w_Slab = 10.0*(2.0/2) = 10.0 kN/m, NOT diluted!)
+        bundle = analyze_all_story_beams_and_columns(story, 25.0, 420.0)
+        b6_loads = [ld for ld in bundle["beam_results"]["B6"]["loads_applied"] if ld["type"] == "D"]
+        self.assertEqual(len(b6_loads), 4)
+        # Over opening [5.30, 7.30], w_Slab == 0, so mag == w_SW + w_Wall (no slab term in formula_str)
+        op_seg = next(ld for ld in b6_loads if abs(ld["start"] - 5.30) < 0.1)
+        self.assertIn("w_Slab (0.00)", op_seg["formula_str"])
+        # Over S5 [7.30, 9.30], S5 contributes full 10.0*(2.00/2)=10.00 kN/m
+        s5_seg = next(ld for ld in b6_loads if abs(ld["start"] - 7.30) < 0.1)
+        self.assertIn("S5: 10.0×(2.00/2)m=10.00", s5_seg["formula_str"])
+
+        # 3. Verify Tie-Beams story allows drawing a Drop Beam with empty slab_edge_polygon
+        tie_cols = [
+            {"id": "C1", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C2", "x": 5.00, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok_tie, tie_bm, _ = validate_and_build_beam_with_cantilevers(
+            "B1", (0.10, 0.20), (5.00, 0.20), "drop", 0.20, 0.50, tie_cols, [], [], is_tie_beam_story=True
+        )
+        self.assertTrue(ok_tie)
+        self.assertEqual(tie_bm["beam_kind"], "drop")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -4,7 +4,32 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v1.8.0-structural-bim-pro` (2026-11-15)
+## Current Release: `v1.9.0-structural-bim-pro` (2026-11-15)
+**Release Title:** Full Automatic Column Deletion & Support Reconciler, Long Single-Span Governing Slab Optimization, Drop-on-Hidden Beam Safety Lock, Piecewise Opening/Sub-Slab Load Partitioning, Ground Tie-Beams Mode & Rebar/Materials Options Dialogs
+
+### Key Features & Advancements in `v1.9.0-structural-bim-pro`:
+1. **Automatic Beam Support & Span Reconciliation (`reconcile_all_story_beams_supports_and_spans`):**
+   - When deleting or shifting any column (e.g. deleting the middle column under B6 and end of B5), all intersecting beams automatically reconcile spans and support hierarchy. B6 immediately simplifies into a single continuous 9.30m span, while B5 automatically resets its lower support to carrier beam B6 (Roller) and its upper support to column C2 (Hinge).
+2. **Long Single-Span Governing Slab Thickness Calculation (`evaluate_story_thickness_and_optimization`):**
+   - Accurately identifies long single-span hidden beams (such as B6 at 9.30m) as the governing member (`Governing Member`) controlling minimum story thickness ($L/16$ for simple span hidden beams), triggering actionable design recommendations to convert long hidden beams into drop beams to optimize structural ceiling height and rebar quantities.
+3. **Sequential Automatic Column Renumbering (`renumber_story_columns_sequentially`):**
+   - Automatically maintains a clean, continuous sequence of columns from `C1` to `Cn` with zero gaps or phantom missing labels when columns are deleted or added, updating all referencing beam supports.
+4. **Strict Drop-on-Hidden Beam Structural Safety Guard:**
+   - Enforces core structural hierarchy rules: rejects converting a carrier beam to hidden if it supports secondary drop beams, and rejects drawing or converting a secondary drop beam supported by a hidden carrier beam (`Drop Beam on Hidden Beam` prohibited).
+5. **Piecewise Sub-Interval Load Partitioning for Slabs & Openings (`Piecewise Sub-Interval Load Partitioning`):**
+   - Beam spans are subdivided at opening boundaries and sub-slab partitions, guaranteeing that openings (`OP#`) and parallel slabs (0° ribs) contribute exactly zero load ($w_{slab} = 0.00\text{ kN/m}$), while adjacent sub-slabs (e.g. `S5` next to stairs) apply full tributary loads ($q_u \cdot L_y / 2$) strictly within their physical span interval.
+6. **Tie-Beams Story Specialized CAD Mode (`00_TieBeams — مسقط السملات`):**
+   - Streamlines the ground tie-beams drafting workflow: freezes all slab tools, hidden beams, openings, and slab thickness controls; allows direct placement of columns and drop tie beams (`3B. + Drop Beam`) immediately without requiring an outer boundary polyline.
+7. **SFD Chart Title & Peak Value Collision Prevention:**
+   - Clean visual layout on the Shear Force Diagram (`Shear Force Diagram - SFD (kN)`) ensuring title text never collides with or overlaps high left reaction/shear values (`27.3` or `103.8 kN`).
+8. **Startup Defaults & Engineering Options Dialogs:**
+   - Integrated `Startup Defaults` dialog (default project directory and rebar diameter table $\Phi 8 \dots \Phi 32$) and `Options` dialog (concrete $f'_c$, rebar $F_y$, hollow-block unit weights, flooring finishes, and wall loads) accessible both from the startup splash screen and the main menu bar.
+9. **Reference v1.8.0 Backup Preserved:**
+   - Standalone reference backup of the previous release maintained in `xpert_studio_desktop/reference_v1_8_0/`.
+
+---
+
+## Previous Release: `v1.8.0-structural-bim-pro` (2026-11-15)
 **Release Title:** Carrier Beam Depth Hierarchy Auto-Enforcement, Isolated Sub-Slab Rib Flipping & Robust Bidirectional Beam Type Conversion
 
 ### Key Features & Advancements in `v1.8.0-structural-bim-pro`:

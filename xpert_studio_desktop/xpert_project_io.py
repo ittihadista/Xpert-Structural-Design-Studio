@@ -27,7 +27,97 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.8.0-structural-bim-pro"
+STUDIO_VERSION = "v1.9.0-structural-bim-pro"
+
+DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
+    {"active": True, "label": "Φ 8", "dia_mm": 8, "area_mm2": 50.3, "weight_kg_m": 0.395, "role": "Stirrups"},
+    {"active": True, "label": "Φ 10", "dia_mm": 10, "area_mm2": 78.5, "weight_kg_m": 0.617, "role": "Both"},
+    {"active": True, "label": "Φ 12", "dia_mm": 12, "area_mm2": 113.1, "weight_kg_m": 0.888, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 14", "dia_mm": 14, "area_mm2": 153.9, "weight_kg_m": 1.208, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 16", "dia_mm": 16, "area_mm2": 201.1, "weight_kg_m": 1.578, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 18", "dia_mm": 18, "area_mm2": 254.5, "weight_kg_m": 1.998, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 20", "dia_mm": 20, "area_mm2": 314.2, "weight_kg_m": 2.466, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 22", "dia_mm": 22, "area_mm2": 380.1, "weight_kg_m": 2.984, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 25", "dia_mm": 25, "area_mm2": 490.9, "weight_kg_m": 3.853, "role": "Longitudinal"},
+    {"active": False, "label": "Φ 28", "dia_mm": 28, "area_mm2": 615.8, "weight_kg_m": 4.834, "role": "Longitudinal"},
+    {"active": False, "label": "Φ 32", "dia_mm": 32, "area_mm2": 804.2, "weight_kg_m": 6.313, "role": "Longitudinal"},
+]
+
+
+def _get_global_settings_file_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpert_studio_defaults.json")
+
+
+def load_studio_global_settings() -> Dict[str, Any]:
+    """
+    Loads persistent global studio settings for:
+    1. 'Startup Defaults' (Projects Root Folder & Rebar Diameters Table)
+    2. 'Options' (Material Properties & Hollow-Block / Hordi Slab Parameters)
+    """
+    defaults: Dict[str, Any] = {
+        "startup_defaults": {
+            "default_projects_root_dir": os.path.abspath("./XpertStudio_Projects"),
+            "default_stirrup_dia_mm": 8,
+            "default_beam_main_dia_mm": 16,
+            "default_col_main_dia_mm": 16,
+            "rebar_diameters_table": [dict(r) for r in DEFAULT_REBAR_DIAMETERS_TABLE],
+        },
+        "options": {
+            "materials": {
+                "fc_mpa": 20.0,
+                "fy_mpa": 350.0,
+                "fyt_mpa": 280.0,
+                "gamma_c_kn_m3": 25.0,
+                "soil_bearing_qall_kn_m2": 150.0,
+            },
+            "hollow_block_slab": {
+                "slab_thickness_cm": 30.0,
+                "top_flange_cm": 5.0,
+                "block_height_cm": 20.0,
+                "block_width_cm": 40.0,
+                "block_length_cm": 25.0,
+                "rib_width_cm": 15.0,
+                "block_weight_kn": 0.10,
+                "finish_load_kn_m2": 2.0,
+                "live_load_kn_m2": 2.0,
+                "slab_factored_wu_kpa": 8.5,
+                "default_wall_load_kn_m": 10.0,
+                "hidden_beam_min_width_cm": 40.0,
+                "drop_beam_width_cm": 20.0,
+                "drop_beam_depth_cm": 50.0,
+            },
+        },
+    }
+    fpath = _get_global_settings_file_path()
+    if os.path.isfile(fpath):
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            if isinstance(saved, dict):
+                if isinstance(saved.get("startup_defaults"), dict):
+                    defaults["startup_defaults"].update(saved["startup_defaults"])
+                if isinstance(saved.get("options"), dict):
+                    if isinstance(saved["options"].get("materials"), dict):
+                        defaults["options"]["materials"].update(saved["options"]["materials"])
+                    if isinstance(saved["options"].get("hollow_block_slab"), dict):
+                        defaults["options"]["hollow_block_slab"].update(saved["options"]["hollow_block_slab"])
+        except Exception:
+            pass
+    return defaults
+
+
+def save_studio_global_settings(settings: Dict[str, Any]) -> str:
+    """
+    Saves global 'Startup Defaults' and 'Options' to `xpert_studio_defaults.json`.
+    """
+    fpath = _get_global_settings_file_path()
+    try:
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except OSError:
+        pass
+    return fpath
+
 
 STANDARD_LAYERS = [
     ("00-XD-EDGE", 4, "Continuous"),       # Cyan: Outer Slab Boundary
