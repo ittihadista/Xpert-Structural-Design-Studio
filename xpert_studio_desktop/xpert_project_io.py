@@ -16,7 +16,6 @@ Handles:
 
 from __future__ import annotations
 import json
-import math
 import os
 import re
 import uuid
@@ -28,8 +27,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.6.0-structural-bim-pro"
-MASTER_FILE_EXT = ".xsd"
+STUDIO_VERSION = "v1.7.0-structural-bim-pro"
 
 STANDARD_LAYERS = [
     ("00-XD-EDGE", 4, "Continuous"),       # Cyan: Outer Slab Boundary
@@ -40,137 +38,9 @@ STANDARD_LAYERS = [
     ("00-XD-SLAB", 40, "Continuous"),      # Gold: One-Way Hollow-Block Ribs
     ("00-XD-TAG-COL", 3, "Continuous"),    # Bright Green: Column Tags (C1..Cn)
     ("00-XD-TAG-BEAM", 30, "Continuous"),  # Bright Orange: Beam Tags (B1..Bm)
+    ("00-XD-DIM", 7, "Continuous"),        # White/Cyan: Engineering Dimensions
     ("00-XD-ARCH-REF", 8, "Continuous"),   # Gray: Imported Architectural Underlay
-    ("00-XD-DIM", 7, "Continuous"),        # White: Persistent CAD Dimensions
 ]
-
-
-def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
-    """
-    Imports an architectural 2D plan from a .DXF file to serve as a locked reference block.
-    Extracts LINE, LWPOLYLINE, POLYLINE, and CIRCLE entities and builds snap points
-    (endpoints, midpoints, circle centers) for interactive CAD OSNAP.
-    """
-    if not os.path.isfile(dxf_file_path):
-        raise FileNotFoundError(f"Architectural DXF file not found: {dxf_file_path}")
-
-    segments: List[List[float]] = []
-    circles: List[List[float]] = []
-    snap_set = set()
-
-    def add_snap_point(x: float, y: float) -> None:
-        snap_set.add((round(x, 3), round(y, 3)))
-
-    if ezdxf is not None:
-        try:
-            doc = ezdxf.readfile(dxf_file_path)
-            msp = doc.modelspace()
-            for entity in msp:
-                dxftype = entity.dxftype()
-                if dxftype == "LINE":
-                    sx, sy = float(entity.dxf.start.x), float(entity.dxf.start.y)
-                    ex, ey = float(entity.dxf.end.x), float(entity.dxf.end.y)
-                    segments.append([round(sx, 3), round(sy, 3), round(ex, 3), round(ey, 3)])
-                    add_snap_point(sx, sy)
-                    add_snap_point(ex, ey)
-                    add_snap_point((sx + ex) / 2.0, (sy + ey) / 2.0)
-                elif dxftype in ("LWPOLYLINE", "POLYLINE"):
-                    try:
-                        pts = [(float(p[0]), float(p[1])) for p in entity.get_points(format="xy")]
-                    except Exception:
-                        pts = [(float(p.dxf.location.x), float(p.dxf.location.y)) for p in getattr(entity, "vertices", [])]
-                    if len(pts) >= 2:
-                        is_closed = getattr(entity, "is_closed", False) or getattr(entity, "closed", False)
-                        cnt = len(pts)
-                        limit = cnt if is_closed else cnt - 1
-                        for i in range(limit):
-                            p1 = pts[i]
-                            p2 = pts[(i + 1) % cnt]
-                            segments.append([round(p1[0], 3), round(p1[1], 3), round(p2[0], 3), round(p2[1], 3)])
-                            add_snap_point(p1[0], p1[1])
-                            add_snap_point(p2[0], p2[1])
-                            add_snap_point((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-                elif dxftype == "CIRCLE":
-                    cx, cy = float(entity.dxf.center.x), float(entity.dxf.center.y)
-                    rad = float(entity.dxf.radius)
-                    circles.append([round(cx, 3), round(cy, 3), round(rad, 3)])
-                    add_snap_point(cx, cy)
-                    add_snap_point(cx + rad, cy)
-                    add_snap_point(cx - rad, cy)
-                    add_snap_point(cx, cy + rad)
-                    add_snap_point(cx, cy - rad)
-                elif dxftype == "ARC":
-                    cx, cy = float(entity.dxf.center.x), float(entity.dxf.center.y)
-                    add_snap_point(cx, cy)
-                    try:
-                        sp = entity.start_point
-                        ep = entity.end_point
-                        segments.append([round(sp.x, 3), round(sp.y, 3), round(ep.x, 3), round(ep.y, 3)])
-                        add_snap_point(sp.x, sp.y)
-                        add_snap_point(ep.x, ep.y)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    # If ezdxf is None or extracted 0 entities, run robust ASCII fallback reader
-    if not segments and not circles:
-        try:
-            with open(dxf_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = [line.strip() for line in f]
-            idx = 0
-            n = len(lines)
-            while idx < n - 1:
-                if lines[idx] == "0" and lines[idx + 1] == "LINE":
-                    idx += 2
-                    coords = {}
-                    while idx < n - 1 and lines[idx] != "0":
-                        code = lines[idx]
-                        val = lines[idx + 1]
-                        if code in ("10", "20", "11", "21"):
-                            try:
-                                coords[code] = float(val)
-                            except ValueError:
-                                pass
-                        idx += 2
-                    if all(k in coords for k in ("10", "20", "11", "21")):
-                        sx, sy, ex, ey = coords["10"], coords["20"], coords["11"], coords["21"]
-                        segments.append([round(sx, 3), round(sy, 3), round(ex, 3), round(ey, 3)])
-                        add_snap_point(sx, sy)
-                        add_snap_point(ex, ey)
-                        add_snap_point((sx + ex) / 2.0, (sy + ey) / 2.0)
-                    continue
-                elif lines[idx] == "0" and lines[idx + 1] == "CIRCLE":
-                    idx += 2
-                    coords = {}
-                    while idx < n - 1 and lines[idx] != "0":
-                        code = lines[idx]
-                        val = lines[idx + 1]
-                        if code in ("10", "20", "40"):
-                            try:
-                                coords[code] = float(val)
-                            except ValueError:
-                                pass
-                        idx += 2
-                    if all(k in coords for k in ("10", "20", "40")):
-                        cx, cy, r = coords["10"], coords["20"], coords["40"]
-                        circles.append([round(cx, 3), round(cy, 3), round(r, 3)])
-                        add_snap_point(cx, cy)
-                    continue
-                idx += 1
-        except Exception:
-            pass
-
-    snap_points = [[p[0], p[1]] for p in sorted(list(snap_set))]
-
-    return {
-        "file_name": os.path.basename(dxf_file_path),
-        "file_path": os.path.abspath(dxf_file_path),
-        "visible": True,
-        "segments": segments,
-        "circles": circles,
-        "snap_points": snap_points,
-    }
 
 
 def validate_project_name(name: str) -> Tuple[bool, str, str, str]:
@@ -239,26 +109,81 @@ def compute_hollow_block_parameters(
 
 def cleanup_unprefixed_duplicates(project_dir: str, clean_project_name: str) -> None:
     """
-    Ensures zero legacy unprefixed files remain inside Stractural-<ProjectName>.
+    Ensures zero legacy unprefixed files AND zero duplicate .xpert / .json
+    files remain inside the root Stractural-<ProjectName> directory.
+    Only `<ProjectName>-00_Project_Master.xsd` is kept in the root project directory.
     """
     prefix = f"{clean_project_name}-"
+    canonical_master_name = f"{clean_project_name}-00_Project_Master.xsd"
     for sub in ["", "CAD_Drawings", "Stories_Data"]:
         target_dir = os.path.join(project_dir, sub) if sub else project_dir
         if not os.path.isdir(target_dir):
             continue
         for fname in os.listdir(target_dir):
-            if fname.endswith((".dxf", ".json", ".xpert", ".xsd")) and not fname.startswith(prefix):
-                full_p = os.path.join(target_dir, fname)
-                try:
-                    os.remove(full_p)
-                except OSError:
-                    pass
+            full_p = os.path.join(target_dir, fname)
+            if not os.path.isfile(full_p):
+                continue
+            if sub == "":
+                if fname != canonical_master_name and fname.endswith((".json", ".xpert", ".xsd", ".dxf")):
+                    try:
+                        os.remove(full_p)
+                    except OSError:
+                        pass
+            else:
+                if fname.endswith((".dxf", ".json", ".xpert", ".xsd")) and not fname.startswith(prefix):
+                    try:
+                        os.remove(full_p)
+                    except OSError:
+                        pass
+
+
+MASTER_FILE_EXT = ".xsd"
+
+
+def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
+    """
+    Loads an existing project from its custom `<ProjectName>-00_Project_Master.xsd`
+    (or legacy `.xpert` / `.json`) file, resolves relative story paths if the project folder was moved,
+    and ensures only the canonical `.xsd` master file remains in the project directory.
+    """
+    abs_path = os.path.abspath(master_path)
+    if not os.path.isfile(abs_path):
+        raise FileNotFoundError(f"Master project file not found: {abs_path}")
+
+    with open(abs_path, "r", encoding="utf-8") as f:
+        master_payload = json.load(f)
+
+    project_dir = os.path.dirname(abs_path)
+    clean_name = master_payload.get("project_name", "Project")
+    canonical_xsd = os.path.join(project_dir, f"{clean_name}-00_Project_Master{MASTER_FILE_EXT}")
+
+    master_payload["studio_version"] = STUDIO_VERSION
+    master_payload["project_dir"] = project_dir
+    master_payload["master_file"] = canonical_xsd
+
+    stories_dir = os.path.join(project_dir, "Stories_Data")
+    cad_dir = os.path.join(project_dir, "CAD_Drawings")
+
+    for sm in master_payload.get("stories", []):
+        sid = sm["story_id"]
+        sm["json_file"] = os.path.join(stories_dir, f"{clean_name}-{sid}.json")
+        sm["dxf_file"] = os.path.join(cad_dir, f"{clean_name}-{sid}.dxf")
+
+    # Always write canonical .xsd and remove any legacy .xpert or -00_Project_Master.json duplicates
+    try:
+        with open(canonical_xsd, "w", encoding="utf-8") as f:
+            json.dump(master_payload, f, indent=2)
+        cleanup_unprefixed_duplicates(project_dir, clean_name)
+    except OSError:
+        pass
+
+    return master_payload
 
 
 def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Creates Stractural-<ProjectName> and generates all <ProjectName>- prefixed
-    JSON and DXF files with sequential story numbering.
+    Creates Stractural-<ProjectName> and generates the custom `<ProjectName>-00_Project_Master.xpert`
+    master file along with all `<ProjectName>-` prefixed JSON and DXF files.
     """
     raw_name = config.get("project_name", "NewProject")
     ok, clean_name, folder_name, err = validate_project_name(raw_name)
@@ -380,12 +305,16 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         live_load_kn_m2=float(config.get("live_load_kn_m2", 2.0)),
     )
 
+    master_xsd_file = os.path.join(project_dir, f"{clean_name}-00_Project_Master{MASTER_FILE_EXT}")
+
     master_payload = {
         "studio_version": STUDIO_VERSION,
+        "file_format": "XPERT_STRUCTURAL_PROJECT_MASTER",
         "project_uuid": f"XPERT-{uuid.uuid4().hex[:8].upper()}",
         "project_name": clean_name,
         "folder_name": folder_name,
         "project_dir": project_dir,
+        "master_file": master_xsd_file,
         "mandatory_start_story_id": "02_Ground_Floor",
         "materials_and_soil": {
             "fc_mpa": float(config.get("fc_mpa", 20.0)),
@@ -402,10 +331,12 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         },
         "loads_and_defaults": {
             "default_slab_thickness_cm": 30.0,
+            "default_column_b_m": 0.20,
+            "default_column_h_m": 0.40,
             "finish_load_kn_m2": float(config.get("finish_load_kn_m2", 2.0)),
             "live_load_kn_m2": float(config.get("live_load_kn_m2", 2.0)),
             "rib_width_cm": float(config.get("rib_width_cm", 15.0)),
-            "hidden_beam_min_width_cm": float(config.get("hidden_beam_min_width_cm", 40.0)),
+            "hidden_beam_min_width_cm": float(config.get("hidden_beam_min_width_cm", 30.0)),
             "drop_beam_width_cm": float(config.get("drop_beam_width_cm", 20.0)),
             "drop_beam_min_depth_cm": float(config.get("drop_beam_min_depth_cm", 40.0)),
             "wall_width_cm": float(config.get("wall_width_cm", 20.0)),
@@ -446,27 +377,13 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
         sync_story_to_dxf(story_data, dxf_path, role="STORY_EXTRACTION")
 
-    # Root Master & Output JSON, .xpert & .xsd files
-    master_file_xsd = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xsd")
-    master_file_xpert = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xpert")
-    master_file_json = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
-    master_payload["master_file"] = master_file_xsd
-    master_payload["master_file_xsd"] = master_file_xsd
-    master_payload["master_file_xpert"] = master_file_xpert
-    master_payload["master_file_json"] = master_file_json
-
-    takedown_file = os.path.join(project_dir, f"{clean_name}-Columns_Load_Takedown.json")
-    foundations_file = os.path.join(project_dir, f"{clean_name}-Foundations_Design.json")
-    boq_file = os.path.join(project_dir, f"{clean_name}-BOQ_Quantities.json")
+    # Root Master (ONLY .xsd in project_dir — summary JSONs live in Stories_Data)
+    takedown_file = os.path.join(stories_dir, f"{clean_name}-Columns_Load_Takedown.json")
+    foundations_file = os.path.join(stories_dir, f"{clean_name}-Foundations_Design.json")
+    boq_file = os.path.join(stories_dir, f"{clean_name}-BOQ_Quantities.json")
     foundations_dxf = os.path.join(cad_dir, f"{clean_name}-Foundations_And_Axes.dxf")
 
-    with open(master_file_xsd, "w", encoding="utf-8") as f:
-        json.dump(master_payload, f, indent=2)
-
-    with open(master_file_xpert, "w", encoding="utf-8") as f:
-        json.dump(master_payload, f, indent=2)
-
-    with open(master_file_json, "w", encoding="utf-8") as f:
+    with open(master_xsd_file, "w", encoding="utf-8") as f:
         json.dump(master_payload, f, indent=2)
 
     with open(takedown_file, "w", encoding="utf-8") as f:
@@ -488,132 +405,59 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     return master_payload
 
 
-def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
-    """
-    Loads an existing Xpert Structural Design Studio project from its master file
-    (<ProjectName>-00_Project_Master.xsd, .xpert, or .json).
-    Automatically resolves and links paths for Stories_Data and CAD_Drawings.
-    """
-    resolved_path = os.path.abspath(master_path)
-    if os.path.isdir(resolved_path):
-        # Look for *.xsd, *.xpert or *.json master file in the directory
-        cands = [
-            f for f in os.listdir(resolved_path)
-            if f.endswith(("-00_Project_Master.xsd", "-00_Project_Master.xpert", "-00_Project_Master.json"))
-        ]
-        if not cands:
-            raise FileNotFoundError(f"No master project file (*-00_Project_Master.xsd) found in directory: {resolved_path}")
-        # Prefer .xsd, then .xpert, then .json
-        cands.sort(key=lambda x: (0 if x.endswith(".xsd") else (1 if x.endswith(".xpert") else 2), x))
-        resolved_path = os.path.join(resolved_path, cands[0])
-
-    if not os.path.isfile(resolved_path):
-        raise FileNotFoundError(f"Master project file does not exist: {resolved_path}")
-
-    with open(resolved_path, "r", encoding="utf-8") as f:
-        master_payload: Dict[str, Any] = json.load(f)
-
-    project_dir = os.path.dirname(resolved_path)
-    clean_name = master_payload.get("project_name", "")
-    master_payload["project_dir"] = project_dir
-
-    master_payload["master_file"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xsd")
-    master_payload["master_file_xsd"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xsd")
-    master_payload["master_file_xpert"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.xpert")
-    master_payload["master_file_json"] = os.path.join(project_dir, f"{clean_name}-00_Project_Master.json")
-
-    cad_dir = os.path.join(project_dir, "CAD_Drawings")
-    stories_dir = os.path.join(project_dir, "Stories_Data")
-
-    # Link and verify each story path
-    for sm in master_payload.get("stories", []):
-        sid = sm.get("story_id", "")
-        expected_json = os.path.join(stories_dir, f"{clean_name}-{sid}.json")
-        expected_dxf = os.path.join(cad_dir, f"{clean_name}-{sid}.dxf")
-
-        if os.path.isfile(expected_json):
-            sm["json_file"] = expected_json
-        elif not os.path.isfile(sm.get("json_file", "")):
-            # Check alternative locations
-            for cand in [
-                os.path.join(project_dir, f"{clean_name}-{sid}.json"),
-                os.path.join(stories_dir, f"{sid}.json"),
-            ]:
-                if os.path.isfile(cand):
-                    sm["json_file"] = cand
-                    break
-
-        if os.path.isfile(expected_dxf):
-            sm["dxf_file"] = expected_dxf
-        elif not os.path.isfile(sm.get("dxf_file", "")):
-            for cand in [
-                os.path.join(project_dir, f"{clean_name}-{sid}.dxf"),
-                os.path.join(cad_dir, f"{sid}.dxf"),
-            ]:
-                if os.path.isfile(cand):
-                    sm["dxf_file"] = cand
-                    break
-
-    return master_payload
-
-
 def compute_smart_beam_tag_position(
     beam: Dict[str, Any],
     columns: List[Dict[str, Any]],
     placed_positions: List[Tuple[float, float]],
 ) -> Tuple[float, float, float]:
     """
-    Computes a non-overlapping label position (x, y, rotation_deg) for beam tag B#:
-    - Placed near the midpoint of the beam (length * 0.5).
-    - Offset above the upper face of the beam rectangle: offset = width_m / 2.0 + 0.12 m.
-    - Shifts slightly along the beam axis if an intermediate column is present at the center.
-    - Rotates 0 deg for horizontal beams, 90 deg for vertical beams.
+    Computes a non-overlapping label position (x, y, rotation_deg) for a beam B#:
+    - Places the label near the midpoint of the beam (or midpoint of its first clear span
+      if a column sits directly at the overall midpoint), and slightly ABOVE the top face
+      of the full-width beam rectangle (offset = width_m / 2.0 + 0.12 m).
     """
     sx = float(beam.get("start_x", 0.0))
     sy = float(beam.get("start_y", 0.0))
     ex = float(beam.get("end_x", 5.0))
     ey = float(beam.get("end_y", 0.0))
+    b_width = float(beam.get("width_m", 0.30))
 
     dx = ex - sx
     dy = ey - sy
     length = max(0.01, (dx * dx + dy * dy) ** 0.5)
     ux = dx / length
     uy = dy / length
-
-    # Perpendicular unit normal pointing upwards (or leftwards for vertical beams)
+    # Perpendicular unit vector (above horizontal beam, left of vertical beam)
     nx = -uy
     ny = ux
-    if ny < 0 or (abs(ny) < 1e-4 and nx < 0):
-        nx = -nx
-        ny = -ny
 
     is_vertical = abs(dy) > abs(dx)
     rot_deg = 90.0 if is_vertical else 0.0
 
-    b_kind = beam.get("beam_kind", "hidden")
-    default_w = 0.40 if b_kind == "hidden" else 0.20
-    width_m = float(beam.get("width_m", default_w))
-    offset = width_m / 2.0 + 0.12
+    # Offset slightly above the outer face of the full-width beam rectangle
+    perp_offset = (b_width / 2.0) + 0.12
 
-    # Midpoint of beam
-    cand_x = sx + ux * (length * 0.5) + nx * offset
-    cand_y = sy + uy * (length * 0.5) + ny * offset
+    # Prefer near the beam midpoint; if an intermediate column is at the exact midpoint,
+    # shift slightly toward the first clear span midpoint so it never sits on a column
+    mid_dist = length * 0.50
+    spans = beam.get("spans", [])
+    first_span_mid = float(spans[0]) * 0.50 if spans else length * 0.45
 
-    # Ensure it doesn't collide with any column center or already placed tag
-    for shift_try in [0.0, 0.40, -0.40, 0.75, -0.75, 1.10, -1.10]:
-        tx = cand_x + ux * shift_try
-        ty = cand_y + uy * shift_try
+    cand_x = sx + ux * mid_dist + nx * perp_offset
+    cand_y = sy + uy * mid_dist + ny * perp_offset
+
+    for shift_try in [0.0, first_span_mid - mid_dist, 0.50, -0.50, 0.95, -0.95]:
+        tx = sx + ux * (mid_dist + shift_try) + nx * perp_offset
+        ty = sy + uy * (mid_dist + shift_try) + ny * perp_offset
         collision = False
         for col in columns:
-            if not col.get("active", True):
-                continue
             cx, cy = float(col.get("x", 0.0)), float(col.get("y", 0.0))
-            if ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5 < 0.45:
+            if ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5 < 0.42:
                 collision = True
                 break
         if not collision:
             for px, py in placed_positions:
-                if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 < 0.35:
+                if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 < 0.40:
                     collision = True
                     break
         if not collision:
@@ -746,7 +590,7 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
         ex = float(bm.get("end_x", 5.0))
         ey = float(bm.get("end_y", 0.0))
         b_kind = bm.get("beam_kind", "hidden")
-        b_width = float(bm.get("width_m", 0.40 if b_kind == "hidden" else 0.20))
+        b_width = float(bm.get("width_m", 0.30 if b_kind == "hidden" else 0.20))
         layer = "00-XD-BEAM-HID" if b_kind == "hidden" else "00-XD-BEAM-DROP"
         color = 2 if b_kind == "hidden" else 3
 
@@ -769,51 +613,7 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
             },
         )
 
-    # 4. Architectural Underlay Block (00-XD-ARCH-REF)
-    arch_block = story_data.get("arch_underlay_block")
-    if arch_block and arch_block.get("visible", True):
-        for seg in arch_block.get("segments", []):
-            if len(seg) >= 4:
-                msp.add_line(
-                    (float(seg[0]), float(seg[1])),
-                    (float(seg[2]), float(seg[3])),
-                    dxfattribs={"layer": "00-XD-ARCH-REF", "color": 8},
-                )
-        for circ in arch_block.get("circles", []):
-            if len(circ) >= 3:
-                msp.add_circle(
-                    (float(circ[0]), float(circ[1])),
-                    float(circ[2]),
-                    dxfattribs={"layer": "00-XD-ARCH-REF", "color": 8},
-                )
-
-    # 7. Persistent CAD Dimensions (00-XD-DIM)
-    for dim in story_data.get("dimensions", []):
-        x1, y1 = float(dim.get("x1", 0.0)), float(dim.get("y1", 0.0))
-        x2, y2 = float(dim.get("x2", 0.0)), float(dim.get("y2", 0.0))
-        off = float(dim.get("offset_m", 0.65))
-        dx, dy = x2 - x1, y2 - y1
-        L = max(1e-6, math.hypot(dx, dy))
-        nx, ny = -dy / L, dx / L
-        ox1, oy1 = x1 + nx * off, y1 + ny * off
-        ox2, oy2 = x2 + nx * off, y2 + ny * off
-        msp.add_line((x1, y1), (ox1, oy1), dxfattribs={"layer": "00-XD-DIM", "color": 2})
-        msp.add_line((x2, y2), (ox2, oy2), dxfattribs={"layer": "00-XD-DIM", "color": 2})
-        msp.add_line((ox1, oy1), (ox2, oy2), dxfattribs={"layer": "00-XD-DIM", "color": 2})
-        msp.add_text(
-            dim.get("text", f"{L:.2f} m"),
-            dxfattribs={
-                "layer": "00-XD-DIM",
-                "height": 0.16,
-                "color": 2,
-                "insert": ((ox1 + ox2) / 2.0, (oy1 + oy2) / 2.0 + 0.10),
-            },
-        )
-
     doc.saveas(dxf_path)
-
-
-export_story_to_dxf = sync_story_to_dxf
 
 
 def propagate_ground_columns_to_all_stories(master_payload: Dict[str, Any], ground_columns: List[Dict[str, Any]]) -> None:
@@ -847,3 +647,90 @@ def propagate_ground_columns_to_all_stories(master_payload: Dict[str, Any], grou
             json.dump(sdata, f, indent=2)
         if dpath:
             sync_story_to_dxf(sdata, dpath)
+
+
+def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
+    """
+    Imports an external Architectural .DXF file for a single story as a unified,
+    locked reference block (`arch_underlay_block`) containing clean 2D line segments
+    and candidate architectural column rectangles so they never mix with structural entities.
+    """
+    if not os.path.isfile(dxf_file_path):
+        raise FileNotFoundError(f"Architectural DXF file not found: {dxf_file_path}")
+
+    segments: List[List[float]] = []  # [[x1, y1, x2, y2], ...]
+    closed_rects: List[Dict[str, float]] = []
+
+    if ezdxf is not None:
+        doc = ezdxf.readfile(dxf_file_path)
+        msp = doc.modelspace()
+        for ent in msp:
+            etype = ent.dxftype()
+            if etype == "LINE":
+                s = ent.dxf.start
+                e = ent.dxf.end
+                segments.append([round(float(s.x), 3), round(float(s.y), 3), round(float(e.x), 3), round(float(e.y), 3)])
+            elif etype in ("LWPOLYLINE", "POLYLINE"):
+                pts = []
+                if etype == "LWPOLYLINE":
+                    pts = [(float(p[0]), float(p[1])) for p in ent.get_points("xy")]
+                    is_closed = bool(ent.closed)
+                else:
+                    pts = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in ent.vertices]
+                    is_closed = bool(ent.is_closed)
+                if len(pts) >= 2:
+                    for idx in range(len(pts) - 1):
+                        segments.append([
+                            round(pts[idx][0], 3), round(pts[idx][1], 3),
+                            round(pts[idx + 1][0], 3), round(pts[idx + 1][1], 3),
+                        ])
+                    if is_closed or (len(pts) >= 4 and pts[0] == pts[-1]):
+                        segments.append([
+                            round(pts[-1][0], 3), round(pts[-1][1], 3),
+                            round(pts[0][0], 3), round(pts[0][1], 3),
+                        ])
+                        xs = [p[0] for p in pts]
+                        ys = [p[1] for p in pts]
+                        bw = round(max(xs) - min(xs), 3)
+                        bh = round(max(ys) - min(ys), 3)
+                        if 0.15 <= bw <= 1.20 and 0.15 <= bh <= 1.20:
+                            closed_rects.append({
+                                "x": round((min(xs) + max(xs)) / 2.0, 3),
+                                "y": round((min(ys) + max(ys)) / 2.0, 3),
+                                "b_m": bw,
+                                "h_m": bh,
+                            })
+    else:
+        # Lightweight ASCII DXF LINE parser fallback
+        with open(dxf_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw_lines = [line.strip() for line in f.readlines()]
+        idx = 0
+        n = len(raw_lines)
+        while idx < n - 1:
+            if raw_lines[idx] == "0" and raw_lines[idx + 1] == "LINE":
+                idx += 2
+                x1 = y1 = x2 = y2 = 0.0
+                while idx < n - 1 and raw_lines[idx] != "0":
+                    code = raw_lines[idx]
+                    val = raw_lines[idx + 1]
+                    if code == "10":
+                        x1 = float(val)
+                    elif code == "20":
+                        y1 = float(val)
+                    elif code == "11":
+                        x2 = float(val)
+                    elif code == "21":
+                        y2 = float(val)
+                    idx += 2
+                segments.append([round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3)])
+            else:
+                idx += 2
+
+    return {
+        "source_file": os.path.basename(dxf_file_path),
+        "visible": True,
+        "locked": True,
+        "segments": segments,
+        "candidate_columns": closed_rects,
+    }
+

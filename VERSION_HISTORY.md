@@ -4,7 +4,31 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v1.6.0-structural-bim-pro` (2026-11-14)
+## Current Release: `v1.7.0-structural-bim-pro` (2026-11-15)
+**Release Title:** Single .XSD Master Standard, Crash-Proof Carrier Beam Deletion, Strict Cantilever Rib Locking, 90° Vertical SFD Jumps & Modular Multi-Workspace Architecture
+
+### Key Features & Advancements in `v1.7.0-structural-bim-pro`:
+1. **Single Unified `.xsd` Master Standard & Legacy File Cleanup:**
+   - Standardized strictly on `<ProjectName>-00_Project_Master.xsd` as the single authoritative project master file.
+   - `load_studio_project_from_master_file` automatically converts and cleans up legacy `.xpert` and `.json` master files.
+2. **Crash-Proof Element Deletion Engine:**
+   - Deleting a primary carrier beam automatically cleans up referencing supports on secondary beams without runtime errors.
+   - Fully protected deletion of dimensions, slabs, and columns.
+3. **Strict Structural Backspan-Cantilever Rib Direction Lock:**
+   - Enforces structural safety: a back-span slab cannot have its rib direction flipped if an adjoining cantilever depends on it (cantilever ribs oriented at 90° into the backspan).
+   - Prevents unreinforced cantilever failures; backspan slab is only unlocked once the cantilever ribs are safely oriented onto side beams (0°).
+4. **Guaranteed Exterior CAD Dimensions Offset:**
+   - Automatic exterior dimension generation (`auto_generate_exterior_dimensions`) places dimension lines strictly outside the outer slab boundary ($dy_1 > \max(Y)$ and $dx_1 < \min(X)$).
+5. **Exact 90° Vertical SFD Shear Jumps & Load Formula Badges:**
+   - Analytical beam solver introduces precise left/right discontinuity stations at interior supports and point loads, ensuring vertical 90° shear force jumps.
+   - Distinct support classifications (`column` vs `beam`).
+   - Clear analytical formula strings (`formula_str`) on all applied loads.
+6. **Refactored Modular Multi-Workspace Architecture:**
+   - Split complex tabs into dedicated, maintainable widgets: `BeamDiagramsViewWidget`, `BeamDesignDetailWidget`, and `SchedulesAndReportsWidget`.
+
+---
+
+## Previous Release: `v1.6.0-structural-bim-pro` (2026-11-14)
 **Release Title:** Advanced Continuous Beam Analytical Solver, Dynamic Wall Load Policies, Interactive SFD/BMD Hover Tracker, Longitudinal R.C. Elevation, 4-Mode Stacked Workspaces & Element Context Menus
 
 ### Key Features & Advancements in `v1.6.0-structural-bim-pro`:
