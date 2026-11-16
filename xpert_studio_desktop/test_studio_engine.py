@@ -894,9 +894,150 @@ class TestXpertStudioEngine(unittest.TestCase):
         b2_ld2 = bundle2["beam_results"]["B2"]["loads_applied"][0]
         self.assertIn("2.5×(15/20)×3.0×1.4", b2_ld2["formula_str"])
 
+    def test_v200_pdf_code_beam_design_ceiling_thickness_and_dialogs(self):
+        """
+        Verifies the 9 engineering & UI fixes requested by Eng. Yousef:
+        1. Calculated minimum slab thickness is rounded UP to the next whole centimeter (math.ceil):
+           e.g. Ln = 4.50 m, L/16 = 28.125 cm -> 29 cm (290 mm).
+        2. DEFAULT_REBAR_DIAMETERS_TABLE includes Φ6 (for stirrups) and Φ32 (for main bars).
+        3. Standard wall thicknesses [10, 15, 20, 30, 40] cm snap and scale W_wall = (2.5*H*1.4)*(t_wall/20).
+        4. Beam flexural & shear design per attached Code PDFs (Pages 1-2, 8, 11, 13):
+           - Continuous As,min (n_min Φ db) top and bottom from start to end of beam.
+           - Double Reinforcement with Continuous As,min (quadratic x1, x2, C, fs' = 600*(C-d')/C, As1, additional bars).
+           - Single Reinforcement mode toggle.
+        5. Headless verification of StartupDefaultsDialog, StudioOptionsDialog, and SlabRibDesignDialog (zero crashes).
+        """
+        from xpert_project_io import DEFAULT_REBAR_DIAMETERS_TABLE
+        from xpert_structural_engine import (
+            STANDARD_WALL_THICKNESSES_CM,
+            design_beam_aci318,
+            evaluate_story_thickness_and_optimization,
+            snap_standard_wall_thickness_cm,
+        )
+
+        # 1. Verify Φ6 and Φ32 exist in DEFAULT_REBAR_DIAMETERS_TABLE
+        dias = [int(r["dia_mm"]) for r in DEFAULT_REBAR_DIAMETERS_TABLE]
+        self.assertIn(6, dias)
+        self.assertIn(32, dias)
+
+        # 2. Verify ceiling integer rounding of calculated minimum slab thickness (28.125 cm -> 29 cm)
+        story_ceil = {
+            "story_id": "02_Ground_Floor",
+            "beams": [
+                {
+                    "id": "B1",
+                    "beam_kind": "hidden",
+                    "width_m": 0.40,
+                    "depth_m": 0.30,
+                    "spans": [4.70],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.20},
+                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.20},
+                    ],
+                }
+            ],
+            "slabs": [],
+        }
+        # Clear span Ln = 4.70 - 0.10 - 0.10 = 4.50 m; for fy=420 MPa, coeff=16 -> 450/16 = 28.125 cm -> ceil = 29 cm!
+        eval_c = evaluate_story_thickness_and_optimization(story_ceil, 420.0)
+        self.assertEqual(eval_c["calculated_min_thickness_cm"], 29.0)
+        self.assertEqual(eval_c["badge_text"], "29 cm")
+
+        # 3. Verify standard wall thicknesses [10, 15, 20, 30, 40] cm
+        self.assertEqual(STANDARD_WALL_THICKNESSES_CM, [10, 15, 20, 30, 40])
+        self.assertEqual(snap_standard_wall_thickness_cm(14.0), 15.0)
+        self.assertEqual(snap_standard_wall_thickness_cm(32.0), 30.0)
+
+        # 4. Verify PDF Code Equations for Beam Flexure (Double vs Single with Continuous As,min)
+        bm_sample = {
+            "id": "B_TEST",
+            "beam_kind": "drop",
+            "width_m": 0.25,
+            "depth_m": 0.50,
+            "spans": [5.0],
+        }
+        res_sample = {
+            "num_spans_excluding_cantilevers": 1,
+            "max_pos_mu_knm": 135.0,
+            "max_neg_face_mu_knm": 90.0,
+            "max_face_vu_kn": 110.0,
+            "span_critical_table": [
+                {"span_index": 1, "length_m": 5.0, "max_pos_mu_knm": 135.0, "max_face_vu_kn": 110.0}
+            ],
+            "support_critical_table": [
+                {"support_index": 1, "target_id": "C1", "support_kind": "column", "x_m": 0.0, "width_m": 0.20, "mu_face_neg_knm": 90.0, "vu_face_max_kn": 110.0},
+                {"support_index": 2, "target_id": "C2", "support_kind": "column", "x_m": 5.0, "width_m": 0.20, "mu_face_neg_knm": 90.0, "vu_face_max_kn": 110.0},
+            ],
+        }
+        des_double = design_beam_aci318(bm_sample, res_sample, fc_mpa=25.0, fy_mpa=420.0, design_mode="double", main_bar_dia_mm=16)
+        des_single = design_beam_aci318(bm_sample, res_sample, fc_mpa=25.0, fy_mpa=420.0, design_mode="single", main_bar_dia_mm=16)
+
+        self.assertEqual(des_double["design_mode"], "double")
+        self.assertEqual(des_single["design_mode"], "single")
+        self.assertGreaterEqual(des_double["n_bars_min_cont"], 2)
+        self.assertIn("pos_flexure_details", des_double)
+        self.assertGreater(des_double["pos_flexure_details"]["C_mm"], 0.0)
+        # Double reinforcement utilizes compression steel As2 = As,min, so total tension As required is slightly lower than or equal to single reinforcement
+        self.assertLessEqual(des_double["as_pos_req_mm2"], des_single["as_pos_req_mm2"] + 5.0)
+        self.assertGreaterEqual(des_double["n_max_per_layer"], 2)
+
+        # 5. Verify xpert_studio_app.py Dialog Signatures, Imports, and Fullscreen Launch (via AST + PyQt6 if available)
+        import ast
+        app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
+        with open(app_path, "r", encoding="utf-8") as f:
+            app_src = f.read()
+        tree = ast.parse(app_src, filename="xpert_studio_app.py")
+        self.assertIsNotNone(tree)
+        self.assertIn("win.showMaximized()", app_src)
+        self.assertNotIn("compute_hollow_block_slab_loads(", app_src)
+        self.assertIn("compute_hollow_block_parameters(", app_src)
+        self.assertIn("STANDARD_WALL_THICKNESSES_CM", app_src)
+        self.assertIn("thickness_warning_acknowledged_cm", app_src)
+
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            from xpert_studio_app import (
+                SlabRibDesignDialog,
+                StartupDefaultsDialog,
+                StudioOptionsDialog,
+                XpertStudioMainWindow,
+            )
+
+            _app = QApplication.instance() or QApplication([])
+            cfg = {
+                "project_name": "TestDialogs",
+                "root_directory": self.tmp_dir,
+                "ground_floor_height_m": 3.00,
+                "include_basement": False,
+                "floors_above_ground": 1,
+                "include_penthouse": False,
+                "fc_mpa": 20.0,
+                "fy_mpa": 350.0,
+            }
+            master = initialize_studio_project(cfg)
+            win = XpertStudioMainWindow(initial_master_project=master)
+            win.activate_cad_tool("LOAD_TEMPLATE")
+
+            dlg_def = StartupDefaultsDialog(win)
+            stir_items = [dlg_def.cb_def_stirrup.itemText(i) for i in range(dlg_def.cb_def_stirrup.count())]
+            main_items = [dlg_def.cb_def_main.itemText(i) for i in range(dlg_def.cb_def_main.count())]
+            self.assertIn("6", stir_items)
+            self.assertIn("32", main_items)
+
+            dlg_opt = StudioOptionsDialog(win, master_project=win.master_project, current_story_data=win.current_story_data)
+            self.assertAlmostEqual(dlg_opt.sp_finish_load.value(), 1.50, places=2)
+            self.assertIn("11.71", dlg_opt.lbl_computed_qu.text())
+
+            dlg_rib = SlabRibDesignDialog(win, story_data=win.current_story_data, fc_mpa=20.0, fy_mpa=350.0)
+            self.assertGreater(dlg_rib.cb_slab.count(), 0)
+        except ModuleNotFoundError:
+            pass
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

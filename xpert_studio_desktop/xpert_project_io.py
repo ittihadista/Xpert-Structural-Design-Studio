@@ -27,21 +27,21 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.0.0-structural-bim-pro"
+STUDIO_VERSION = "v2.1.0-structural-bim-pro"
 
 DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
-    {"active": True, "label": "Φ 6", "dia_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Slab Stirrups"},
-    {"active": True, "label": "Φ 8", "dia_mm": 8, "area_mm2": 50.27, "weight_kg_m": 0.395, "role": "Stirrups"},
-    {"active": True, "label": "Φ 10", "dia_mm": 10, "area_mm2": 78.54, "weight_kg_m": 0.617, "role": "Both"},
-    {"active": True, "label": "Φ 12", "dia_mm": 12, "area_mm2": 113.10, "weight_kg_m": 0.888, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 14", "dia_mm": 14, "area_mm2": 153.94, "weight_kg_m": 1.208, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 16", "dia_mm": 16, "area_mm2": 201.06, "weight_kg_m": 1.578, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 18", "dia_mm": 18, "area_mm2": 254.47, "weight_kg_m": 1.998, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 20", "dia_mm": 20, "area_mm2": 314.16, "weight_kg_m": 2.466, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 22", "dia_mm": 22, "area_mm2": 380.13, "weight_kg_m": 2.984, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 25", "dia_mm": 25, "area_mm2": 490.87, "weight_kg_m": 3.853, "role": "Longitudinal"},
-    {"active": False, "label": "Φ 28", "dia_mm": 28, "area_mm2": 615.75, "weight_kg_m": 4.834, "role": "Longitudinal"},
-    {"active": False, "label": "Φ 32", "dia_mm": 32, "area_mm2": 804.25, "weight_kg_m": 6.313, "role": "Longitudinal"},
+    {"active": True, "enabled": True, "label": "Φ 6", "bar_name": "Φ6", "dia_mm": 6, "diameter_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Stirrups (كانات الأعصاب والكمرات)"},
+    {"active": True, "enabled": True, "label": "Φ 8", "bar_name": "Φ8", "dia_mm": 8, "diameter_mm": 8, "area_mm2": 50.27, "weight_kg_m": 0.395, "role": "Stirrups (كانات)"},
+    {"active": True, "enabled": True, "label": "Φ 10", "bar_name": "Φ10", "dia_mm": 10, "diameter_mm": 10, "area_mm2": 78.54, "weight_kg_m": 0.617, "role": "Stirrups / Top Fixation Bar"},
+    {"active": True, "enabled": True, "label": "Φ 12", "bar_name": "Φ12", "dia_mm": 12, "diameter_mm": 12, "area_mm2": 113.10, "weight_kg_m": 0.888, "role": "Longitudinal / Slab Ribs"},
+    {"active": True, "enabled": True, "label": "Φ 14", "bar_name": "Φ14", "dia_mm": 14, "diameter_mm": 14, "area_mm2": 153.94, "weight_kg_m": 1.208, "role": "Longitudinal / Slab Ribs"},
+    {"active": True, "enabled": True, "label": "Φ 16", "bar_name": "Φ16", "dia_mm": 16, "diameter_mm": 16, "area_mm2": 201.06, "weight_kg_m": 1.578, "role": "Longitudinal (Beams & Columns)"},
+    {"active": True, "enabled": True, "label": "Φ 18", "bar_name": "Φ18", "dia_mm": 18, "diameter_mm": 18, "area_mm2": 254.47, "weight_kg_m": 1.998, "role": "Longitudinal (Beams & Columns)"},
+    {"active": True, "enabled": True, "label": "Φ 20", "bar_name": "Φ20", "dia_mm": 20, "diameter_mm": 20, "area_mm2": 314.16, "weight_kg_m": 2.466, "role": "Longitudinal (Beams & Columns)"},
+    {"active": True, "enabled": True, "label": "Φ 22", "bar_name": "Φ22", "dia_mm": 22, "diameter_mm": 22, "area_mm2": 380.13, "weight_kg_m": 2.984, "role": "Longitudinal (Beams & Columns)"},
+    {"active": True, "enabled": True, "label": "Φ 25", "bar_name": "Φ25", "dia_mm": 25, "diameter_mm": 25, "area_mm2": 490.87, "weight_kg_m": 3.853, "role": "Longitudinal (Beams & Columns)"},
+    {"active": True, "enabled": True, "label": "Φ 28", "bar_name": "Φ28", "dia_mm": 28, "diameter_mm": 28, "area_mm2": 615.75, "weight_kg_m": 4.834, "role": "Longitudinal (Heavy Beams & Columns)"},
+    {"active": True, "enabled": True, "label": "Φ 32", "bar_name": "Φ32", "dia_mm": 32, "diameter_mm": 32, "area_mm2": 804.25, "weight_kg_m": 6.313, "role": "Longitudinal (Heavy Beams & Columns)"},
 ]
 
 
@@ -49,53 +49,108 @@ def _get_global_settings_file_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpert_studio_defaults.json")
 
 
+def _normalize_rebar_table(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ensures all standard diameters from Φ6 through Φ32 exist in the rebar table
+    and synchronizes both (dia_mm/diameter_mm, label/bar_name, active/enabled) keys.
+    """
+    by_dia: Dict[int, Dict[str, Any]] = {}
+    for r in DEFAULT_REBAR_DIAMETERS_TABLE:
+        d = int(r["dia_mm"])
+        by_dia[d] = dict(r)
+    for r in (rows or []):
+        try:
+            d = int(r.get("diameter_mm", r.get("dia_mm", 0)))
+        except Exception:
+            continue
+        if d <= 0:
+            continue
+        en = bool(r.get("enabled", r.get("active", True)))
+        lbl = str(r.get("bar_name", r.get("label", f"Φ{d}")))
+        area = float(r.get("area_mm2", round(3.14159265 * d * d / 4.0, 2)))
+        wt = float(r.get("weight_kg_m", round(d * d / 162.2, 3)))
+        role = str(r.get("role", by_dia.get(d, {}).get("role", "Longitudinal")))
+        by_dia[d] = {
+            "active": en,
+            "enabled": en,
+            "label": lbl,
+            "bar_name": lbl,
+            "dia_mm": d,
+            "diameter_mm": d,
+            "area_mm2": area,
+            "weight_kg_m": wt,
+            "role": role,
+        }
+    return [by_dia[d] for d in sorted(by_dia.keys())]
+
+
 def load_studio_global_settings() -> Dict[str, Any]:
     """
     Loads persistent global studio settings for:
-    1. 'Startup Defaults' (Projects Root Folder & Rebar Diameters Table)
-    2. 'Options' (Material Properties & Hollow-Block / Hordi Slab Parameters matching Eng. Yousef's Excel sheet)
+    1. 'Startup Defaults' (Projects Root Folder & Rebar Diameters Table including Φ6 stirrups & Φ32 main bars)
+    2. 'Options' (Material Properties & Hollow-Block / Hordi Slab Parameters matching Eng. Yousef's Excel sheet:
+       W_finishing = 1.5 kN/m², hs = 10.0 cm, γc = 24.0 kN/m³, Wu(rib) = 6.44 kN/m'/rib, Wu(m×m) = 11.71 kN/m²)
     """
+    default_root = os.path.abspath("./XpertStudio_Projects")
+    mat_defaults = {
+        "fc_mpa": 20.0,
+        "fy_mpa": 350.0,
+        "fyt_mpa": 280.0,
+        "fy_stirrups_mpa": 280.0,
+        "gamma_c_kn_m3": 24.0,
+        "concrete_unit_weight_kn_m3": 24.0,
+        "soil_bearing_qall_kn_m2": 150.0,
+        "beam_compression_steel_mode": "double_as_min",
+    }
+    hb_defaults = {
+        "slab_thickness_cm": 30.0,        # h = 300 mm
+        "top_flange_cm": 10.0,            # hs = 100 mm
+        "top_compression_slab_cm": 10.0,  # hs = 100 mm
+        "block_height_cm": 20.0,          # h - hs = 200 mm
+        "block_width_cm": 40.0,           # S = 400 mm (clear spacing between ribs)
+        "block_length_cm": 25.0,          # 250 mm along rib (4 blocks / m)
+        "rib_width_cm": 15.0,             # bw1 = 150 mm (top rib width)
+        "rib_bw2_cm": 15.0,               # bw2 = 150 mm (bottom rib width)
+        "slab_cover_mm": 20.0,            # dc = 20 mm
+        "rib_bar_dia_mm": 12,             # db = 12 mm (can be changed to 14 or 16 mm)
+        "rib_stirrup_dia_mm": 6,          # ds = 6 mm (triangular stirrup)
+        "block_weight_kn": 0.10,          # W_block = 10 kg = 0.10 kN
+        "finish_load_kn_m2": 1.5,         # W_finishing = 1.5 kN/m² (Eng. Yousef Excel)
+        "finishing_load_kpa": 1.5,
+        "live_load_kn_m2": 2.0,           # LL = 2.0 kN/m²
+        "live_load_kpa": 2.0,
+        "dl_factor": 1.4,                 # 1.4 DL
+        "ll_factor": 1.7,                 # 1.7 LL
+        "wu_rib_kn_m": 6.44,              # Wu(rib) = 6.44 kN/m'/rib
+        "slab_factored_wu_kpa": 11.71,    # Wu(m*m) = Wu(rib)/(S+bw1) = 6.441 / 0.55 = 11.71 kN/m²
+        "wall_thickness_cm": 20.0,        # Default wall thickness = 20 cm (200 mm)
+        "wall_unit_wt_20cm_kn_m2": 2.5,   # 2.5 kN/m² of wall elevation for 20 cm wall
+        "default_wall_load_kn_m": 10.50,  # W_wall = 2.5 * H(3.0m) * 1.4 = 10.50 kN/m
+        "hidden_beam_min_width_cm": 30.0, # Min B for Hidden Beams = 300 mm
+        "drop_beam_width_cm": 20.0,       # Default B for Drop Beams = 200 mm
+        "drop_beam_min_depth_cm": 40.0,   # Min h for Drop Beams = 400 mm
+        "drop_beam_depth_cm": 50.0,
+    }
+    rebar_table = _normalize_rebar_table(DEFAULT_REBAR_DIAMETERS_TABLE)
+
     defaults: Dict[str, Any] = {
+        "schema_version": "2.0.0",
+        "default_projects_root_folder": default_root,
+        "default_stirrup_bar_mm": 8,
+        "default_main_bar_mm": 16,
+        "rebar_diameters_table": rebar_table,
+        "materials_and_soil": dict(mat_defaults),
+        "hollow_block_slab_data": dict(hb_defaults),
         "startup_defaults": {
-            "default_projects_root_dir": os.path.abspath("./XpertStudio_Projects"),
+            "default_projects_root_dir": default_root,
             "default_stirrup_dia_mm": 8,
             "default_beam_main_dia_mm": 16,
             "default_col_main_dia_mm": 16,
-            "rebar_diameters_table": [dict(r) for r in DEFAULT_REBAR_DIAMETERS_TABLE],
+            "rebar_diameters_table": rebar_table,
         },
         "options": {
-            "materials": {
-                "fc_mpa": 20.0,
-                "fy_mpa": 350.0,
-                "fyt_mpa": 280.0,
-                "gamma_c_kn_m3": 24.0,
-                "soil_bearing_qall_kn_m2": 150.0,
-            },
-            "hollow_block_slab": {
-                "slab_thickness_cm": 30.0,       # h = 300 mm
-                "top_flange_cm": 10.0,           # hs = 100 mm
-                "block_height_cm": 20.0,         # h - hs = 200 mm
-                "block_width_cm": 40.0,          # S = 400 mm (clear spacing between ribs)
-                "block_length_cm": 25.0,         # 250 mm along rib (4 blocks / m)
-                "rib_width_cm": 15.0,            # bw1 = 150 mm (top rib width)
-                "rib_bw2_cm": 15.0,              # bw2 = 150 mm (bottom rib width)
-                "slab_cover_mm": 20.0,           # dc = 20 mm
-                "rib_bar_dia_mm": 12,            # db = 12 mm (can be changed to 14 or 16 mm)
-                "rib_stirrup_dia_mm": 6,         # ds = 6 mm (triangular stirrup)
-                "block_weight_kn": 0.10,         # W_block = 10 kg = 0.10 kN
-                "finish_load_kn_m2": 1.5,        # W_finishing = 1.5 kN/m² (Eng. Yousef Excel)
-                "live_load_kn_m2": 2.0,          # LL = 2.0 kN/m²
-                "dl_factor": 1.4,                # 1.4 DL
-                "ll_factor": 1.7,                # 1.7 LL
-                "slab_factored_wu_kpa": 11.71,   # Wu(m*m) = Wu(rib)/(S+bw1) = 6.441 / 0.55 = 11.71 kN/m²
-                "wall_thickness_cm": 20.0,       # Default wall thickness = 20 cm (200 mm)
-                "wall_unit_wt_20cm_kn_m2": 2.5,  # 2.5 kN/m² of wall elevation for 20 cm wall
-                "default_wall_load_kn_m": 10.50, # W_wall = 2.5 * H(3.0m) * 1.4 = 10.50 kN/m
-                "hidden_beam_min_width_cm": 30.0,# Min B for Hidden Beams = 300 mm
-                "drop_beam_width_cm": 20.0,      # Default B for Drop Beams = 200 mm
-                "drop_beam_min_depth_cm": 40.0,  # Min h for Drop Beams = 400 mm
-                "drop_beam_depth_cm": 50.0,
-            },
+            "materials": dict(mat_defaults),
+            "hollow_block_slab": dict(hb_defaults),
         },
     }
     fpath = _get_global_settings_file_path()
@@ -104,13 +159,43 @@ def load_studio_global_settings() -> Dict[str, Any]:
             with open(fpath, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
+                is_v200 = (saved.get("schema_version") == "2.0.0")
+                if "default_projects_root_folder" in saved:
+                    defaults["default_projects_root_folder"] = saved["default_projects_root_folder"]
+                if "default_stirrup_bar_mm" in saved:
+                    defaults["default_stirrup_bar_mm"] = int(saved["default_stirrup_bar_mm"])
+                if "default_main_bar_mm" in saved:
+                    defaults["default_main_bar_mm"] = int(saved["default_main_bar_mm"])
+                if isinstance(saved.get("rebar_diameters_table"), list):
+                    defaults["rebar_diameters_table"] = _normalize_rebar_table(saved["rebar_diameters_table"])
+                if isinstance(saved.get("materials_and_soil"), dict):
+                    defaults["materials_and_soil"].update(saved["materials_and_soil"])
+                if isinstance(saved.get("hollow_block_slab_data"), dict):
+                    defaults["hollow_block_slab_data"].update(saved["hollow_block_slab_data"])
                 if isinstance(saved.get("startup_defaults"), dict):
                     defaults["startup_defaults"].update(saved["startup_defaults"])
+                    if isinstance(saved["startup_defaults"].get("rebar_diameters_table"), list):
+                        defaults["rebar_diameters_table"] = _normalize_rebar_table(saved["startup_defaults"]["rebar_diameters_table"])
                 if isinstance(saved.get("options"), dict):
                     if isinstance(saved["options"].get("materials"), dict):
-                        defaults["options"]["materials"].update(saved["options"]["materials"])
+                        defaults["materials_and_soil"].update(saved["options"]["materials"])
                     if isinstance(saved["options"].get("hollow_block_slab"), dict):
-                        defaults["options"]["hollow_block_slab"].update(saved["options"]["hollow_block_slab"])
+                        defaults["hollow_block_slab_data"].update(saved["options"]["hollow_block_slab"])
+
+                # Migrate pre-v2.0.0 legacy settings (where finish_load was 2.0, top_slab was 5.0, gamma_c was 25.0, wu was 10.0)
+                if not is_v200:
+                    defaults["materials_and_soil"]["concrete_unit_weight_kn_m3"] = 24.0
+                    defaults["materials_and_soil"]["gamma_c_kn_m3"] = 24.0
+                    defaults["hollow_block_slab_data"]["finish_load_kn_m2"] = 1.5
+                    defaults["hollow_block_slab_data"]["finishing_load_kpa"] = 1.5
+                    defaults["hollow_block_slab_data"]["top_compression_slab_cm"] = 10.0
+                    defaults["hollow_block_slab_data"]["top_flange_cm"] = 10.0
+                    defaults["hollow_block_slab_data"]["slab_factored_wu_kpa"] = 11.71
+                    defaults["hollow_block_slab_data"]["default_wall_load_kn_m"] = 10.50
+
+                defaults["startup_defaults"]["rebar_diameters_table"] = defaults["rebar_diameters_table"]
+                defaults["options"]["materials"] = dict(defaults["materials_and_soil"])
+                defaults["options"]["hollow_block_slab"] = dict(defaults["hollow_block_slab_data"])
         except Exception:
             pass
     return defaults
@@ -120,6 +205,9 @@ def save_studio_global_settings(settings: Dict[str, Any]) -> str:
     """
     Saves global 'Startup Defaults' and 'Options' to `xpert_studio_defaults.json`.
     """
+    settings["schema_version"] = "2.0.0"
+    if "rebar_diameters_table" in settings:
+        settings["rebar_diameters_table"] = _normalize_rebar_table(settings["rebar_diameters_table"])
     fpath = _get_global_settings_file_path()
     try:
         with open(fpath, "w", encoding="utf-8") as f:
@@ -164,7 +252,7 @@ def validate_project_name(name: str) -> Tuple[bool, str, str, str]:
 
 
 def compute_hollow_block_parameters(
-    slab_thickness_cm: float = 30.0,
+    slab_thickness_cm: Any = 30.0,
     rib_width_cm: float = 15.0,
     block_width_cm: float = 40.0,
     block_length_cm: float = 25.0,
@@ -178,23 +266,21 @@ def compute_hollow_block_parameters(
     ll_factor: float = 1.7,
 ) -> Dict[str, float]:
     """
-    Computes hollow-block (Hordi) rib loads and area load per Eng. Yousef's Excel Sheet ('Design of rib slab'):
-    - h  = slab_thickness_cm (default 30 cm = 300 mm)
-    - hs = top_flange_cm (default 10 cm = 100 mm; block height = h - hs = 20 cm = 200 mm)
-    - S  = block_width_cm (default 40 cm = 400 mm between ribs)
-    - bw1 = rib_width_cm (default 15 cm = 150 mm), bw2 = rib_bw2_cm (default 15 cm = 150 mm)
-    - b_rib_center = S + bw1 (default 55 cm = 0.55 m)
-    - Topping slab weight per rib = hs * (S + bw1) * gamma_c       [kN/m'/rib]  (e.g. 0.10 * 0.55 * 24 = 1.320)
-    - Rib web weight per rib      = ((bw1 + bw2)/2) * (h - hs)*gamma_c [kN/m'/rib] (e.g. 0.15 * 0.20 * 24 = 0.720)
-    - Block weight per rib        = (1.0 / block_length_m) * W_block   [kN/m'/rib] (e.g. 4 * 0.10 = 0.400)
-    - Finishing weight per rib    = W_finishing * (S + bw1)        [kN/m'/rib]  (e.g. 1.5 * 0.55 = 0.825)
-    - Total Dead Load per rib     = 1.32 + 0.72 + 0.40 + 0.825 = 3.265 kN/m'/rib
-    - Factored Dead Load per rib  = 1.4 * DL_rib = 4.571 kN/m'/rib
-    - Live Load per rib           = LL * (S + bw1) = 2.0 * 0.55 = 1.100 kN/m'/rib
-    - Factored Live Load per rib  = 1.7 * LL_rib = 1.870 kN/m'/rib
-    - Wu_rib (Design Load per Rib)= 4.571 + 1.870 = 6.441 kN/m'/rib
-    - Wu_m2 (Area Load to Beams)  = Wu_rib / (S + bw1) = 6.441 / 0.55 = 11.71 kN/m²
+    Computes hollow-block (Hordi) rib loads and area load per Eng. Yousef's Excel Sheet ('Design of rib slab').
+    Accepts either a dictionary of options as the first argument OR individual float parameters.
     """
+    if isinstance(slab_thickness_cm, dict):
+        d_in = slab_thickness_cm
+        slab_thickness_cm = float(d_in.get("total_slab_thickness_cm", d_in.get("slab_thickness_cm", d_in.get("total_thickness_cm", 30.0))))
+        rib_width_cm = float(d_in.get("rib_width_cm", rib_width_cm))
+        block_width_cm = float(d_in.get("block_width_cm", block_width_cm))
+        block_length_cm = float(d_in.get("block_length_cm", block_length_cm))
+        block_weight_kn = float(d_in.get("block_weight_kn", block_weight_kn))
+        finish_load_kn_m2 = float(d_in.get("finish_load_kn_m2", d_in.get("finishing_load_kpa", finish_load_kn_m2)))
+        live_load_kn_m2 = float(d_in.get("live_load_kn_m2", d_in.get("live_load_kpa", live_load_kn_m2)))
+        top_flange_cm = float(d_in.get("top_compression_slab_cm", d_in.get("top_flange_cm", d_in.get("topping_thickness_cm", top_flange_cm))))
+        gamma_c_kn_m3 = float(d_in.get("gamma_c_kn_m3", d_in.get("concrete_unit_weight_kn_m3", gamma_c_kn_m3)))
+
     h_cm = max(14.0, float(slab_thickness_cm))
     hs_cm = min(h_cm - 5.0, max(5.0, float(top_flange_cm)))
     block_height_cm = round(max(5.0, h_cm - hs_cm), 2)
@@ -236,7 +322,9 @@ def compute_hollow_block_parameters(
 
     return {
         "slab_thickness_cm": round(h_cm, 2),
+        "total_slab_thickness_cm": round(h_cm, 2),
         "top_flange_cm": round(hs_cm, 2),
+        "top_compression_slab_cm": round(hs_cm, 2),
         "block_height_cm": block_height_cm,
         "block_width_cm": round(s_cm, 2),
         "block_length_cm": round(blk_len_m * 100.0, 2),
@@ -257,13 +345,18 @@ def compute_hollow_block_parameters(
         "ll_rib_kn_m": round(ll_rib, 3),
         "factored_ll_rib_kn_m": round(factored_ll_rib, 3),
         "wu_rib_kn_m": round(wu_rib_kn_m, 2),
+        "rib_factored_wu_kn_m": round(wu_rib_kn_m, 2),
         "wu_rib_exact_kn_m": wu_rib_kn_m,
         "blocks_per_m2": round(blocks_per_m2, 2),
         "self_weight_kn_m2": self_weight_kn_m2,
         "total_dead_kn_m2": total_dead_kn_m2,
         "total_service_kn_m2": total_service_kn_m2,
         "total_factored_wu_kn_m2": wu_m2_kpa,
+        "area_factored_qu_kn_m2": wu_m2_kpa,
     }
+
+
+compute_hollow_block_slab_loads = compute_hollow_block_parameters
 
 
 def cleanup_unprefixed_duplicates(project_dir: str, clean_project_name: str) -> None:
@@ -320,13 +413,53 @@ def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
     master_payload["project_dir"] = project_dir
     master_payload["master_file"] = canonical_xsd
 
+    mats = master_payload.setdefault("materials_and_soil", {})
+    if float(mats.get("gamma_c_kn_m3", 24.0)) == 25.0:
+        mats["gamma_c_kn_m3"] = 24.0
+    loads_def = master_payload.setdefault("loads_and_defaults", {})
+    if abs(float(loads_def.get("finish_load_kn_m2", 1.5)) - 2.0) < 0.05:
+        loads_def["finish_load_kn_m2"] = 1.5
+    hordi_recalc = compute_hollow_block_parameters(
+        slab_thickness_cm=float(loads_def.get("default_slab_thickness_cm", 30.0)),
+        rib_width_cm=float(loads_def.get("rib_width_cm", 15.0)),
+        finish_load_kn_m2=float(loads_def.get("finish_load_kn_m2", 1.5)),
+        live_load_kn_m2=float(loads_def.get("live_load_kn_m2", 2.0)),
+        top_flange_cm=10.0,
+        gamma_c_kn_m3=float(mats.get("gamma_c_kn_m3", 24.0)),
+    )
+    loads_def["hollow_block_defaults"] = hordi_recalc
+
     stories_dir = os.path.join(project_dir, "Stories_Data")
     cad_dir = os.path.join(project_dir, "CAD_Drawings")
 
     for sm in master_payload.get("stories", []):
         sid = sm["story_id"]
-        sm["json_file"] = os.path.join(stories_dir, f"{clean_name}-{sid}.json")
+        j_path = os.path.join(stories_dir, f"{clean_name}-{sid}.json")
+        sm["json_file"] = j_path
         sm["dxf_file"] = os.path.join(cad_dir, f"{clean_name}-{sid}.dxf")
+        if os.path.isfile(j_path):
+            try:
+                with open(j_path, "r", encoding="utf-8") as sf:
+                    s_data = json.load(sf)
+                hb_s = s_data.get("hollow_block", {})
+                if isinstance(hb_s, dict) and abs(float(hb_s.get("finishing_load_kpa", 1.5)) - 2.0) < 0.05:
+                    hb_s["finishing_load_kpa"] = 1.5
+                if float(s_data.get("slab_factored_wu_kpa", 11.71)) in (10.0, 12.66) and not s_data.get("custom_slab_wu_override", False):
+                    st_t = float(s_data.get("adopted_slab_thickness_cm", 30.0))
+                    st_hordi = compute_hollow_block_parameters(
+                        slab_thickness_cm=st_t if st_t >= 14.0 else 30.0,
+                        rib_width_cm=float(loads_def.get("rib_width_cm", 15.0)),
+                        finish_load_kn_m2=float(loads_def.get("finish_load_kn_m2", 1.5)),
+                        live_load_kn_m2=float(loads_def.get("live_load_kn_m2", 2.0)),
+                        top_flange_cm=10.0,
+                        gamma_c_kn_m3=float(mats.get("gamma_c_kn_m3", 24.0)),
+                    )
+                    s_data["slab_factored_wu_kpa"] = st_hordi["total_factored_wu_kn_m2"]
+                    s_data["hollow_block_params"] = dict(st_hordi)
+                with open(j_path, "w", encoding="utf-8") as sf_out:
+                    json.dump(s_data, sf_out, indent=2)
+            except Exception:
+                pass
 
     # Always write canonical .xsd and remove any legacy .xpert or -00_Project_Master.json duplicates
     try:

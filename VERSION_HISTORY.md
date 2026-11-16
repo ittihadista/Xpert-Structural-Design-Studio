@@ -4,7 +4,36 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.0.0-structural-bim-pro` (2026-11-16)
+## Current Release: `v2.1.0-structural-bim-pro` (2026-11-16)
+**Release Title:** Fullscreen Mode by Default, Standard Rebar Table Φ6-Φ32, Safe Dialogs, Single-Notice Thickness Warning with Math.Ceil, Unified Excel Finishing Loads, Standard Masonry Wall Dropdowns, and Complete Beam Flexural & Shear Code Implementation
+
+### Key Features & Advancements in `v2.1.0-structural-bim-pro`:
+1. **Maximized Window Launch (`win.showMaximized()`):**
+   - The desktop studio automatically launches in maximized fullscreen mode on startup, providing an expansive, distraction-free CAD drafting and calculation workspace.
+2. **Comprehensive Standard Rebar Diameters Table (Φ6 through Φ32):**
+   - `DEFAULT_REBAR_DIAMETERS_TABLE` now officially incorporates $\Phi 6\text{ mm}$ for slab rib and beam stirrups (`Stirrups (كانات الأعصاب والكمرات)`) and $\Phi 32\text{ mm}$ for heavy longitudinal reinforcement (`Longitudinal (Heavy Beams & Columns)`), appearing in both Startup Defaults and Settings dialogs.
+3. **Rock-Solid Dialog Stability:**
+   - Eliminated application crash bugs when opening `Options > Materials & Hollow-Block Slab Options` or the `Slab Rib Design` dialog, ensuring seamless headless and GUI workflows.
+4. **Intelligent Single-Notice Slab Thickness Warning with Ceiling Logic:**
+   - If an engineer inputs a story slab thickness below the ACI 318 calculated minimum, the warning dialog appears only once per entered value (`thickness_warning_acknowledged_cm`), preventing intrusive repeated popups.
+   - All minimum required slab and beam deflection thicknesses are strictly rounded up to the nearest whole centimeter using `math.ceil` (e.g. $28.125\text{ cm} \rightarrow 29\text{ cm}$).
+5. **Unified Excel Finishing Loads & Exact Load Parity:**
+   - Standardized finishing dead load to $W_{\text{finishing}} = 1.5\text{ kN/m}^2$, maintaining exact parity with Eng. Yousef's reference Excel sheet: $W_u(\text{rib}) = 6.44\text{ kN/m'/rib}$ and $W_u(\text{m}\times\text{m}) = 11.71\text{ kN/m}^2$.
+6. **Standard Masonry Wall Thickness Dropdown Selector:**
+   - Replaced free-form text input with a standard dropdown (`10 cm, 15 cm, 20 cm, 30 cm, 40 cm`), instantly computing scaled wall load:
+     $$W_{\text{wall}} = 2.5 \cdot \left(\frac{t_{\text{wall}}}{20}\right) \cdot H \cdot 1.4\text{ kN/m}$$
+7. **Full PDF Code Implementation for Beam Flexural & Shear Design:**
+   - **Continuous $A_{s,\text{min}}$ Requirement:** Continuous top and bottom reinforcement ($n_{\text{min}} \Phi d_b$) extends uninterrupted from beam start to end.
+   - **Double Reinforcement with Continuous $A_{s,\text{min}}$ (`double_as_min`):** Solves exact quadratic equilibrium equations ($x_1, x_2, c, f_s' = 600 \cdot (c - d') / c, A_{s1}, M_n, \Phi M_n$) utilizing continuous top bars as compression steel.
+   - **Single Reinforcement Mode:** Full switchable support for singly reinforced sections ($K_u, \omega, \rho, A_{s,\text{calc}}, A_{s,\text{min}}$).
+   - **Maximum Rebar per Layer ($n_{\text{max}}$):** Strictly calculates maximum bar count per layer based on beam width, clear cover, and bar spacing per code equations.
+   - **4-Zone Shear Stirrup Design:** Complete classification across Zones 1–4 based on $V_u, \Phi V_c, V_s$ and maximum stirrup spacing limits.
+8. **Reference v2.0.0 Backup Preserved:**
+   - Complete reference backup of the previous release maintained in `xpert_studio_desktop/reference_v2_0_0/`.
+
+---
+
+## Previous Release: `v2.0.0-structural-bim-pro` (2026-11-16)
 **Release Title:** Full Excel Hordi Rib Design Dialog, Live Story Slab Thickness Linkage & Warning, Dedicated Rib vs Area Load Distinction, Persistent Beam Self-Weight & Masonry Wall Policies
 
 ### Key Features & Advancements in `v2.0.0-structural-bim-pro`:

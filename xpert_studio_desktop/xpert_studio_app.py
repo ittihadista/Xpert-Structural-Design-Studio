@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.0.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.1.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -61,10 +61,12 @@ from xpert_project_io import (
     propagate_ground_columns_to_all_stories,
     sync_story_to_dxf,
     validate_project_name,
+    compute_hollow_block_parameters,
     compute_smart_beam_tag_position,
     import_arch_dxf_underlay,
 )
 from xpert_structural_engine import (
+    STANDARD_WALL_THICKNESSES_CM,
     analyze_all_story_beams_and_columns,
     evaluate_story_thickness_and_optimization,
     get_slab_bounding_box,
@@ -104,7 +106,7 @@ class StartupDefaultsDialog(QDialog):
     """
     Startup Defaults Dialog (إعدادات البداية الافتراضية):
     1. Default Projects Root Storage Folder (مجلد مكان تخزين المشاريع).
-    2. Reinforcing Steel Bar Diameters Table (جدول أقطار حديد التسليح والكانات).
+    2. Reinforcing Steel Bar Diameters Table (جدول أقطار حديد التسليح والكانات — including Φ6 Stirrups & Φ32 Main Bars).
     Accessible from both the Startup Welcome Screen (Start Menu) and the top Menu Bar.
     """
 
@@ -137,14 +139,14 @@ class StartupDefaultsDialog(QDialog):
         top_bar_row = QHBoxLayout()
         top_bar_row.addWidget(QLabel("Default Stirrup Bar (الكانات):"))
         self.cb_def_stirrup = QComboBox()
-        self.cb_def_stirrup.addItems(["8", "10", "12"])
+        self.cb_def_stirrup.addItems(["6", "8", "10", "12"])
         self.cb_def_stirrup.setCurrentText(str(self.settings.get("default_stirrup_bar_mm", 8)))
         top_bar_row.addWidget(self.cb_def_stirrup)
         top_bar_row.addSpacing(18)
 
-        top_bar_row.addWidget(QLabel("Default Main Longitudinal Bar (التسليح الرئيسي):"))
+        top_bar_row.addWidget(QLabel("Default Main Longitudinal Bar (التسليح الطولي الرئيسي):"))
         self.cb_def_main = QComboBox()
-        self.cb_def_main.addItems(["12", "14", "16", "18", "20", "22", "25"])
+        self.cb_def_main.addItems(["12", "14", "16", "18", "20", "22", "25", "28", "32"])
         self.cb_def_main.setCurrentText(str(self.settings.get("default_main_bar_mm", 16)))
         top_bar_row.addWidget(self.cb_def_main)
         top_bar_row.addStretch(1)
@@ -221,19 +223,29 @@ class StartupDefaultsDialog(QDialog):
 class StudioOptionsDialog(QDialog):
     """
     Options Dialog (خيارات المواد وبيانات سقف الهوردي):
-    1. Material Properties (خواص المواد: f'c, Fy, Fyt, γ_c, q_all).
-    2. Hollow-Block Slab Data (بيانات سقف الهوردي: Slab Thickness, Top Flange, Block Dimensions, Rib Width, Slab Load q_u, Wall Load).
+    1. Material Properties (خواص المواد: f'c, Fy, Fyt, γ_c = 24 kN/m³, q_all).
+    2. Hollow-Block Slab Data (بيانات سقف الهوردي: Slab Thickness h = 30 cm, Topping Slab hs = 10 cm,
+       Block Dimensions 40×25×20 cm, Rib Width bw = 15 cm, Finish Load = 1.5 kN/m², Live Load = 2.0 kN/m²,
+       Wu(rib) = 6.44 kN/m'/rib, Wu(m×m) = 11.71 kN/m²).
     Accessible from both the Startup Welcome Screen (Start Menu) and the top Menu Bar.
     """
 
-    def __init__(self, parent: Optional[QWidget] = None, active_project: Optional[Dict[str, Any]] = None, active_story: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        active_project: Optional[Dict[str, Any]] = None,
+        active_story: Optional[Dict[str, Any]] = None,
+        master_project: Optional[Dict[str, Any]] = None,
+        current_story_data: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Options — Material Properties & Hollow-Block Slab Data (ACI 318-19)")
-        self.setMinimumWidth(640)
+        self.setMinimumWidth(660)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.settings = load_studio_global_settings()
-        self.active_project = active_project
-        self.active_story = active_story
+        self.active_project = active_project if active_project is not None else master_project
+        self.active_story = active_story if active_story is not None else current_story_data
+        self._updating_fields = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -247,6 +259,14 @@ class StudioOptionsDialog(QDialog):
         hb_cfg = dict(self.settings.get("hollow_block_slab_data", {}))
         if self.active_project and isinstance(self.active_project.get("hollow_block_slab_data"), dict):
             hb_cfg.update(self.active_project["hollow_block_slab_data"])
+        if self.active_story and isinstance(self.active_story.get("hollow_block"), dict):
+            st_hb = self.active_story["hollow_block"]
+            hb_cfg["slab_thickness_cm"] = st_hb.get("total_thickness_cm", hb_cfg.get("slab_thickness_cm", 30.0))
+            hb_cfg["top_compression_slab_cm"] = st_hb.get("topping_thickness_cm", hb_cfg.get("top_compression_slab_cm", 10.0))
+            hb_cfg["rib_width_cm"] = st_hb.get("rib_width_cm", hb_cfg.get("rib_width_cm", 15.0))
+            hb_cfg["block_width_cm"] = st_hb.get("block_width_cm", hb_cfg.get("block_width_cm", 40.0))
+            hb_cfg["finish_load_kn_m2"] = st_hb.get("finishing_load_kpa", hb_cfg.get("finish_load_kn_m2", 1.5))
+            hb_cfg["live_load_kn_m2"] = st_hb.get("live_load_kpa", hb_cfg.get("live_load_kn_m2", 2.0))
 
         grp_mat = QGroupBox("1. Material Properties & Soil Bearing (خواص المواد وقدرة تحمل التربة)")
         form_m = QFormLayout(grp_mat)
@@ -271,7 +291,7 @@ class StudioOptionsDialog(QDialog):
 
         self.sp_gamma = QDoubleSpinBox()
         self.sp_gamma.setRange(18.0, 30.0)
-        self.sp_gamma.setValue(float(mat_cfg.get("concrete_unit_weight_kn_m3", 25.0)))
+        self.sp_gamma.setValue(float(mat_cfg.get("concrete_unit_weight_kn_m3", mat_cfg.get("gamma_c_kn_m3", 24.0))))
         self.sp_gamma.setSuffix(" kN/m³")
         form_m.addRow("Reinforced Concrete Unit Weight γ_c:", self.sp_gamma)
 
@@ -288,21 +308,21 @@ class StudioOptionsDialog(QDialog):
         self.sp_slab_t = QDoubleSpinBox()
         self.sp_slab_t.setRange(16.0, 80.0)
         cur_t = float(self.active_story.get("adopted_slab_thickness_cm", hb_cfg.get("slab_thickness_cm", 30.0))) if self.active_story else float(hb_cfg.get("slab_thickness_cm", 30.0))
-        self.sp_slab_t.setValue(cur_t)
+        self.sp_slab_t.setValue(cur_t if cur_t >= 16.0 else 30.0)
         self.sp_slab_t.setSuffix(" cm")
         form_hb.addRow("Total Hollow-Block Slab Thickness (h):", self.sp_slab_t)
 
         self.sp_top_slab = QDoubleSpinBox()
         self.sp_top_slab.setRange(4.0, 15.0)
-        self.sp_top_slab.setValue(float(hb_cfg.get("top_compression_slab_cm", 5.0)))
+        self.sp_top_slab.setValue(float(hb_cfg.get("top_compression_slab_cm", 10.0)))
         self.sp_top_slab.setSuffix(" cm")
-        form_hb.addRow("Top Compression Slab Thickness (t_f):", self.sp_top_slab)
+        form_hb.addRow("Topping Slab Thickness (hs):", self.sp_top_slab)
 
         self.sp_block_h = QDoubleSpinBox()
         self.sp_block_h.setRange(10.0, 50.0)
-        self.sp_block_h.setValue(float(hb_cfg.get("block_height_cm", 20.0)))
+        self.sp_block_h.setValue(max(10.0, self.sp_slab_t.value() - self.sp_top_slab.value()))
         self.sp_block_h.setSuffix(" cm")
-        form_hb.addRow("Hollow Block Height (ارتفاع البلوك):", self.sp_block_h)
+        form_hb.addRow("Hollow Block Height (h - hs):", self.sp_block_h)
 
         blk_row = QHBoxLayout()
         self.sp_block_w = QDoubleSpinBox()
@@ -313,7 +333,7 @@ class StudioOptionsDialog(QDialog):
         self.sp_block_l.setRange(15.0, 50.0)
         self.sp_block_l.setValue(float(hb_cfg.get("block_length_cm", 25.0)))
         self.sp_block_l.setSuffix(" cm")
-        blk_row.addWidget(QLabel("Width:"))
+        blk_row.addWidget(QLabel("Width (S):"))
         blk_row.addWidget(self.sp_block_w)
         blk_row.addWidget(QLabel("× Length:"))
         blk_row.addWidget(self.sp_block_l)
@@ -323,37 +343,48 @@ class StudioOptionsDialog(QDialog):
         self.sp_rib_w.setRange(10.0, 30.0)
         self.sp_rib_w.setValue(float(hb_cfg.get("rib_width_cm", 15.0)))
         self.sp_rib_w.setSuffix(" cm")
-        form_hb.addRow("Concrete Rib Width (عرض العصب b_w):", self.sp_rib_w)
-
-        self.sp_slab_wu = QDoubleSpinBox()
-        self.sp_slab_wu.setRange(2.0, 40.0)
-        cur_wu = float(self.active_story.get("slab_factored_wu_kpa", hb_cfg.get("slab_factored_wu_kpa", 10.0))) if self.active_story else float(hb_cfg.get("slab_factored_wu_kpa", 10.0))
-        self.sp_slab_wu.setValue(cur_wu)
-        self.sp_slab_wu.setSuffix(" kN/m²")
-        form_hb.addRow("Factored Slab Load on Ribs (q_u):", self.sp_slab_wu)
+        form_hb.addRow("Concrete Rib Width (عرض العصب bw):", self.sp_rib_w)
 
         ld_row = QHBoxLayout()
         self.sp_finish = QDoubleSpinBox()
         self.sp_finish.setRange(0.0, 20.0)
-        self.sp_finish.setValue(float(hb_cfg.get("finish_load_kn_m2", 2.0)))
+        self.sp_finish.setValue(float(hb_cfg.get("finish_load_kn_m2", 1.5)))
         self.sp_finish.setSuffix(" kN/m²")
+        self.sp_finish_load = self.sp_finish
         self.sp_live = QDoubleSpinBox()
         self.sp_live.setRange(0.0, 50.0)
         self.sp_live.setValue(float(hb_cfg.get("live_load_kn_m2", 2.0)))
         self.sp_live.setSuffix(" kN/m²")
-        ld_row.addWidget(QLabel("Finish:"))
+        ld_row.addWidget(QLabel("W_finishing:"))
         ld_row.addWidget(self.sp_finish)
-        ld_row.addWidget(QLabel("Live:"))
+        ld_row.addWidget(QLabel("Live Load (LL):"))
         ld_row.addWidget(self.sp_live)
         form_hb.addRow("Floor Finish & Live Loads:", ld_row)
 
+        self.sp_slab_wu = QDoubleSpinBox()
+        self.sp_slab_wu.setRange(2.0, 40.0)
+        self.sp_slab_wu.setDecimals(2)
+        cur_wu = float(self.active_story.get("slab_factored_wu_kpa", hb_cfg.get("slab_factored_wu_kpa", 11.71))) if self.active_story else float(hb_cfg.get("slab_factored_wu_kpa", 11.71))
+        self.sp_slab_wu.setValue(cur_wu)
+        self.sp_slab_wu.setSuffix(" kN/m²")
+        form_hb.addRow("Factored Slab Load to Beams Wu(m×m):", self.sp_slab_wu)
+
+        self.lbl_rib_wu_preview = QLabel("Wu(rib) = 6.44 kN/m'/rib  |  Wu(m×m) = 11.71 kN/m²")
+        self.lbl_rib_wu_preview.setStyleSheet("color: #15803D; font-weight: bold;")
+        self.lbl_computed_qu = self.lbl_rib_wu_preview
+        form_hb.addRow("Calculated Rib & Area Load:", self.lbl_rib_wu_preview)
+
         self.sp_wall_w = QDoubleSpinBox()
         self.sp_wall_w.setRange(0.0, 60.0)
-        cur_wall = float(self.active_story.get("default_wall_load_kn_m", hb_cfg.get("default_wall_load_kn_m", 10.0))) if self.active_story else float(hb_cfg.get("default_wall_load_kn_m", 10.0))
+        cur_wall = float(self.active_story.get("default_wall_load_kn_m", hb_cfg.get("default_wall_load_kn_m", 10.50))) if self.active_story else float(hb_cfg.get("default_wall_load_kn_m", 10.50))
         self.sp_wall_w.setValue(cur_wall)
         self.sp_wall_w.setSuffix(" kN/m")
-        form_hb.addRow("Default Masonry Wall Load (w_Wall):", self.sp_wall_w)
+        form_hb.addRow("Default 20cm Masonry Wall Load (W_wall):", self.sp_wall_w)
         vbox.addWidget(grp_hb)
+
+        for sp_w in (self.sp_slab_t, self.sp_top_slab, self.sp_block_w, self.sp_block_l, self.sp_rib_w, self.sp_finish, self.sp_live, self.sp_gamma):
+            sp_w.valueChanged.connect(self._recompute_hordi_loads_live)
+        self._recompute_hordi_loads_live()
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btn_ok = btns.button(QDialogButtonBox.StandardButton.Ok)
@@ -363,14 +394,50 @@ class StudioOptionsDialog(QDialog):
         btns.rejected.connect(self.reject)
         vbox.addWidget(btns)
 
+    def _recompute_hordi_loads_live(self) -> None:
+        if self._updating_fields:
+            return
+        self._updating_fields = True
+        try:
+            h_cm = self.sp_slab_t.value()
+            hs_cm = self.sp_top_slab.value()
+            self.sp_block_h.setValue(max(5.0, h_cm - hs_cm))
+            res = compute_hollow_block_parameters(
+                slab_thickness_cm=h_cm,
+                rib_width_cm=self.sp_rib_w.value(),
+                block_width_cm=self.sp_block_w.value(),
+                block_length_cm=self.sp_block_l.value(),
+                finish_load_kn_m2=self.sp_finish.value(),
+                live_load_kn_m2=self.sp_live.value(),
+                top_flange_cm=hs_cm,
+                gamma_c_kn_m3=self.sp_gamma.value(),
+            )
+            self.sp_slab_wu.setValue(float(res["total_factored_wu_kn_m2"]))
+            self.lbl_rib_wu_preview.setText(
+                f"Wu(rib) = {res['wu_rib_kn_m']:.2f} kN/m'/rib  |  Wu(m×m) = {res['total_factored_wu_kn_m2']:.2f} kN/m²"
+            )
+        finally:
+            self._updating_fields = False
+
     def _on_save(self) -> None:
         mat_data = {
             "fc_mpa": round(self.sp_fc.value(), 2),
             "fy_mpa": round(self.sp_fy.value(), 2),
             "fy_stirrups_mpa": round(self.sp_fyt.value(), 2),
             "concrete_unit_weight_kn_m3": round(self.sp_gamma.value(), 2),
+            "gamma_c_kn_m3": round(self.sp_gamma.value(), 2),
             "soil_bearing_qall_kn_m2": round(self.sp_qall.value(), 2),
         }
+        hordi_res = compute_hollow_block_parameters(
+            slab_thickness_cm=self.sp_slab_t.value(),
+            rib_width_cm=self.sp_rib_w.value(),
+            block_width_cm=self.sp_block_w.value(),
+            block_length_cm=self.sp_block_l.value(),
+            finish_load_kn_m2=self.sp_finish.value(),
+            live_load_kn_m2=self.sp_live.value(),
+            top_flange_cm=self.sp_top_slab.value(),
+            gamma_c_kn_m3=self.sp_gamma.value(),
+        )
         hb_data = {
             "slab_thickness_cm": round(self.sp_slab_t.value(), 1),
             "top_compression_slab_cm": round(self.sp_top_slab.value(), 1),
@@ -379,6 +446,7 @@ class StudioOptionsDialog(QDialog):
             "block_length_cm": round(self.sp_block_l.value(), 1),
             "rib_width_cm": round(self.sp_rib_w.value(), 1),
             "slab_factored_wu_kpa": round(self.sp_slab_wu.value(), 2),
+            "wu_rib_kn_m": round(hordi_res["wu_rib_kn_m"], 2),
             "finish_load_kn_m2": round(self.sp_finish.value(), 2),
             "live_load_kn_m2": round(self.sp_live.value(), 2),
             "default_wall_load_kn_m": round(self.sp_wall_w.value(), 2),
@@ -390,10 +458,29 @@ class StudioOptionsDialog(QDialog):
         if self.active_project is not None:
             self.active_project.setdefault("materials_and_soil", {}).update(mat_data)
             self.active_project["hollow_block_slab_data"] = dict(hb_data)
+            loads_def = self.active_project.setdefault("loads_and_defaults", {})
+            loads_def["finish_load_kn_m2"] = hb_data["finish_load_kn_m2"]
+            loads_def["live_load_kn_m2"] = hb_data["live_load_kn_m2"]
+            loads_def["rib_width_cm"] = hb_data["rib_width_cm"]
+            loads_def["hollow_block_defaults"] = dict(hordi_res)
         if self.active_story is not None:
             self.active_story["adopted_slab_thickness_cm"] = hb_data["slab_thickness_cm"]
             self.active_story["slab_factored_wu_kpa"] = hb_data["slab_factored_wu_kpa"]
             self.active_story["default_wall_load_kn_m"] = hb_data["default_wall_load_kn_m"]
+            self.active_story["hollow_block_params"] = dict(hordi_res)
+            self.active_story["hollow_block"] = {
+                "total_thickness_cm": hb_data["slab_thickness_cm"],
+                "topping_thickness_cm": hb_data["top_compression_slab_cm"],
+                "block_height_cm": hb_data["block_height_cm"],
+                "rib_width_cm": hb_data["rib_width_cm"],
+                "rib_width_top_cm": hb_data["rib_width_cm"],
+                "block_width_cm": hb_data["block_width_cm"],
+                "gamma_c_kn_m3": mat_data["gamma_c_kn_m3"],
+                "finishing_load_kpa": hb_data["finish_load_kn_m2"],
+                "live_load_kpa": hb_data["live_load_kn_m2"],
+                "wu_rib_kn_m": hb_data["wu_rib_kn_m"],
+                "factored_wu_kpa": hb_data["slab_factored_wu_kpa"],
+            }
 
         self.accept()
 
@@ -617,7 +704,7 @@ class NewProjectSetupDialog(QDialog):
 
         self.sp_finish = QDoubleSpinBox()
         self.sp_finish.setRange(0.0, 20.0)
-        self.sp_finish.setValue(float(hb_cfg.get("finish_load_kn_m2", 2.0)))
+        self.sp_finish.setValue(float(hb_cfg.get("finish_load_kn_m2", 1.5)))
         self.sp_finish.setSuffix(" kN/m²")
         form_mat.addRow("Floor Finish Load:", self.sp_finish)
 
@@ -726,16 +813,30 @@ class SlabRibDesignDialog(QDialog):
 
     def __init__(
         self,
-        parent_studio: "XpertStudioMainWindow",
-        story_data: Dict[str, Any],
+        parent_studio: Optional["XpertStudioMainWindow"] = None,
+        story_data: Optional[Dict[str, Any]] = None,
         initial_slab_id: Optional[str] = None,
+        fc_mpa: Optional[float] = None,
+        fy_mpa: Optional[float] = None,
     ):
         super().__init__(parent_studio)
         self.studio = parent_studio
-        self.story_data = story_data
+        self.story_data = story_data if story_data is not None else (parent_studio.current_story_data if parent_studio else {})
         self.slabs = [s for s in self.story_data.get("slabs", []) if not s.get("is_void", False)]
-        self.fc_mpa = float(self.studio.master_project["materials_and_soil"]["fc_mpa"]) if self.studio.master_project else 20.0
-        self.fy_mpa = float(self.studio.master_project["materials_and_soil"]["fy_mpa"]) if self.studio.master_project else 350.0
+        if fc_mpa is not None:
+            self.fc_mpa = float(fc_mpa)
+        elif self.studio and self.studio.master_project:
+            self.fc_mpa = float(self.studio.master_project["materials_and_soil"]["fc_mpa"])
+        else:
+            self.fc_mpa = 20.0
+
+        if fy_mpa is not None:
+            self.fy_mpa = float(fy_mpa)
+        elif self.studio and self.studio.master_project:
+            self.fy_mpa = float(self.studio.master_project["materials_and_soil"]["fy_mpa"])
+        else:
+            self.fy_mpa = 350.0
+
         self.setWindowTitle("Design of Hollow-Block (Hordi) Rib Slab — Loads, Flexure, Shear & Cross-Section (ACI 318)")
         self.setMinimumSize(1120, 740)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
@@ -2962,7 +3063,9 @@ class BeamDiagramsViewWidget(QWidget):
         segs = get_beam_span_segments(bm)
         flags = ensure_beam_wall_flags(story_data, bm)
         thick_map = bm.setdefault("span_wall_thickness_cm", {})
-        default_t_cm = float(story_data.get("default_wall_thickness_cm", 20.0))
+        default_t_cm = int(round(float(story_data.get("default_wall_thickness_cm", 20.0))))
+        if default_t_cm not in STANDARD_WALL_THICKNESSES_CM:
+            default_t_cm = 20
         bid = str(bm["id"])
         for seg in segs:
             skey = str(seg["key"])
@@ -2974,21 +3077,27 @@ class BeamDiagramsViewWidget(QWidget):
             )
             self.span_chk_lay.addWidget(chk)
 
-            sp_tw = QDoubleSpinBox()
-            sp_tw.setRange(5.0, 60.0)
-            sp_tw.setSingleStep(5.0)
-            sp_tw.setDecimals(0)
-            sp_tw.setSuffix("cm wall")
-            sp_tw.setValue(float(thick_map.get(skey, default_t_cm)))
-            sp_tw.setEnabled(is_on)
-            sp_tw.setToolTip(f"Wall thickness on {seg['label']} (default 20 cm): W_wall = 2.5 × (t_wall/20) × H × 1.4")
-            sp_tw.setStyleSheet(
-                "QDoubleSpinBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; padding: 1px 4px; font-weight: bold; }"
+            cb_tw = QComboBox()
+            for std_cm in STANDARD_WALL_THICKNESSES_CM:
+                cb_tw.addItem(f"{std_cm} cm wall", float(std_cm))
+            cur_cm = int(round(float(thick_map.get(skey, default_t_cm))))
+            if cur_cm not in STANDARD_WALL_THICKNESSES_CM:
+                cur_cm = min(STANDARD_WALL_THICKNESSES_CM, key=lambda v: abs(v - cur_cm))
+            cb_tw.setCurrentIndex(STANDARD_WALL_THICKNESSES_CM.index(cur_cm))
+            cb_tw.setEnabled(is_on)
+            cb_tw.setToolTip(
+                f"Standard wall thickness on {seg['label']} (10, 15, 20, 30, 40 cm): W_wall = (2.5 × H × 1.4) × (t_wall / 20)"
             )
-            sp_tw.valueChanged.connect(
-                lambda val, b_id=bid, k=skey: self._on_span_wall_thickness_changed(b_id, k, val)
+            cb_tw.setStyleSheet(
+                "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; padding: 1px 6px; font-weight: bold; } "
+                "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; }"
             )
-            self.span_chk_lay.addWidget(sp_tw)
+            cb_tw.currentIndexChanged.connect(
+                lambda idx_cb, combo=cb_tw, b_id=bid, k=skey: self._on_span_wall_thickness_changed(
+                    b_id, k, float(combo.itemData(idx_cb) or 20.0)
+                )
+            )
+            self.span_chk_lay.addWidget(cb_tw)
             self._span_wall_checkboxes.append((skey, chk))
 
     def _on_span_wall_flag_toggled(self, beam_id: str, span_key: str, checked: bool) -> None:
@@ -3448,18 +3557,41 @@ class BeamDesignDetailWidget(QWidget):
         top_lay.setContentsMargins(8, 6, 8, 6)
         top_lay.setSpacing(10)
 
-        lbl = QLabel("Select Beam for ACI 318-19 R.C. Design & Longitudinal Elevation:")
+        lbl = QLabel("Select Beam:")
         lbl.setStyleSheet("color: #0284C7; font-weight: bold;")
         top_lay.addWidget(lbl)
 
         self.cb_beam_select = QComboBox()
-        self.cb_beam_select.setMinimumWidth(320)
+        self.cb_beam_select.setMinimumWidth(260)
         self.cb_beam_select.setStyleSheet(
             "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
             "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; }"
         )
         self.cb_beam_select.currentIndexChanged.connect(self._on_beam_selected)
         top_lay.addWidget(self.cb_beam_select)
+
+        top_lay.addWidget(QLabel("Flexural Method:"))
+        self.cb_design_mode = QComboBox()
+        self.cb_design_mode.addItem("Double Reinf. (with Continuous As,min)", "double")
+        self.cb_design_mode.addItem("Single Reinforcement (Singly Reinf.)", "single")
+        self.cb_design_mode.setStyleSheet(
+            "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
+            "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; }"
+        )
+        self.cb_design_mode.currentIndexChanged.connect(self._on_design_params_changed)
+        top_lay.addWidget(self.cb_design_mode)
+
+        top_lay.addWidget(QLabel("Main Bar Φ:"))
+        self.cb_bar_dia = QComboBox()
+        for d_mm in [12, 14, 16, 18, 20, 22, 25, 28, 32]:
+            self.cb_bar_dia.addItem(f"Φ{d_mm} mm", d_mm)
+        self.cb_bar_dia.setCurrentIndex(2)  # Default Φ16
+        self.cb_bar_dia.setStyleSheet(
+            "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
+            "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; }"
+        )
+        self.cb_bar_dia.currentIndexChanged.connect(self._on_design_params_changed)
+        top_lay.addWidget(self.cb_bar_dia)
 
         self.lbl_rc_summary = QLabel("Select a beam to view its longitudinal reinforcement & section.")
         self.lbl_rc_summary.setStyleSheet("color: #15803D; font-weight: bold;")
@@ -3472,6 +3604,24 @@ class BeamDesignDetailWidget(QWidget):
         self.rc_view.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
         self.rc_view.setStyleSheet("border: 1px solid #CBD5E1; background: #FFFFFF;")
         vbox.addWidget(self.rc_view, 1)
+
+    def _on_design_params_changed(self, _idx: int = 0) -> None:
+        idx = self.cb_beam_select.currentIndex()
+        if idx < 0:
+            return
+        bid = str(self.cb_beam_select.itemData(idx))
+        story = self.studio.current_story_data
+        bm = next((b for b in story.get("beams", []) if str(b["id"]) == bid), None)
+        if bm is None:
+            return
+        mode_val = str(self.cb_design_mode.currentData() or "double")
+        dia_val = int(self.cb_bar_dia.currentData() or 16)
+        bm["design_mode"] = mode_val
+        bm["main_bar_dia_mm"] = dia_val
+        story["beam_design_mode"] = mode_val
+        story["default_main_bar_dia_mm"] = dia_val
+        self.studio.save_and_sync_current_story()
+        self.studio._solve_story_and_refresh_views(select_beam_id=bid)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -3516,11 +3666,24 @@ class BeamDesignDetailWidget(QWidget):
         if not res or not des or bm is None:
             return
 
+        # Sync design mode & main bar Φ selectors without firing signals
+        cur_mode = str(bm.get("design_mode", des.get("design_mode", story.get("beam_design_mode", "double")))).lower()
+        cur_dia = int(bm.get("main_bar_dia_mm", des.get("main_bar_dia_mm", story.get("default_main_bar_dia_mm", 16))))
+        self.cb_design_mode.blockSignals(True)
+        self.cb_design_mode.setCurrentIndex(1 if cur_mode == "single" else 0)
+        self.cb_design_mode.blockSignals(False)
+        self.cb_bar_dia.blockSignals(True)
+        dia_idx = self.cb_bar_dia.findData(cur_dia)
+        if dia_idx >= 0:
+            self.cb_bar_dia.setCurrentIndex(dia_idx)
+        self.cb_bar_dia.blockSignals(False)
+
         as_pos = des.get("as_pos_req_mm2", des.get("as_pos_req", 0.0))
         as_neg = des.get("as_neg_req_mm2", des.get("as_neg_req", 0.0))
+        cont_bars = des.get("continuous_min_bars", "2 Φ 16")
         st_txt = des.get("status", "OK (ACI 318-19)")
         self.lbl_rc_summary.setText(
-            f"Beam {bid} ({des.get('num_spans', 1)} Spans Excl. Cantilevers): "
+            f"Beam {bid} [{cur_mode.upper()}]: Cont. As,min = {cont_bars} ({des.get('as_min_mm2', 0.0):.0f} mm²) | "
             f"Bot = {des.get('bottom_bars')} ({as_pos} mm²) | "
             f"Top = {des.get('top_bars')} ({as_neg} mm²) | "
             f"Stirrups = {des.get('stirrups')} [{st_txt}]"
@@ -3546,8 +3709,8 @@ class BeamDesignDetailWidget(QWidget):
         y_bot = y_top + h_px
 
         hdr = sc.addText(
-            f"Longitudinal Reinforcement & Stirrup Elevation — Beam {bid} ({bm.get('beam_kind', 'hidden').upper()} {b_m:.2f}×{h_m:.2f}m)",
-            QFont("Arial", 13, QFont.Weight.Bold),
+            f"Longitudinal Reinforcement & Stirrup Elevation — Beam {bid} ({bm.get('beam_kind', 'hidden').upper()} {b_m:.2f}×{h_m:.2f}m | Cont. As,min = {cont_bars} Top & Bot)",
+            QFont("Arial", 12, QFont.Weight.Bold),
         )
         hdr.setDefaultTextColor(QColor("#0B3C5D"))
         hdr.setPos(x0 - 20, 22)
@@ -3607,7 +3770,7 @@ class BeamDesignDetailWidget(QWidget):
             sx = x_beam_left + (w_beam_phys_px * i_s / n_stirs)
             sc.addLine(sx, y_top + 12, sx, y_bot - 12, stir_pen)
 
-        # Draw Bottom Main Steel Bar (Blue) & Top Support Steel Bar (Crimson/Orange) with 90° End Hooks at Outer Support Faces
+        # Draw Continuous Bottom & Top As,min Steel Bars (Full Length from Start to End with 90° End Hooks)
         cover_px = 10.0
         bar_x1 = x_beam_left + cover_px
         bar_x2 = x_beam_right - cover_px
@@ -3626,28 +3789,32 @@ class BeamDesignDetailWidget(QWidget):
         sc.addLine(bar_x1, top_bar_y, bar_x1, top_bar_y + h_px * 0.48, QPen(QColor("#EA580C"), 3.0))
         sc.addLine(bar_x2, top_bar_y, bar_x2, top_bar_y + h_px * 0.48, QPen(QColor("#EA580C"), 3.0))
 
-        # Per-Span Bottom Reinforcement & Stirrup Callouts
+        # Per-Span Bottom Reinforcement (Continuous As,min + Additional Bars) & Stirrup Callouts
         span_designs = des.get("span_designs", [])
         segs = get_beam_span_segments(bm)
         for i_sp, seg in enumerate(segs):
             mx_px = x0 + ((seg["start_m"] + seg["end_m"]) / 2.0) * scale_x
             sp_des = span_designs[min(i_sp, len(span_designs) - 1)] if span_designs else {}
             bot_txt = sp_des.get("bottom_bars", des.get("bottom_bars", "4 Φ 16"))
+            bot_add = sp_des.get("bottom_additional_bars", "None")
             stir_txt = sp_des.get("stirrups", des.get("stirrups", "Φ8 @ 150 mm"))
+            add_line = f" (Cont. {cont_bars} + Add. {bot_add})" if bot_add != "None" else f" (Cont. {cont_bars})"
 
             blbl = sc.addText(
-                f"{seg['label']} ({seg['length_m']:.2f}m)\nBot: {bot_txt}\nStirrups: {stir_txt}",
-                QFont("Arial", 9, QFont.Weight.Bold),
+                f"{seg['label']} ({seg['length_m']:.2f}m)\nBot: {bot_txt}{add_line}\nStirrups: {stir_txt}",
+                QFont("Arial", 8, QFont.Weight.Bold),
             )
             blbl.setDefaultTextColor(QColor("#0369A1"))
-            blbl.setPos(mx_px - 62, y_bot + 8)
+            blbl.setPos(mx_px - 74, y_bot + 8)
 
-        # Per-Support Top Reinforcement Callouts
+        # Per-Support Top Reinforcement Callouts (Continuous As,min + Additional Top Bars)
         sup_designs = des.get("support_designs", [])
         for i_s, sup in enumerate(sup_table):
             sx_px = x0 + float(sup["x_m"]) * scale_x
             s_des = sup_designs[i_s] if i_s < len(sup_designs) else {}
             top_txt = s_des.get("top_bars", des.get("top_bars", "4 Φ 16"))
+            top_add = s_des.get("top_additional_bars", "None")
+            top_add_str = f" [+{top_add} Add.]" if top_add != "None" else ""
             sc.addLine(
                 max(bar_x1, sx_px - 65),
                 top_bar_y + 4,
@@ -3656,11 +3823,11 @@ class BeamDesignDetailWidget(QWidget):
                 QPen(QColor("#DC2626"), 3.8),
             )
             tlbl = sc.addText(
-                f"{sup['target_id']} Top:\n{top_txt}\n(-Mu={s_des.get('mu_neg_face_knm', 0.0):.1f}kNm)",
+                f"{sup['target_id']} Top: {top_txt}{top_add_str}\n(-Mu={s_des.get('mu_neg_face_knm', 0.0):.1f}kNm)",
                 QFont("Arial", 8, QFont.Weight.Bold),
             )
             tlbl.setDefaultTextColor(QColor("#B91C1C"))
-            tlbl.setPos(sx_px - 46, y_top - 68)
+            tlbl.setPos(sx_px - 54, y_top - 68)
 
         # Draw Cross-Section A-A on the Right Side
         sec_x = x_beam_right + 55.0
@@ -3676,20 +3843,31 @@ class BeamDesignDetailWidget(QWidget):
             QPen(QColor("#059669"), 2.0),
             QBrush(Qt.BrushStyle.NoBrush),
         )
-        # Draw 4 top and 4 bottom rebar circles inside Section A-A
-        for i_bar in range(4):
-            bx = sec_x + 22 + (sec_w - 44) * (i_bar / 3.0)
+        # Draw top and bottom rebar circles inside Section A-A
+        n_top_draw = max(2, min(6, int(des.get("n_bars_neg_total", 4))))
+        n_bot_draw = max(2, min(6, int(des.get("n_bars_pos_total", 4))))
+        for i_bar in range(n_top_draw):
+            bx = sec_x + 22 + (sec_w - 44) * (i_bar / max(1.0, float(n_top_draw - 1)))
             sc.addEllipse(QRectF(bx - 5, sec_y + 17, 10, 10), QPen(QColor("#991B1B"), 1.2), QBrush(QColor("#DC2626")))
+        for i_bar in range(n_bot_draw):
+            bx = sec_x + 22 + (sec_w - 44) * (i_bar / max(1.0, float(n_bot_draw - 1)))
             sc.addEllipse(QRectF(bx - 5, sec_y + sec_h - 27, 10, 10), QPen(QColor("#0369A1"), 1.2), QBrush(QColor("#0284C7")))
 
+        pos_f = des.get("pos_flexure_details", {})
         sec_info = sc.addText(
-            f"Top: {des.get('top_bars')}\nBot: {des.get('bottom_bars')}\nStir: {des.get('stirrups')}",
-            QFont("Arial", 9, QFont.Weight.Bold),
+            f"Top: {des.get('top_bars')}\n"
+            f"  (Cont. {cont_bars} + Add. {des.get('top_additional_bars', 'None')})\n"
+            f"Bot: {des.get('bottom_bars')}\n"
+            f"  (Cont. {cont_bars} + Add. {des.get('bottom_additional_bars', 'None')})\n"
+            f"Max Bars/Layer (n_max): {des.get('n_max_per_layer', 4)}\n"
+            f"Stir: {des.get('stirrups')} ({des.get('shear_zone', '')})\n"
+            f"C = {pos_f.get('C_mm', 0.0):.1f} mm | fs' = {pos_f.get('fs_prime_mpa', 0.0):.1f} MPa",
+            QFont("Arial", 8, QFont.Weight.Bold),
         )
         sec_info.setDefaultTextColor(QColor("#0F172A"))
-        sec_info.setPos(sec_x, sec_y + sec_h + 12)
+        sec_info.setPos(sec_x, sec_y + sec_h + 10)
 
-        sc.setSceneRect(0, 0, sec_x + sec_w + 45, max(vp_h - 20.0, y_bot + 150.0))
+        sc.setSceneRect(0, 0, sec_x + sec_w + 65, max(vp_h - 20.0, y_bot + 165.0))
 
 
 class SchedulesAndReportsWidget(QWidget):
@@ -4901,10 +5079,12 @@ class XpertStudioMainWindow(QMainWindow):
     def _check_and_apply_slab_thickness(self, interactive: bool = True) -> float:
         """
         v2.0.0: Evaluates the entered slab thickness in `sp_adopted_thick` (default 30.0 cm)
-        against the calculated minimum thickness from the floor plan (`calculated_min_thickness_cm`).
-        If entered < calculated_min_thickness_cm and `interactive=True`, shows a warning dialog
+        against the calculated minimum thickness from the floor plan (`calculated_min_thickness_cm`,
+        always rounded UP to the nearest integer centimeter via math.ceil).
+        If entered < calculated_min_thickness_cm and `interactive=True`, shows a ONE-TIME warning dialog
         giving the user two explicit choices:
-          1. Continue with entered thickness (`الاستمرار بالسمك المدخل`) -> keep entered value.
+          1. Continue with entered thickness (`الاستمرار بالسمك المدخل`) -> keep entered value and record
+             `thickness_warning_acknowledged_cm = entered` so the warning does NOT pop up repeatedly.
           2. Modify thickness to calculated minimum (`تعديل السمك إلى القيمة المحسوبة`) -> update spinbox & story thickness.
         Then updates `adopted_slab_thickness_cm`, hidden beam depths, and Hordi area load `Wu (m×m)`.
         """
@@ -4914,30 +5094,42 @@ class XpertStudioMainWindow(QMainWindow):
         eval_res = evaluate_story_thickness_and_optimization(self.current_story_data, fy)
         entered = float(self.sp_adopted_thick.value())
         req = float(eval_res.get("calculated_min_thickness_cm", 0.0))
+        ack_cm = self.current_story_data.get("thickness_warning_acknowledged_cm")
+        already_acknowledged = (ack_cm is not None) and (abs(float(ack_cm) - entered) <= 1e-3)
 
-        if interactive and "--check" not in sys.argv and eval_res.get("has_data") and entered < req - 1e-4:
+        if (
+            interactive
+            and "--check" not in sys.argv
+            and eval_res.get("has_data")
+            and entered < req - 1e-4
+            and not already_acknowledged
+        ):
             msg_box = QMessageBox(self)
             msg_box.setIcon(QMessageBox.Icon.Warning)
             msg_box.setWindowTitle("تحذير الحد الأدنى لسمك السقف الهوردي (Minimum Slab Thickness Warning)")
             msg_box.setText(
-                f"السمك المدخل للسقف ({entered:.1f} cm) أقل من السمك الأدنى المسموح به والمحسوب من المسقط "
-                f"({req:.1f} cm) والمحكوم بالعنصر: {eval_res.get('governing_member', '')}.\n\n"
-                f"Launched thickness ({entered:.1f} cm) is less than the calculated minimum thickness ({req:.1f} cm).\n\n"
+                f"السمك المدخل للسقف ({entered:.0f} cm) أقل من السمك الأدنى المسموح به والمحسوب من المسقط "
+                f"({req:.0f} cm) والمحكوم بالعنصر: {eval_res.get('governing_member', '')}.\n\n"
+                f"Entered slab thickness ({entered:.0f} cm) is less than the calculated minimum thickness ({req:.0f} cm).\n\n"
                 f"اختر الإجراء المطلوب لحساب الأحمال والتصميم:"
             )
             btn_continue = msg_box.addButton(
-                f"الاستمرار بالسمك المدخل ({entered:.1f} cm)", QMessageBox.ButtonRole.AcceptRole
+                f"الاستمرار بالسمك المدخل ({entered:.0f} cm)", QMessageBox.ButtonRole.AcceptRole
             )
             btn_modify = msg_box.addButton(
-                f"تعديل السمك إلى ({req:.1f} cm) وحساب الأحمال", QMessageBox.ButtonRole.ActionRole
+                f"تعديل السمك إلى ({req:.0f} cm) وحساب الأحمال", QMessageBox.ButtonRole.ActionRole
             )
             msg_box.setDefaultButton(btn_modify)
             msg_box.exec()
             if msg_box.clickedButton() == btn_modify:
-                entered = round(req, 1)
+                entered = float(math.ceil(req - 1e-6))
                 self.sp_adopted_thick.blockSignals(True)
                 self.sp_adopted_thick.setValue(entered)
                 self.sp_adopted_thick.blockSignals(False)
+                self.current_story_data["thickness_warning_acknowledged_cm"] = None
+            elif msg_box.clickedButton() == btn_continue:
+                # User explicitly chose to continue with this thickness — do NOT warn again for this thickness!
+                self.current_story_data["thickness_warning_acknowledged_cm"] = entered
 
         self.current_story_data["adopted_slab_thickness_cm"] = entered
         h_m = round(entered / 100.0, 3)
@@ -4945,14 +5137,35 @@ class XpertStudioMainWindow(QMainWindow):
             kind_str = str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower()
             if "drop" not in kind_str:
                 bm["depth_m"] = h_m
-        if self.master_project and isinstance(self.master_project.get("hollow_block_slab_options"), dict):
-            hb = self.master_project["hollow_block_slab_options"]
-            hb["total_slab_thickness_cm"] = entered
-            hb_res = compute_hollow_block_slab_loads(hb)
-            hb.update(hb_res)
-            self.current_story_data["hollow_block_slab_options"] = dict(hb)
-            assump = self.current_story_data.setdefault("beam_load_assumptions", {})
-            assump["slab_qu_kn_m2"] = float(hb_res["area_factored_qu_kn_m2"])
+        hb_src: Dict[str, Any] = {}
+        if self.master_project:
+            if isinstance(self.master_project.get("hollow_block_slab_options"), dict):
+                hb_src.update(self.master_project["hollow_block_slab_options"])
+            elif isinstance(self.master_project.get("loads_and_defaults"), dict):
+                hb_src.update(self.master_project["loads_and_defaults"])
+        if isinstance(self.current_story_data.get("hollow_block"), dict):
+            hb_src.update(self.current_story_data["hollow_block"])
+        if isinstance(self.current_story_data.get("hollow_block_slab_options"), dict):
+            hb_src.update(self.current_story_data["hollow_block_slab_options"])
+        hb_src["total_slab_thickness_cm"] = entered
+        hb_src["h_mm"] = entered * 10.0
+        hb_res = compute_hollow_block_parameters(hb_src)
+        hb_src.update(hb_res)
+        self.current_story_data["hollow_block_slab_options"] = dict(hb_src)
+        self.current_story_data["hollow_block_params"] = dict(hb_res)
+        self.current_story_data["hollow_block"] = dict(hb_res)
+        if self.master_project is not None:
+            self.master_project["hollow_block_slab_options"] = dict(hb_src)
+            ld_def = self.master_project.setdefault("loads_and_defaults", {})
+            ld_def["slab_factored_wu_kpa"] = float(hb_res["area_factored_qu_kn_m2"])
+            ld_def["wu_rib_kn_m"] = float(hb_res["rib_factored_wu_kn_m"])
+        assump = self.current_story_data.setdefault("beam_load_assumptions", {})
+        assump["slab_qu_kn_m2"] = float(hb_res["area_factored_qu_kn_m2"])
+        self.current_story_data["slab_factored_wu_kpa"] = float(hb_res["area_factored_qu_kn_m2"])
+        if hasattr(self, "sp_slab_qu"):
+            self.sp_slab_qu.blockSignals(True)
+            self.sp_slab_qu.setValue(float(hb_res["area_factored_qu_kn_m2"]))
+            self.sp_slab_qu.blockSignals(False)
         return entered
 
     def apply_story_thickness(self) -> None:
@@ -5315,7 +5528,7 @@ def main() -> None:
     if cli_project_path:
         master_data = load_studio_project_from_master_file(cli_project_path)
         win = XpertStudioMainWindow(initial_master_project=master_data)
-        win.show()
+        win.showMaximized()
         sys.exit(app.exec())
 
     welcome_dlg = StartupWelcomeDialog()
@@ -5331,7 +5544,7 @@ def main() -> None:
         master_data = initialize_studio_project(setup_dlg.get_config())
 
     win = XpertStudioMainWindow(initial_master_project=master_data)
-    win.show()
+    win.showMaximized()
     sys.exit(app.exec())
 
 

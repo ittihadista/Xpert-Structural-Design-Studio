@@ -77,8 +77,9 @@ def evaluate_story_thickness_and_optimization(
         ln = max(0.2, axis_l - lw / 2.0 - (0.0 if is_cant else rw / 2.0))
         cont = "cantilever" if is_cant else ("one_end_continuous" if conn_cant else "simply_supported")
         div = get_aci_deflection_divisor(cont)
-        req_cm = round((ln * 100.0 / div) * fy_mod, 2)
-        slab_reqs.append((req_cm, f"Slab Rib {sid} (Ln = {ln:.2f} m, L/{div:g})"))
+        raw_cm = round((ln * 100.0 / div) * fy_mod, 2)
+        req_cm = float(math.ceil(raw_cm - 1e-6))
+        slab_reqs.append((req_cm, f"Slab Rib {sid} (Ln = {ln:.2f} m, L/{div:g} = {raw_cm:.1f} -> {req_cm:.0f} cm)"))
 
     for bm in beams:
         if bm.get("beam_kind", "hidden") != "hidden":
@@ -103,9 +104,10 @@ def evaluate_story_thickness_and_optimization(
             else:
                 cont = "simply_supported"
             div = get_aci_deflection_divisor(cont)
-            req_cm = round((ln * 100.0 / div) * fy_mod, 2)
+            raw_cm = round((ln * 100.0 / div) * fy_mod, 2)
+            req_cm = float(math.ceil(raw_cm - 1e-6))
             hidden_beam_reqs.append(
-                (req_cm, bid, f"Hidden Beam {bid} (Span {idx + 1}, Ln = {ln:.2f} m, L/{div:g})", ln)
+                (req_cm, bid, f"Hidden Beam {bid} (Span {idx + 1}, Ln = {ln:.2f} m, L/{div:g} = {raw_cm:.1f} -> {req_cm:.0f} cm)", ln)
             )
 
     all_candidates: List[Tuple[float, str]] = list(slab_reqs) + [(r[0], r[2]) for r in hidden_beam_reqs]
@@ -113,13 +115,14 @@ def evaluate_story_thickness_and_optimization(
         return {
             "has_data": False,
             "calculated_min_thickness_cm": 0.0,
-            "badge_text": "20.0 cm (Drop Beams Only)",
+            "badge_text": "20 cm (Drop Beams Only)",
             "governing_member": "All beams are Drop Beams; minimum slab rib thickness applies.",
             "smart_optimization": None,
         }
 
     all_candidates.sort(key=lambda x: x[0], reverse=True)
     max_req_cm, gov_desc = all_candidates[0]
+    max_req_cm = float(math.ceil(max_req_cm - 1e-6))
 
     # Check Smart Drop-Beam Optimization Rule:
     # If max_req_cm > 30.0 cm AND governed by a Hidden Beam while all slabs & other beams <= 30.0 cm
@@ -139,19 +142,19 @@ def evaluate_story_thickness_and_optimization(
                 "beam_id": top_hb_id,
                 "governing_ln_m": round(top_hb_ln, 2),
                 "governing_req_cm": top_hb_cm,
-                "rest_of_floor_req_cm": round(rest_max_cm, 1),
+                "rest_of_floor_req_cm": round(rest_max_cm, 0),
                 "message": (
                     f"Optimization Suggestion: Hidden Beam {top_hb_id} (Ln = {top_hb_ln:.2f} m) "
-                    f"governs the slab thickness at {top_hb_cm:.1f} cm (> 30 cm), whereas the rest "
-                    f"of the floor requires only {rest_max_cm:.1f} cm (<= 30 cm). Converting {top_hb_id} "
-                    f"to a Drop Beam (20x50 cm) keeps the entire slab thickness at 30.0 cm."
+                    f"governs the slab thickness at {top_hb_cm:.0f} cm (> 30 cm), whereas the rest "
+                    f"of the floor requires only {rest_max_cm:.0f} cm (<= 30 cm). Converting {top_hb_id} "
+                    f"to a Drop Beam (20x50 cm) keeps the entire slab thickness at 30 cm."
                 ),
             }
 
     return {
         "has_data": True,
         "calculated_min_thickness_cm": max_req_cm,
-        "badge_text": f"{max_req_cm:.1f} cm",
+        "badge_text": f"{max_req_cm:.0f} cm",
         "governing_member": gov_desc,
         "smart_optimization": smart_opt,
     }
@@ -531,15 +534,28 @@ def get_beam_span_segments(beam: Dict[str, Any]) -> List[Dict[str, Any]]:
     return segments
 
 
+STANDARD_WALL_THICKNESSES_CM: List[int] = [10, 15, 20, 30, 40]
+
+
+def snap_standard_wall_thickness_cm(val_cm: float) -> float:
+    """
+    Snaps any wall thickness value to the nearest standard masonry wall thickness:
+    10 cm, 15 cm, 20 cm (default), 30 cm, or 40 cm.
+    """
+    raw = float(val_cm)
+    nearest = min(STANDARD_WALL_THICKNESSES_CM, key=lambda t: abs(float(t) - raw))
+    return float(nearest)
+
+
 def ensure_beam_wall_flags(story_data: Dict[str, Any], beam: Dict[str, Any]) -> Dict[str, bool]:
     """
     Ensures `beam['span_wall_flags']` has a boolean flag for each span and cantilever of `beam`,
     initializing missing flags from `story_data['wall_load_policy']` ('all_beams' -> True, 'no_walls' -> False).
-    Also initializes `beam['span_wall_thickness_cm']` (default 20.0 cm per span).
+    Also initializes `beam['span_wall_thickness_cm']` (default 20.0 cm per span from standard [10, 15, 20, 30, 40]).
     """
     policy = str(story_data.get("wall_load_policy", "all_beams"))
     default_flag = (policy != "no_walls")
-    default_t_cm = float(story_data.get("default_wall_thickness_cm", 20.0))
+    default_t_cm = snap_standard_wall_thickness_cm(float(story_data.get("default_wall_thickness_cm", 20.0)))
     flags: Dict[str, bool] = beam.setdefault("span_wall_flags", {})
     thick_map: Dict[str, float] = beam.setdefault("span_wall_thickness_cm", {})
     for seg in get_beam_span_segments(beam):
@@ -548,6 +564,8 @@ def ensure_beam_wall_flags(story_data: Dict[str, Any], beam: Dict[str, Any]) -> 
             flags[k] = default_flag
         if k not in thick_map:
             thick_map[k] = default_t_cm
+        else:
+            thick_map[k] = snap_standard_wall_thickness_cm(thick_map[k])
     return flags
 
 
@@ -569,8 +587,9 @@ def set_story_wall_load_policy(
     story_data["wall_load_policy"] = clean_policy
     story_h = float(story_data.get("height_m", 3.0))
     if wall_thickness_cm is not None:
-        story_data["default_wall_thickness_cm"] = round(max(5.0, float(wall_thickness_cm)), 1)
-    t_wall_def = float(story_data.get("default_wall_thickness_cm", 20.0))
+        story_data["default_wall_thickness_cm"] = snap_standard_wall_thickness_cm(float(wall_thickness_cm))
+    t_wall_def = snap_standard_wall_thickness_cm(float(story_data.get("default_wall_thickness_cm", 20.0)))
+    story_data["default_wall_thickness_cm"] = t_wall_def
     formula_wall_w = round(2.5 * (t_wall_def / 20.0) * story_h * 1.4, 2)
 
     if wall_load_kn_m is not None:
@@ -631,20 +650,20 @@ def set_beam_span_wall_thickness(
     wall_thickness_cm: float,
 ) -> Tuple[bool, str]:
     """
-    Sets custom masonry wall thickness `t_wall` (in cm, default 20.0 cm) for a specific span
-    (`span_1`, `span_2`, `cant_left`, `cant_right`, or integer index `1`, `2`) of `beam_id`,
-    updating W_wall = 2.5 * (t_wall/20) * H * 1.4.
+    Sets standard masonry wall thickness `t_wall` (from [10, 15, 20, 30, 40] cm, default 20 cm)
+    for a specific span (`span_1`, `span_2`, `cant_left`, `cant_right`, or integer index `1`, `2`) of `beam_id`,
+    updating W_wall = (2.5 * H * 1.4) * (t_wall / 20.0).
     """
     bm = next((b for b in story_data.get("beams", []) if b.get("id") == beam_id), None)
     if not bm:
         return False, f"Beam {beam_id} not found."
     ensure_beam_wall_flags(story_data, bm)
     skey = f"span_{span_key}" if str(span_key).isdigit() else str(span_key)
-    t_clean = round(max(5.0, min(60.0, float(wall_thickness_cm))), 1)
+    t_clean = snap_standard_wall_thickness_cm(float(wall_thickness_cm))
     bm.setdefault("span_wall_thickness_cm", {})[skey] = t_clean
     bm.pop("manual_loads_override", None)
     story_h = float(story_data.get("height_m", 3.0))
-    w_wall = round(2.5 * (t_clean / 20.0) * story_h * 1.4, 2)
+    w_wall = round((2.5 * story_h * 1.4) * (t_clean / 20.0), 2)
     return True, f"Beam {beam_id} ({skey}): Wall thickness set to {t_clean:.0f} cm (W_wall = {w_wall:.2f} kN/m)."
 
 
@@ -1328,18 +1347,38 @@ def analyze_all_story_beams_and_columns(
 
     beam_results: Dict[str, Dict[str, Any]] = {}
     beam_designs: Dict[str, Dict[str, Any]] = {}
+    story_design_mode = str(story_data.get("beam_design_mode", "double_as_min"))
+    story_main_db = int(story_data.get("default_main_bar_dia_mm", 16))
+    story_stir_db = int(story_data.get("default_stirrup_dia_mm", 8))
 
     for bid in ordered_ids:
         bm = beam_map[bid]
+        if "design_mode" not in bm:
+            bm["design_mode"] = story_design_mode
+        if "main_bar_dia_mm" not in bm:
+            bm["main_bar_dia_mm"] = story_main_db
+        if "stirrup_dia_mm" not in bm:
+            bm["stirrup_dia_mm"] = story_stir_db
         res = solve_continuous_beam_analytical(bm, fc_mpa, fy_mpa)
         res["loads_applied"] = [dict(ld) for ld in bm.get("loads", [])]
         beam_results[bid] = res
-        beam_designs[bid] = design_beam_aci318(bm, res, fc_mpa, fy_mpa)
+        beam_designs[bid] = design_beam_aci318(
+            bm,
+            res,
+            fc_mpa,
+            fy_mpa,
+            design_mode=str(bm.get("design_mode", story_design_mode)),
+            bar_dia_mm=int(bm.get("main_bar_dia_mm", story_main_db)),
+            stirrup_dia_mm=int(bm.get("stirrup_dia_mm", story_stir_db)),
+        )
 
         # Sync updated loads (including transferred point loads) back to story_data["beams"]
         for orig_b in orig_beams:
             if orig_b.get("id") == bid:
                 orig_b["loads"] = [dict(ld) for ld in bm.get("loads", [])]
+                orig_b["design_mode"] = bm["design_mode"]
+                orig_b["main_bar_dia_mm"] = bm["main_bar_dia_mm"]
+                orig_b["stirrup_dia_mm"] = bm["stirrup_dia_mm"]
                 break
 
         # Transfer reactions from this secondary beam onto any carrier beam it rests on
@@ -1465,87 +1504,265 @@ def design_beam_aci318(
     analysis_res: Dict[str, Any],
     fc_mpa: float = 20.0,
     fy_mpa: float = 350.0,
+    design_mode: Optional[str] = None,
+    bar_dia_mm: Optional[int] = None,
+    main_bar_dia_mm: Optional[int] = None,
+    stirrup_dia_mm: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Designs a reinforced concrete Hidden or Drop beam per ACI 318 (matching Eng. Yousef's methodology),
-    including detailed per-span bottom reinforcement, per-support top reinforcement, and stirrup zones
-    for longitudinal section detailing and multi-span schedules.
+    Designs a reinforced concrete Hidden or Drop beam per ACI 318 & Eng. Yousef's Code PDFs
+    (Pages 1–2, 8, 11, 13, 15, 45–58):
+    1. Minimum Reinforcement (As,min) Running Continuously from Start to End of Beam:
+       - ρ_min = max(1.4 / fy, sqrt(fc') / (4 * fy))
+       - As,min = ρ_min * b * d
+       - Continuous Bars = n_min * Φ db (providing As' = n_min * Ab1), running top & bottom along the entire beam.
+    2. User-Selectable Flexural Design Mode (`design_mode`):
+       - 'double_as_min' / 'double' (Default — Pages 1 & 2 of PDF):
+         Uses the continuous opposite-face minimum reinforcement (As' = n_min * Ab1 at depth d') as compression steel:
+           x1 = (As * fy - 600 * As') / (0.85 * fc' * b * β1)
+           x2 = (600 * As' * d') / (0.85 * fc' * b * β1)
+           C  = (x1 + sqrt(x1² + 4 * x2)) / 2
+           fs' = min(fy, max(0, 600 * (C - d') / C))
+           As1 = As - (As' * fs' / fy),  a = (As1 * fy) / (0.85 * fc' * b)
+           Mn  = As1 * fy * (d - a/2) + As' * fs' * (d - d')
+       - 'single' (Single Reinforcement):
+           Ku = (Mu * 10^6) / (0.90 * fc' * b * d²)
+           ω  = (1 - sqrt(1 - 2.36 * Ku)) / 1.18
+           ρ  = ω * (fc' / fy),  As_req = max(ρ * b * d, As,min)
+    3. Maximum Bars per Single Layer (Page 8 of PDF):
+       - n_max = floor(((b + db) - (6 * dst + 45)) / (db + 25))
+    4. Shear Stirrup Design (Page 13 of PDF):
+       - Vc = (1/6) * sqrt(fc') * bw * d,  φVc = 0.85 * Vc
     """
+    raw_mode = str(design_mode or beam.get("design_mode", "double_as_min")).lower()
+    mode_norm = "single" if raw_mode == "single" else "double_as_min"
+
+    db_mm = int(bar_dia_mm or main_bar_dia_mm or beam.get("main_bar_dia_mm", 16))
+    if db_mm not in (12, 14, 16, 18, 20, 22, 25, 28, 32):
+        db_mm = 16
+    dst_mm = int(stirrup_dia_mm or beam.get("stirrup_dia_mm", 8))
+    if dst_mm not in (6, 8, 10, 12):
+        dst_mm = 8
+
     b_mm = float(beam.get("width_m", 0.30)) * 1000.0
     h_mm = float(beam.get("depth_m", 0.30)) * 1000.0
-    d_mm = max(120.0, h_mm - 45.0)
+    cover_mm = 25.0
+    d_prime_mm = round(cover_mm + dst_mm + (db_mm / 2.0), 1)
+    d_mm = round(max(110.0, h_mm - d_prime_mm), 1)
+
+    beta1 = 0.85 if fc_mpa <= 30.0 else max(0.65, round(0.85 - (0.05 / 7.0) * (fc_mpa - 30.0), 3))
+    rho_min = max(1.4 / fy_mpa, math.sqrt(fc_mpa) / (4.0 * fy_mpa))
+    rho_max_single = 0.75 * (0.85 * beta1 * (fc_mpa / fy_mpa) * (600.0 / (600.0 + fy_mpa)))
+    as_min_mm2 = round(rho_min * b_mm * d_mm, 1)
+
+    area_one_bar = round(math.pi * (db_mm ** 2) / 4.0, 2)
+    min_constructive_bars = 4 if b_mm >= 350.0 else (3 if b_mm >= 250.0 else 2)
+    n_min_cont = max(min_constructive_bars, int(math.ceil(as_min_mm2 / max(1.0, area_one_bar) - 1e-6)))
+    as_min_prov_mm2 = round(n_min_cont * area_one_bar, 1)
+
+    # Page 8 Equation: Max number of bars in a single layer
+    n_max_single_layer = max(
+        2,
+        int(math.floor(((b_mm + db_mm) - (6.0 * dst_mm + 45.0)) / max(1.0, db_mm + 25.0))),
+    )
+
+    def eval_double_reinf_capacity_nmm(as_tension_mm2: float, as_comp_mm2: float) -> Dict[str, float]:
+        denom = max(1.0, 0.85 * fc_mpa * b_mm * beta1)
+        x1 = (as_tension_mm2 * fy_mpa - 600.0 * as_comp_mm2) / denom
+        x2 = (600.0 * as_comp_mm2 * d_prime_mm) / denom
+        disc = max(0.0, (x1 * x1) + 4.0 * x2)
+        c_depth = max(1e-3, (x1 + math.sqrt(disc)) / 2.0)
+        fs_prime = min(fy_mpa, max(0.0, 600.0 * ((c_depth - d_prime_mm) / c_depth)))
+        as2 = (as_comp_mm2 * fs_prime) / fy_mpa
+        as1 = max(0.0, as_tension_mm2 - as2)
+        a_depth = (as1 * fy_mpa) / max(1.0, 0.85 * fc_mpa * b_mm)
+        m1_nmm = as1 * fy_mpa * max(10.0, d_mm - a_depth / 2.0)
+        m2_nmm = as_comp_mm2 * fs_prime * max(10.0, d_mm - d_prime_mm)
+        mn_nmm = m1_nmm + m2_nmm
+        return {
+            "x1_mm": round(x1, 2),
+            "x2_mm2": round(x2, 2),
+            "c_mm": round(c_depth, 2),
+            "C_mm": round(c_depth, 2),
+            "a_mm": round(a_depth, 2),
+            "fs_prime_mpa": round(fs_prime, 1),
+            "comp_steel_yields": (fs_prime >= fy_mpa - 0.1),
+            "as1_mm2": round(as1, 1),
+            "as2_mm2": round(as2, 1),
+            "phi_mn_knm": round(0.90 * mn_nmm / 1e6, 2),
+        }
+
+    def calc_flexural_section(mu_knm: float) -> Dict[str, Any]:
+        mu_abs = abs(float(mu_knm))
+        ku_val = round((mu_abs * 1e6) / max(1.0, 0.90 * fc_mpa * b_mm * (d_mm ** 2)), 4)
+        disc_s = max(0.0, 1.0 - 2.36 * min(0.42, ku_val))
+        omega_val = round((1.0 - math.sqrt(disc_s)) / 1.18, 4)
+        rho_single = round(omega_val * (fc_mpa / fy_mpa), 6)
+        as_single_calc = round(rho_single * b_mm * d_mm, 1)
+
+        if mu_abs <= 0.10:
+            as_calc = 0.0
+        elif mode_norm == "single":
+            as_calc = as_single_calc
+        else:
+            target_mn_nmm = (mu_abs * 1e6) / 0.90
+            lo_as, hi_as = 1.0, max(as_single_calc * 2.0 + 2000.0, 8.0 * as_min_prov_mm2)
+            for _ in range(42):
+                mid_as = 0.5 * (lo_as + hi_as)
+                ev = eval_double_reinf_capacity_nmm(mid_as, as_min_prov_mm2)
+                if (ev["phi_mn_knm"] * 1e6 / 0.90) < target_mn_nmm:
+                    lo_as = mid_as
+                else:
+                    hi_as = mid_as
+            as_calc = round(0.5 * (lo_as + hi_as), 1)
+
+        as_req = round(max(as_calc, as_min_mm2), 1)
+        n_total = max(n_min_cont, int(math.ceil(as_req / max(1.0, area_one_bar) - 1e-6)))
+        n_additional = max(0, n_total - n_min_cont)
+        as_prov = round(n_total * area_one_bar, 1)
+        num_layers = 1 if n_total <= n_max_single_layer else 2
+
+        as_comp_used = as_min_prov_mm2 if mode_norm == "double_as_min" else 0.0
+        eq_prov = eval_double_reinf_capacity_nmm(as_prov, as_comp_used)
+
+        if n_additional > 0:
+            bars_callout = f"{n_total}Φ{db_mm} ({n_min_cont}Φ{db_mm} Cont. + {n_additional}Φ{db_mm} Add.)"
+            add_short = f"{n_additional} Φ {db_mm}"
+        else:
+            bars_callout = f"{n_total}Φ{db_mm} ({n_min_cont}Φ{db_mm} Cont.)"
+            add_short = "None"
+        bars_short = f"{n_total} Φ {db_mm} mm"
+
+        return {
+            "mu_knm": round(mu_abs, 2),
+            "ku": ku_val,
+            "omega": omega_val,
+            "rho": rho_single,
+            "as_calc_mm2": as_calc,
+            "as_single_calc_mm2": as_single_calc,
+            "as_min_mm2": as_min_mm2,
+            "as_req_mm2": as_req,
+            "as_prov_mm2": as_prov,
+            "as_prime_mm2": round(as_comp_used, 1),
+            "n_min_cont": n_min_cont,
+            "n_additional": n_additional,
+            "n_total": n_total,
+            "n_max_per_layer": n_max_single_layer,
+            "num_layers": num_layers,
+            "bars_short": bars_short,
+            "bars_callout": bars_callout,
+            "additional_bars": add_short,
+            "x1_mm": eq_prov["x1_mm"],
+            "x2_mm2": eq_prov["x2_mm2"],
+            "c_mm": eq_prov["c_mm"],
+            "C_mm": eq_prov["C_mm"],
+            "a_mm": eq_prov["a_mm"],
+            "fs_prime_mpa": eq_prov["fs_prime_mpa"],
+            "comp_steel_yields": eq_prov["comp_steel_yields"],
+            "phi_mn_knm": eq_prov["phi_mn_knm"],
+        }
+
+    # Page 13 Shear Stirrup Design: Vc = (1/6) * sqrt(fc') * bw * d, φ = 0.85
+    vc_kn = round((math.sqrt(fc_mpa) * b_mm * d_mm) / 6000.0, 2)
+    phi_shear = 0.85
+    phi_vc = round(phi_shear * vc_kn, 2)
+    n_legs = 4 if b_mm >= 350.0 else 2
+    av_mm2 = round(n_legs * (math.pi * (dst_mm ** 2) / 4.0), 2)
+
+    def calc_stirrups_detail(v_kn: float) -> Dict[str, Any]:
+        vu_val = abs(float(v_kn))
+        vs1_limit_kn = round((math.sqrt(fc_mpa) * b_mm * d_mm) / 3000.0, 2)
+        vs2_limit_kn = round((2.0 * math.sqrt(fc_mpa) * b_mm * d_mm) / 3000.0, 2)
+        s_min_reinf = (av_mm2 * fy_mpa) / max(1.0, 0.35 * b_mm)
+
+        if vu_val <= 0.5 * phi_vc:
+            s_max = min(d_mm / 2.0, 600.0, 200.0)
+            s_adopt = max(100, int(math.floor(s_max / 10.0) * 10))
+            zone_lbl = "Zone 1 (Vu <= 0.5 φVc)"
+            vs_req_kn = 0.0
+        elif vu_val <= phi_vc:
+            s_max = min(s_min_reinf, d_mm / 2.0, 600.0, 200.0)
+            s_adopt = max(100, int(math.floor(s_max / 10.0) * 10))
+            zone_lbl = "Zone 2 (0.5 φVc < Vu <= φVc)"
+            vs_req_kn = 0.0
+        else:
+            vs_req_kn = round((vu_val / phi_shear) - vc_kn, 2)
+            s_req = (av_mm2 * fy_mpa * d_mm) / max(1.0, vs_req_kn * 1000.0)
+            if vs_req_kn <= vs1_limit_kn:
+                s_max = min(s_req, d_mm / 2.0, 600.0, s_min_reinf, 200.0)
+                zone_lbl = "Zone 3 (Vs <= 1/3 √fc' bw d)"
+            elif vs_req_kn <= vs2_limit_kn:
+                s_max = min(s_req, d_mm / 4.0, 300.0, s_min_reinf, 150.0)
+                zone_lbl = "Zone 4 (Vs <= 2/3 √fc' bw d)"
+            else:
+                s_max = 80.0
+                zone_lbl = "Zone 5 (Section Inadequate: Vs > 2/3 √fc' bw d!)"
+            s_adopt = max(75, int(math.floor(s_max / 10.0) * 10))
+
+        callout = f"Φ {dst_mm} @ {s_adopt} mm ({n_legs}-Legs)"
+        return {
+            "callout": callout,
+            "spacing_mm": s_adopt,
+            "n_legs": n_legs,
+            "av_mm2": av_mm2,
+            "vs_req_kn": vs_req_kn,
+            "zone_label": zone_lbl,
+        }
 
     pos_mu = float(analysis_res.get("max_pos_mu_knm", 0.0))
     neg_mu = abs(float(analysis_res.get("max_neg_face_mu_knm", 0.0)))
     vu_kn = float(analysis_res.get("max_face_vu_kn", 0.0))
 
-    def calc_ast(mu_knm: float) -> Tuple[float, int, str]:
-        as_min = max(0.25 * math.sqrt(fc_mpa) / fy_mpa, 1.4 / fy_mpa) * b_mm * d_mm
-        if abs(mu_knm) <= 0.1:
-            ast = as_min
-        else:
-            rn = (abs(mu_knm) * 1e6) / (0.90 * b_mm * (d_mm ** 2))
-            term = max(0.05, 1.0 - (2.0 * rn) / (0.85 * fc_mpa))
-            rho = (0.85 * fc_mpa / fy_mpa) * (1.0 - math.sqrt(term))
-            ast = max(as_min, rho * b_mm * d_mm)
-        area_16 = 201.06
-        min_bars = 4 if b_mm >= 350 else (3 if b_mm >= 250 else 2)
-        n_bars = max(min_bars, math.ceil(ast / area_16))
-        return round(ast, 1), n_bars, f"{n_bars} Φ 16 mm"
-
-    def calc_stirrups(v_kn: float) -> str:
-        vc = (0.17 * math.sqrt(fc_mpa) * b_mm * d_mm) / 1000.0
-        p_vc = 0.75 * vc
-        n_legs = 4 if b_mm >= 350 else 2
-        if v_kn <= p_vc:
-            return f"Φ 8 @ 180 mm ({n_legs}-Legs)"
-        elif v_kn <= p_vc * 1.6:
-            return f"Φ 8 @ 140 mm ({n_legs}-Legs)"
-        else:
-            return f"Φ 10 @ 110 mm ({n_legs}-Legs)"
-
-    ast_bot, n_bot, bars_bot = calc_ast(pos_mu)
-    ast_top, n_top, bars_top = calc_ast(neg_mu)
-
-    vc_kn = (0.17 * math.sqrt(fc_mpa) * b_mm * d_mm) / 1000.0
-    phi_vc = 0.75 * vc_kn
-    stirrups = calc_stirrups(vu_kn)
+    bot_sec = calc_flexural_section(pos_mu)
+    top_sec = calc_flexural_section(neg_mu)
+    stir_sec = calc_stirrups_detail(vu_kn)
 
     spans = analysis_res.get("spans", beam.get("spans", [4.0]))
     sup_table = analysis_res.get("support_critical_table", [])
-    span_pos_list = analysis_res.get("span_positive_moments", [])
+    span_pos_list = analysis_res.get("span_positive_moments", analysis_res.get("span_critical_table", []))
 
     support_designs = []
     for sup in sup_table:
-        m_neg = abs(float(sup.get("face_neg_mu_knm", 0.0)))
-        v_f = float(sup.get("face_vu_kn", 0.0))
-        a_t, nb_t, b_str = calc_ast(m_neg)
+        m_neg = abs(float(sup.get("face_neg_mu_knm", sup.get("mu_face_neg_knm", 0.0))))
+        v_f = float(sup.get("face_vu_kn", sup.get("vu_face_max_kn", 0.0)))
+        s_flex = calc_flexural_section(m_neg)
+        s_stir = calc_stirrups_detail(v_f)
         support_designs.append({
             "support_index": sup.get("support_index", 1),
             "target_id": sup.get("target_id", "C1"),
             "x_m": sup.get("x_m", 0.0),
             "reaction_ru_kn": sup.get("reaction_ru_kn", 0.0),
-            "face_neg_mu_knm": sup.get("face_neg_mu_knm", 0.0),
-            "mu_neg_face_knm": sup.get("face_neg_mu_knm", 0.0),
+            "face_neg_mu_knm": m_neg,
+            "mu_neg_face_knm": m_neg,
             "face_vu_kn": v_f,
-            "top_ast_mm2": a_t,
-            "top_n_bars": nb_t,
-            "top_bars": b_str,
-            "stirrups_end": calc_stirrups(v_f),
+            "top_ast_mm2": s_flex["as_req_mm2"],
+            "top_as_prov_mm2": s_flex["as_prov_mm2"],
+            "top_n_bars": s_flex["n_total"],
+            "top_n_cont": s_flex["n_min_cont"],
+            "top_n_add": s_flex["n_additional"],
+            "top_bars": s_flex["bars_short"],
+            "top_bars_callout": s_flex["bars_callout"],
+            "top_additional_bars": s_flex["additional_bars"],
+            "c_mm": s_flex["c_mm"],
+            "fs_prime_mpa": s_flex["fs_prime_mpa"],
+            "phi_mn_knm": s_flex["phi_mn_knm"],
+            "stirrups_end": s_stir["callout"],
+            "shear_zone": s_stir["zone_label"],
         })
 
     span_designs = []
     for idx, sp_info in enumerate(span_pos_list):
         m_pos = float(sp_info.get("max_pos_mu_knm", 0.0))
-        v_sp = float(sp_info.get("max_abs_vu_kn", 0.0))
-        a_b, nb_b, b_str = calc_ast(m_pos)
+        v_sp = float(sp_info.get("max_abs_vu_kn", sp_info.get("max_face_vu_kn", 0.0)))
+        b_flex = calc_flexural_section(m_pos)
+        b_stir = calc_stirrups_detail(v_sp)
         left_sup = support_designs[idx] if idx < len(support_designs) else None
         right_sup = support_designs[idx + 1] if (idx + 1) < len(support_designs) else None
         neg_ctrl = max(
             abs(float(left_sup["face_neg_mu_knm"])) if left_sup else 0.0,
             abs(float(right_sup["face_neg_mu_knm"])) if right_sup else 0.0,
         )
-        a_t_sp, nb_t_sp, b_top_sp = calc_ast(neg_ctrl)
+        t_flex_sp = calc_flexural_section(neg_ctrl)
         span_designs.append({
             "span_index": idx + 1,
             "zone_label": f"Span {idx + 1}",
@@ -1553,38 +1770,101 @@ def design_beam_aci318(
             "start_x_m": sp_info.get("start_x_m", 0.0),
             "end_x_m": sp_info.get("end_x_m", 4.0),
             "pos_mu_knm": m_pos,
+            "mu_pos_knm": m_pos,
             "at_x_m": sp_info.get("at_x_m", 2.0),
-            "bottom_ast_mm2": a_b,
-            "bottom_n_bars": nb_b,
-            "bottom_bars": b_str,
+            "bottom_ast_mm2": b_flex["as_req_mm2"],
+            "bottom_as_prov_mm2": b_flex["as_prov_mm2"],
+            "bottom_n_bars": b_flex["n_total"],
+            "bottom_n_cont": b_flex["n_min_cont"],
+            "bottom_n_add": b_flex["n_additional"],
+            "bottom_bars": b_flex["bars_short"],
+            "bottom_bars_callout": b_flex["bars_callout"],
+            "bottom_additional_bars": b_flex["additional_bars"],
+            "c_mm": b_flex["c_mm"],
+            "fs_prime_mpa": b_flex["fs_prime_mpa"],
+            "phi_mn_knm": b_flex["phi_mn_knm"],
             "neg_mu_knm": round(-neg_ctrl, 2),
-            "top_ast_mm2": a_t_sp,
-            "top_n_bars": nb_t_sp,
-            "top_bars": b_top_sp,
+            "top_ast_mm2": t_flex_sp["as_req_mm2"],
+            "top_n_bars": t_flex_sp["n_total"],
+            "top_n_cont": t_flex_sp["n_min_cont"],
+            "top_n_add": t_flex_sp["n_additional"],
+            "top_bars": t_flex_sp["bars_short"],
+            "top_bars_callout": t_flex_sp["bars_callout"],
+            "top_additional_bars": t_flex_sp["additional_bars"],
             "max_vu_kn": v_sp,
-            "stirrups": calc_stirrups(v_sp),
+            "vu_kn": v_sp,
+            "stirrups": b_stir["callout"],
+            "shear_zone": b_stir["zone_label"],
         })
+
+    mode_label = (
+        "Double Reinf. (with Continuous As,min)"
+        if mode_norm == "double_as_min"
+        else "Single Reinforcement"
+    )
 
     return {
         "beam_id": beam.get("id", "B1"),
         "beam_kind": beam.get("beam_kind", "hidden"),
+        "design_mode": "double" if mode_norm == "double_as_min" else "single",
+        "design_mode_key": mode_norm,
+        "design_mode_label": mode_label,
+        "main_bar_dia_mm": db_mm,
+        "stirrup_dia_mm": dst_mm,
         "num_spans": len(spans),
         "cantilever_left_m": float(beam.get("cantilever_left_m", 0.0)),
         "cantilever_right_m": float(beam.get("cantilever_right_m", 0.0)),
         "b_mm": round(b_mm),
         "h_mm": round(h_mm),
-        "d_mm": round(d_mm),
-        "bottom_ast_mm2": ast_bot,
-        "as_pos_req_mm2": ast_bot,
-        "bottom_n_bars": n_bot,
-        "bottom_bars": bars_bot,
-        "top_ast_mm2": ast_top,
-        "as_neg_req_mm2": ast_top,
-        "top_n_bars": n_top,
-        "top_bars": bars_top,
-        "phi_vc_kn": round(phi_vc, 1),
-        "stirrups": stirrups,
-        "status": "OK (ACI 318-19)",
+        "d_mm": d_mm,
+        "d_prime_mm": d_prime_mm,
+        "beta1": beta1,
+        "rho_min": round(rho_min, 5),
+        "rho_max_single": round(rho_max_single, 5),
+        "as_min_mm2": as_min_mm2,
+        "as_min_prov_mm2": as_min_prov_mm2,
+        "n_min_cont": n_min_cont,
+        "n_bars_min_cont": n_min_cont,
+        "continuous_min_bars": f"{n_min_cont} Φ {db_mm}",
+        "continuous_bars_callout": f"{n_min_cont}Φ{db_mm} Continuous (Top & Bot, Start -> End)",
+        "n_max_per_layer": n_max_single_layer,
+        "bottom_ast_mm2": bot_sec["as_req_mm2"],
+        "as_pos_req_mm2": bot_sec["as_req_mm2"],
+        "as_pos_single_mm2": bot_sec["as_single_calc_mm2"],
+        "bottom_as_prov_mm2": bot_sec["as_prov_mm2"],
+        "bottom_n_bars": bot_sec["n_total"],
+        "n_bars_pos_total": bot_sec["n_total"],
+        "bottom_n_cont": bot_sec["n_min_cont"],
+        "bottom_n_add": bot_sec["n_additional"],
+        "bottom_num_layers": bot_sec["num_layers"],
+        "bottom_bars": bot_sec["bars_short"],
+        "bottom_bars_callout": bot_sec["bars_callout"],
+        "bottom_additional_bars": bot_sec["additional_bars"],
+        "bot_c_mm": bot_sec["c_mm"],
+        "bot_fs_prime_mpa": bot_sec["fs_prime_mpa"],
+        "bot_phi_mn_knm": bot_sec["phi_mn_knm"],
+        "pos_flexure_details": bot_sec,
+        "top_ast_mm2": top_sec["as_req_mm2"],
+        "as_neg_req_mm2": top_sec["as_req_mm2"],
+        "as_neg_single_mm2": top_sec["as_single_calc_mm2"],
+        "top_as_prov_mm2": top_sec["as_prov_mm2"],
+        "top_n_bars": top_sec["n_total"],
+        "n_bars_neg_total": top_sec["n_total"],
+        "top_n_cont": top_sec["n_min_cont"],
+        "top_n_add": top_sec["n_additional"],
+        "top_num_layers": top_sec["num_layers"],
+        "top_bars": top_sec["bars_short"],
+        "top_bars_callout": top_sec["bars_callout"],
+        "top_additional_bars": top_sec["additional_bars"],
+        "top_c_mm": top_sec["c_mm"],
+        "top_fs_prime_mpa": top_sec["fs_prime_mpa"],
+        "top_phi_mn_knm": top_sec["phi_mn_knm"],
+        "neg_flexure_details": top_sec,
+        "vc_kn": vc_kn,
+        "phi_vc_kn": phi_vc,
+        "stirrups": stir_sec["callout"],
+        "shear_zone": stir_sec["zone_label"],
+        "status": f"OK ({mode_label})",
         "span_designs": span_designs,
         "support_designs": support_designs,
     }
