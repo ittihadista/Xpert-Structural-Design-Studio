@@ -1,0 +1,142 @@
+{
+  "startup_defaults": {
+    "default_projects_root_dir": "C:\\Users\\Xpert\\VSCode\\Xpert Structural Design Studio\\XpertStudio_Projects",
+    "default_stirrup_dia_mm": 8,
+    "default_beam_main_dia_mm": 16,
+    "default_col_main_dia_mm": 16,
+    "rebar_diameters_table": [
+      {
+        "active": true,
+        "label": "\u03a6 8",
+        "dia_mm": 8,
+        "area_mm2": 50.3,
+        "weight_kg_m": 0.395,
+        "role": "Stirrups"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 10",
+        "dia_mm": 10,
+        "area_mm2": 78.5,
+        "weight_kg_m": 0.617,
+        "role": "Both"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 12",
+        "dia_mm": 12,
+        "area_mm2": 113.1,
+        "weight_kg_m": 0.888,
+        "role": "Longitudinal"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 14",
+        "dia_mm": 14,
+        "area_mm2": 153.9,
+        "weight_kg_m": 1.208,
+        "role": "Longitudinal"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 16",
+        "dia_mm": 16,
+        "area_mm2": 201.1,
+        "weight_kg_m": 1.578,
+        "role": "Longitudinal"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 18",
+        "dia_mm": 18,
+        "area_mm2": 254.5,
+        "weight_kg_m": 1.998,
+        "role": "Longitudinal"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 20",
+        "dia_mm": 20,
+        "area_mm2": 314.2,
+        "weight_kg_m": 2.466,
+        "role": "Longitudinal"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 22",
+        "dia_mm": 22,
+        "area_mm2": 380.1,
+        "weight_kg_m": 2.984,
+        "role": "Longitudinal"
+      },
+      {
+        "active": true,
+        "label": "\u03a6 25",
+        "dia_mm": 25,
+        "area_mm2": 490.9,
+        "weight_kg_m": 3.853,
+        "role": "Longitudinal"
+      },
+      {
+        "active": false,
+        "label": "\u03a6 28",
+        "dia_mm": 28,
+        "area_mm2": 615.8,
+        "weight_kg_m": 4.834,
+        "role": "Longitudinal"
+      },
+      {
+        "active": false,
+        "label": "\u03a6 32",
+        "dia_mm": 32,
+        "area_mm2": 804.2,
+        "weight_kg_m": 6.313,
+        "role": "Longitudinal"
+      }
+    ]
+  },
+  "options": {
+    "materials": {
+      "fc_mpa": 20.0,
+      "fy_mpa": 350.0,
+      "fyt_mpa": 280.0,
+      "gamma_c_kn_m3": 25.0,
+      "soil_bearing_qall_kn_m2": 150.0
+    },
+    "hollow_block_slab": {
+      "slab_thickness_cm": 30.0,
+      "top_flange_cm": 5.0,
+      "block_height_cm": 20.0,
+      "block_width_cm": 40.0,
+      "block_length_cm": 25.0,
+      "rib_width_cm": 15.0,
+      "block_weight_kn": 0.1,
+      "finish_load_kn_m2": 2.0,
+      "live_load_kn_m2": 2.0,
+      "slab_factored_wu_kpa": 8.5,
+      "default_wall_load_kn_m": 10.0,
+      "hidden_beam_min_width_cm": 40.0,
+      "drop_beam_width_cm": 20.0,
+      "drop_beam_depth_cm": 50.0
+    }
+  },
+  "materials_and_soil": {
+    "fc_mpa": 20.0,
+    "fy_mpa": 350.0,
+    "fy_stirrups_mpa": 280.0,
+    "concrete_unit_weight_kn_m3": 25.0,
+    "soil_bearing_qall_kn_m2": 150.0
+  },
+  "hollow_block_slab_data": {
+    "slab_thickness_cm": 30.0,
+    "top_compression_slab_cm": 5.0,
+    "block_height_cm": 20.0,
+    "block_width_cm": 40.0,
+    "block_length_cm": 25.0,
+    "rib_width_cm": 15.0,
+    "slab_factored_wu_kpa": 10.0,
+    "finish_load_kn_m2": 2.0,
+    "live_load_kn_m2": 1.5,
+    "default_wall_load_kn_m": 10.0
+  }
+}

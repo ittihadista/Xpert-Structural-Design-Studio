@@ -4,7 +4,34 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v1.9.0-structural-bim-pro` (2026-11-15)
+## Current Release: `v2.0.0-structural-bim-pro` (2026-11-16)
+**Release Title:** Full Excel Hordi Rib Design Dialog, Live Story Slab Thickness Linkage & Warning, Dedicated Rib vs Area Load Distinction, Persistent Beam Self-Weight & Masonry Wall Policies
+
+### Key Features & Advancements in `v2.0.0-structural-bim-pro`:
+1. **Live Story Slab Thickness Linkage & Intelligent Warning Dialog:**
+   - Story slab design and hollow-block dead loads dynamically adapt to the selected story slab thickness (`30.0 cm` default).
+   - If an engineer inputs a slab thickness less than the calculated minimum required by ACI 318 deflection criteria, an actionable two-choice dialog appears: `Proceed with entered thickness` or `Adjust thickness to calculated minimum`.
+2. **Strict Distinction Between Per-Rib Load vs Area Load to Supporting Beams:**
+   - Per-Rib Factored Load $W_u(\text{rib}) = 6.44\text{ kN/m'/rib}$ ($1.4 DL + 1.7 LL$) is strictly dedicated to rib flexural and shear design:
+     $$M_u = \frac{W_u(\text{rib}) \cdot L^2}{8}$$
+     using the true center-to-center span $L$ between supporting beams.
+   - Total square meter load $W_u(\text{m}\times\text{m}) = \frac{W_u(\text{rib})}{S + b_{w1}} = \frac{6.441}{0.55} = 11.71\text{ kN/m}^2$ is dedicated to transferring tributary slab loads onto supporting beams.
+3. **Interactive Hollow-Block Slab Rib Design Dialog (`SlabRibDesignDialog`):**
+   - Accessible via double-click or right-click context menu on any slab panel `S#` on the 2D CAD canvas or via the `Slab Rib Design` toolbar action.
+   - Displays full step-by-step calculations matching Eng. Yousef's reference Excel sheet (`Design of rib slab`).
+   - Rebar selector for bottom longitudinal bars ($d_b \in \{12, 14, 16\}\text{ mm}$), live calculation of $K_u, \omega, \rho, A_{s,\text{min}}, A_{s,\text{req}}$, adopted bars ($2\Phi 12$), top fixation bar ($1\Phi 10$), and open triangular stirrups ($\Phi 6\text{ @ }200\text{mm}$).
+   - Renders a cross-section drawing of the rib showing concrete topping ($h_s$), hollow blocks ($S$), bottom rebar, open triangular stirrup, and top fixation bar.
+4. **Universal Beam Self-Weight & Masonry Wall Load Formulation:**
+   - Enforces beam self-weight $O.W = b \cdot h \cdot 24 \cdot 1.4\text{ kN/m}$ across all beams unconditionally.
+   - Masonry wall load $W_{\text{wall}} = 2.5 \cdot (t_{\text{wall}} / 20) \cdot H \cdot 1.4\text{ kN/m}$ with span-by-span toggle and custom thickness $t_{\text{wall}}\text{ (cm)}$.
+5. **Collision-Free Beam Tag Placement on 2D Canvas:**
+   - Advanced geometric scoring for placing `B1..Bn` tags away from beam boundary lines, intersecting columns, and stair void openings.
+6. **Reference v1.9.0 Backup Preserved:**
+   - Complete reference backup of the previous release maintained in `xpert_studio_desktop/reference_v1_9_0/`.
+
+---
+
+## Previous Release: `v1.9.0-structural-bim-pro` (2026-11-15)
 **Release Title:** Full Automatic Column Deletion & Support Reconciler, Long Single-Span Governing Slab Optimization, Drop-on-Hidden Beam Safety Lock, Piecewise Opening/Sub-Slab Load Partitioning, Ground Tie-Beams Mode & Rebar/Materials Options Dialogs
 
 ### Key Features & Advancements in `v1.9.0-structural-bim-pro`:

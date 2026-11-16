@@ -27,20 +27,21 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v1.9.0-structural-bim-pro"
+STUDIO_VERSION = "v2.0.0-structural-bim-pro"
 
 DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
-    {"active": True, "label": "Φ 8", "dia_mm": 8, "area_mm2": 50.3, "weight_kg_m": 0.395, "role": "Stirrups"},
-    {"active": True, "label": "Φ 10", "dia_mm": 10, "area_mm2": 78.5, "weight_kg_m": 0.617, "role": "Both"},
-    {"active": True, "label": "Φ 12", "dia_mm": 12, "area_mm2": 113.1, "weight_kg_m": 0.888, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 14", "dia_mm": 14, "area_mm2": 153.9, "weight_kg_m": 1.208, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 16", "dia_mm": 16, "area_mm2": 201.1, "weight_kg_m": 1.578, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 18", "dia_mm": 18, "area_mm2": 254.5, "weight_kg_m": 1.998, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 20", "dia_mm": 20, "area_mm2": 314.2, "weight_kg_m": 2.466, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 22", "dia_mm": 22, "area_mm2": 380.1, "weight_kg_m": 2.984, "role": "Longitudinal"},
-    {"active": True, "label": "Φ 25", "dia_mm": 25, "area_mm2": 490.9, "weight_kg_m": 3.853, "role": "Longitudinal"},
-    {"active": False, "label": "Φ 28", "dia_mm": 28, "area_mm2": 615.8, "weight_kg_m": 4.834, "role": "Longitudinal"},
-    {"active": False, "label": "Φ 32", "dia_mm": 32, "area_mm2": 804.2, "weight_kg_m": 6.313, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 6", "dia_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Slab Stirrups"},
+    {"active": True, "label": "Φ 8", "dia_mm": 8, "area_mm2": 50.27, "weight_kg_m": 0.395, "role": "Stirrups"},
+    {"active": True, "label": "Φ 10", "dia_mm": 10, "area_mm2": 78.54, "weight_kg_m": 0.617, "role": "Both"},
+    {"active": True, "label": "Φ 12", "dia_mm": 12, "area_mm2": 113.10, "weight_kg_m": 0.888, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 14", "dia_mm": 14, "area_mm2": 153.94, "weight_kg_m": 1.208, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 16", "dia_mm": 16, "area_mm2": 201.06, "weight_kg_m": 1.578, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 18", "dia_mm": 18, "area_mm2": 254.47, "weight_kg_m": 1.998, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 20", "dia_mm": 20, "area_mm2": 314.16, "weight_kg_m": 2.466, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 22", "dia_mm": 22, "area_mm2": 380.13, "weight_kg_m": 2.984, "role": "Longitudinal"},
+    {"active": True, "label": "Φ 25", "dia_mm": 25, "area_mm2": 490.87, "weight_kg_m": 3.853, "role": "Longitudinal"},
+    {"active": False, "label": "Φ 28", "dia_mm": 28, "area_mm2": 615.75, "weight_kg_m": 4.834, "role": "Longitudinal"},
+    {"active": False, "label": "Φ 32", "dia_mm": 32, "area_mm2": 804.25, "weight_kg_m": 6.313, "role": "Longitudinal"},
 ]
 
 
@@ -52,7 +53,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
     """
     Loads persistent global studio settings for:
     1. 'Startup Defaults' (Projects Root Folder & Rebar Diameters Table)
-    2. 'Options' (Material Properties & Hollow-Block / Hordi Slab Parameters)
+    2. 'Options' (Material Properties & Hollow-Block / Hordi Slab Parameters matching Eng. Yousef's Excel sheet)
     """
     defaults: Dict[str, Any] = {
         "startup_defaults": {
@@ -67,23 +68,32 @@ def load_studio_global_settings() -> Dict[str, Any]:
                 "fc_mpa": 20.0,
                 "fy_mpa": 350.0,
                 "fyt_mpa": 280.0,
-                "gamma_c_kn_m3": 25.0,
+                "gamma_c_kn_m3": 24.0,
                 "soil_bearing_qall_kn_m2": 150.0,
             },
             "hollow_block_slab": {
-                "slab_thickness_cm": 30.0,
-                "top_flange_cm": 5.0,
-                "block_height_cm": 20.0,
-                "block_width_cm": 40.0,
-                "block_length_cm": 25.0,
-                "rib_width_cm": 15.0,
-                "block_weight_kn": 0.10,
-                "finish_load_kn_m2": 2.0,
-                "live_load_kn_m2": 2.0,
-                "slab_factored_wu_kpa": 8.5,
-                "default_wall_load_kn_m": 10.0,
-                "hidden_beam_min_width_cm": 40.0,
-                "drop_beam_width_cm": 20.0,
+                "slab_thickness_cm": 30.0,       # h = 300 mm
+                "top_flange_cm": 10.0,           # hs = 100 mm
+                "block_height_cm": 20.0,         # h - hs = 200 mm
+                "block_width_cm": 40.0,          # S = 400 mm (clear spacing between ribs)
+                "block_length_cm": 25.0,         # 250 mm along rib (4 blocks / m)
+                "rib_width_cm": 15.0,            # bw1 = 150 mm (top rib width)
+                "rib_bw2_cm": 15.0,              # bw2 = 150 mm (bottom rib width)
+                "slab_cover_mm": 20.0,           # dc = 20 mm
+                "rib_bar_dia_mm": 12,            # db = 12 mm (can be changed to 14 or 16 mm)
+                "rib_stirrup_dia_mm": 6,         # ds = 6 mm (triangular stirrup)
+                "block_weight_kn": 0.10,         # W_block = 10 kg = 0.10 kN
+                "finish_load_kn_m2": 1.5,        # W_finishing = 1.5 kN/m² (Eng. Yousef Excel)
+                "live_load_kn_m2": 2.0,          # LL = 2.0 kN/m²
+                "dl_factor": 1.4,                # 1.4 DL
+                "ll_factor": 1.7,                # 1.7 LL
+                "slab_factored_wu_kpa": 11.71,   # Wu(m*m) = Wu(rib)/(S+bw1) = 6.441 / 0.55 = 11.71 kN/m²
+                "wall_thickness_cm": 20.0,       # Default wall thickness = 20 cm (200 mm)
+                "wall_unit_wt_20cm_kn_m2": 2.5,  # 2.5 kN/m² of wall elevation for 20 cm wall
+                "default_wall_load_kn_m": 10.50, # W_wall = 2.5 * H(3.0m) * 1.4 = 10.50 kN/m
+                "hidden_beam_min_width_cm": 30.0,# Min B for Hidden Beams = 300 mm
+                "drop_beam_width_cm": 20.0,      # Default B for Drop Beams = 200 mm
+                "drop_beam_min_depth_cm": 40.0,  # Min h for Drop Beams = 400 mm
                 "drop_beam_depth_cm": 50.0,
             },
         },
@@ -159,41 +169,100 @@ def compute_hollow_block_parameters(
     block_width_cm: float = 40.0,
     block_length_cm: float = 25.0,
     block_weight_kn: float = 0.10,
-    finish_load_kn_m2: float = 2.0,
+    finish_load_kn_m2: float = 1.5,
     live_load_kn_m2: float = 2.0,
+    top_flange_cm: float = 10.0,
+    rib_bw2_cm: Optional[float] = None,
+    gamma_c_kn_m3: float = 24.0,
+    dl_factor: float = 1.4,
+    ll_factor: float = 1.7,
 ) -> Dict[str, float]:
     """
-    Computes hollow-block (Hordi) parameters per Eng. Yousef's standard rules:
-    - t_s <= 24 cm -> h_block = 16 cm
-    - t_s >= 25 cm -> h_block = 20 cm
+    Computes hollow-block (Hordi) rib loads and area load per Eng. Yousef's Excel Sheet ('Design of rib slab'):
+    - h  = slab_thickness_cm (default 30 cm = 300 mm)
+    - hs = top_flange_cm (default 10 cm = 100 mm; block height = h - hs = 20 cm = 200 mm)
+    - S  = block_width_cm (default 40 cm = 400 mm between ribs)
+    - bw1 = rib_width_cm (default 15 cm = 150 mm), bw2 = rib_bw2_cm (default 15 cm = 150 mm)
+    - b_rib_center = S + bw1 (default 55 cm = 0.55 m)
+    - Topping slab weight per rib = hs * (S + bw1) * gamma_c       [kN/m'/rib]  (e.g. 0.10 * 0.55 * 24 = 1.320)
+    - Rib web weight per rib      = ((bw1 + bw2)/2) * (h - hs)*gamma_c [kN/m'/rib] (e.g. 0.15 * 0.20 * 24 = 0.720)
+    - Block weight per rib        = (1.0 / block_length_m) * W_block   [kN/m'/rib] (e.g. 4 * 0.10 = 0.400)
+    - Finishing weight per rib    = W_finishing * (S + bw1)        [kN/m'/rib]  (e.g. 1.5 * 0.55 = 0.825)
+    - Total Dead Load per rib     = 1.32 + 0.72 + 0.40 + 0.825 = 3.265 kN/m'/rib
+    - Factored Dead Load per rib  = 1.4 * DL_rib = 4.571 kN/m'/rib
+    - Live Load per rib           = LL * (S + bw1) = 2.0 * 0.55 = 1.100 kN/m'/rib
+    - Factored Live Load per rib  = 1.7 * LL_rib = 1.870 kN/m'/rib
+    - Wu_rib (Design Load per Rib)= 4.571 + 1.870 = 6.441 kN/m'/rib
+    - Wu_m2 (Area Load to Beams)  = Wu_rib / (S + bw1) = 6.441 / 0.55 = 11.71 kN/m²
     """
-    block_height_cm = 20.0 if slab_thickness_cm >= 25.0 else 16.0
-    top_flange_cm = max(5.0, slab_thickness_cm - block_height_cm)
-    rib_spacing_cm = block_width_cm + rib_width_cm  # Default 55 cm
-    gamma_rc = 25.0  # kN/m3
+    h_cm = max(14.0, float(slab_thickness_cm))
+    hs_cm = min(h_cm - 5.0, max(5.0, float(top_flange_cm)))
+    block_height_cm = round(max(5.0, h_cm - hs_cm), 2)
 
-    top_slab_wt = (top_flange_cm / 100.0) * gamma_rc
-    rib_vol_per_m = (rib_width_cm / 100.0) * (block_height_cm / 100.0)
-    ribs_per_m = 100.0 / rib_spacing_cm
-    ribs_wt = rib_vol_per_m * ribs_per_m * gamma_rc
+    s_cm = max(20.0, float(block_width_cm))
+    bw1_cm = max(8.0, float(rib_width_cm))
+    bw2_cm = max(8.0, float(rib_bw2_cm if rib_bw2_cm is not None else bw1_cm))
+    rib_spacing_cm = round(s_cm + bw1_cm, 2)  # b = S + bw1 (default 55 cm)
 
-    blocks_per_m2 = (100.0 / rib_spacing_cm) * (100.0 / block_length_cm)
-    blocks_wt = blocks_per_m2 * block_weight_kn
+    h_m = h_cm / 100.0
+    hs_m = hs_cm / 100.0
+    s_m = s_cm / 100.0
+    bw1_m = bw1_cm / 100.0
+    bw2_m = bw2_cm / 100.0
+    b_space_m = s_m + bw1_m
+    blk_len_m = max(0.10, float(block_length_cm) / 100.0)
+    gamma_rc = max(18.0, float(gamma_c_kn_m3))
 
-    self_weight_kn_m2 = round(top_slab_wt + ribs_wt + blocks_wt, 2)
-    total_dead_kn_m2 = round(self_weight_kn_m2 + finish_load_kn_m2, 2)
-    total_service_kn_m2 = round(total_dead_kn_m2 + live_load_kn_m2, 2)
-    total_factored_wu_kn_m2 = round(1.2 * total_dead_kn_m2 + 1.6 * live_load_kn_m2, 2)
+    # Per-Rib Weights (kN/m'/rib) — matching Excel cells exactly
+    topping_wt_rib = round(hs_m * b_space_m * gamma_rc, 4)
+    rib_web_wt_rib = round(((bw1_m + bw2_m) / 2.0) * (h_m - hs_m) * gamma_rc, 4)
+    blocks_per_m_rib = round(1.0 / blk_len_m, 3)
+    block_wt_rib = round(blocks_per_m_rib * float(block_weight_kn), 4)
+    finishing_wt_rib = round(float(finish_load_kn_m2) * b_space_m, 4)
+
+    total_dl_rib = round(topping_wt_rib + rib_web_wt_rib + block_wt_rib + finishing_wt_rib, 4)
+    factored_dl_rib = round(float(dl_factor) * total_dl_rib, 4)
+
+    ll_rib = round(float(live_load_kn_m2) * b_space_m, 4)
+    factored_ll_rib = round(float(ll_factor) * ll_rib, 4)
+
+    wu_rib_kn_m = round(factored_dl_rib + factored_ll_rib, 3)
+    wu_m2_kpa = round((factored_dl_rib + factored_ll_rib) / max(0.20, b_space_m), 2)
+
+    blocks_per_m2 = (1.0 / b_space_m) * blocks_per_m_rib
+    self_weight_kn_m2 = round((topping_wt_rib + rib_web_wt_rib + block_wt_rib) / b_space_m, 2)
+    total_dead_kn_m2 = round(total_dl_rib / b_space_m, 2)
+    total_service_kn_m2 = round(total_dead_kn_m2 + float(live_load_kn_m2), 2)
 
     return {
+        "slab_thickness_cm": round(h_cm, 2),
+        "top_flange_cm": round(hs_cm, 2),
         "block_height_cm": block_height_cm,
-        "top_flange_cm": top_flange_cm,
+        "block_width_cm": round(s_cm, 2),
+        "block_length_cm": round(blk_len_m * 100.0, 2),
+        "rib_width_cm": round(bw1_cm, 2),
+        "rib_bw2_cm": round(bw2_cm, 2),
         "rib_spacing_cm": rib_spacing_cm,
+        "gamma_c_kn_m3": round(gamma_rc, 2),
+        "finish_load_kn_m2": round(float(finish_load_kn_m2), 2),
+        "live_load_kn_m2": round(float(live_load_kn_m2), 2),
+        "dl_factor": round(float(dl_factor), 2),
+        "ll_factor": round(float(ll_factor), 2),
+        "topping_wt_rib_kn_m": round(topping_wt_rib, 3),
+        "rib_web_wt_rib_kn_m": round(rib_web_wt_rib, 3),
+        "block_wt_rib_kn_m": round(block_wt_rib, 3),
+        "finishing_wt_rib_kn_m": round(finishing_wt_rib, 3),
+        "total_dl_rib_kn_m": round(total_dl_rib, 3),
+        "factored_dl_rib_kn_m": round(factored_dl_rib, 3),
+        "ll_rib_kn_m": round(ll_rib, 3),
+        "factored_ll_rib_kn_m": round(factored_ll_rib, 3),
+        "wu_rib_kn_m": round(wu_rib_kn_m, 2),
+        "wu_rib_exact_kn_m": wu_rib_kn_m,
         "blocks_per_m2": round(blocks_per_m2, 2),
         "self_weight_kn_m2": self_weight_kn_m2,
         "total_dead_kn_m2": total_dead_kn_m2,
         "total_service_kn_m2": total_service_kn_m2,
-        "total_factored_wu_kn_m2": total_factored_wu_kn_m2,
+        "total_factored_wu_kn_m2": wu_m2_kpa,
     }
 
 
@@ -272,7 +341,7 @@ def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
 
 def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Creates Stractural-<ProjectName> and generates the custom `<ProjectName>-00_Project_Master.xpert`
+    Creates Stractural-<ProjectName> and generates the custom `<ProjectName>-00_Project_Master.xsd`
     master file along with all `<ProjectName>-` prefixed JSON and DXF files.
     """
     raw_name = config.get("project_name", "NewProject")
@@ -391,8 +460,10 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     hordi_defaults = compute_hollow_block_parameters(
         slab_thickness_cm=30.0,
         rib_width_cm=float(config.get("rib_width_cm", 15.0)),
-        finish_load_kn_m2=float(config.get("finish_load_kn_m2", 2.0)),
+        finish_load_kn_m2=float(config.get("finish_load_kn_m2", 1.5)),
         live_load_kn_m2=float(config.get("live_load_kn_m2", 2.0)),
+        top_flange_cm=float(config.get("top_flange_cm", 10.0)),
+        gamma_c_kn_m3=float(config.get("gamma_c_kn_m3", 24.0)),
     )
 
     master_xsd_file = os.path.join(project_dir, f"{clean_name}-00_Project_Master{MASTER_FILE_EXT}")
@@ -409,6 +480,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         "materials_and_soil": {
             "fc_mpa": float(config.get("fc_mpa", 20.0)),
             "fy_mpa": float(config.get("fy_mpa", 350.0)),
+            "gamma_c_kn_m3": float(config.get("gamma_c_kn_m3", 24.0)),
             "soil_bearing_qall_kn_m2": float(config.get("soil_bearing_qall_kn_m2", 150.0)),
             "foundation_depth_m": foundation_depth,
         },
@@ -423,7 +495,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             "default_slab_thickness_cm": 30.0,
             "default_column_b_m": 0.20,
             "default_column_h_m": 0.40,
-            "finish_load_kn_m2": float(config.get("finish_load_kn_m2", 2.0)),
+            "finish_load_kn_m2": float(config.get("finish_load_kn_m2", 1.5)),
             "live_load_kn_m2": float(config.get("live_load_kn_m2", 2.0)),
             "rib_width_cm": float(config.get("rib_width_cm", 15.0)),
             "hidden_beam_min_width_cm": float(config.get("hidden_beam_min_width_cm", 30.0)),
@@ -447,14 +519,20 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         sm_entry["dxf_file"] = dxf_path
         master_payload["stories"].append(sm_entry)
 
+        st_h = float(sm["height_m"])
+        st_wall_w = round(2.5 * st_h * 1.4, 2)
         story_data = {
             "project_name": clean_name,
             "story_id": sid,
             "story_label": sm["story_label"],
             "story_type": sm["story_type"],
             "multiplier": sm["multiplier"],
-            "height_m": sm["height_m"],
+            "height_m": st_h,
             "adopted_slab_thickness_cm": sm["adopted_slab_thickness_cm"],
+            "slab_factored_wu_kpa": hordi_defaults["total_factored_wu_kn_m2"],
+            "default_wall_thickness_cm": 20.0,
+            "default_wall_load_kn_m": st_wall_w,
+            "hollow_block_params": dict(hordi_defaults),
             "slab_edge_polygon": [],
             "openings": [],
             "columns": [],
@@ -499,12 +577,16 @@ def compute_smart_beam_tag_position(
     beam: Dict[str, Any],
     columns: List[Dict[str, Any]],
     placed_positions: List[Tuple[float, float]],
+    all_beams: Optional[List[Dict[str, Any]]] = None,
+    slabs: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[float, float, float]:
     """
-    Computes a non-overlapping label position (x, y, rotation_deg) for a beam B#:
-    - Places the label near the midpoint of the beam (or midpoint of its first clear span
-      if a column sits directly at the overall midpoint), and slightly ABOVE the top face
-      of the full-width beam rectangle (offset = width_m / 2.0 + 0.12 m).
+    Computes a collision-free label position (x, y, rotation_deg) for a beam B#:
+    - Offsets clearly away from the beam border line (`width_m / 2.0 + 0.24 m`) so the text never
+      sits on top of the beam lines.
+    - Avoids perpendicular beam T-junctions/intersections, columns, slab badges (`S1..Sn`),
+      and previously placed beam tags by scoring candidate positions on both sides of the beam
+      along its spans.
     """
     sx = float(beam.get("start_x", 0.0))
     sy = float(beam.get("start_y", 0.0))
@@ -523,39 +605,97 @@ def compute_smart_beam_tag_position(
 
     is_vertical = abs(dy) > abs(dx)
     rot_deg = 90.0 if is_vertical else 0.0
+    perp_offset = (b_width / 2.0) + 0.24
 
-    # Offset slightly above the outer face of the full-width beam rectangle
-    perp_offset = (b_width / 2.0) + 0.12
+    # Find stations along the beam where columns or perpendicular beams intersect this beam
+    junction_stations: List[float] = [0.0, length]
+    for col in columns:
+        if not col.get("active", True):
+            continue
+        cx, cy = float(col.get("x", 0.0)), float(col.get("y", 0.0))
+        proj = (cx - sx) * ux + (cy - sy) * uy
+        perp = abs((cx - sx) * nx + (cy - sy) * ny)
+        if perp <= b_width / 2.0 + 0.35 and -0.25 <= proj <= length + 0.25:
+            junction_stations.append(min(max(0.0, proj), length))
 
-    # Prefer near the beam midpoint; if an intermediate column is at the exact midpoint,
-    # shift slightly toward the first clear span midpoint so it never sits on a column
-    mid_dist = length * 0.50
-    spans = beam.get("spans", [])
-    first_span_mid = float(spans[0]) * 0.50 if spans else length * 0.45
+    if all_beams:
+        for ob in all_beams:
+            if ob.get("id") == beam.get("id"):
+                continue
+            osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
+            oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
+            ob_vert = abs(oey - osy) > abs(oex - osx)
+            if ob_vert != is_vertical:
+                if is_vertical:
+                    # This beam is vertical at sx, ob is horizontal at osy
+                    if min(osx, oex) - 0.30 <= sx <= max(osx, oex) + 0.30 and min(sy, ey) - 0.30 <= osy <= max(sy, ey) + 0.30:
+                        proj = abs(osy - sy)
+                        junction_stations.append(min(max(0.0, proj), length))
+                else:
+                    # This beam is horizontal at sy, ob is vertical at osx
+                    if min(sx, ex) - 0.30 <= osx <= max(sx, ex) + 0.30 and min(osy, oey) - 0.30 <= sy <= max(osy, oey) + 0.30:
+                        proj = abs(osx - sx)
+                        junction_stations.append(min(max(0.0, proj), length))
 
-    cand_x = sx + ux * mid_dist + nx * perp_offset
-    cand_y = sy + uy * mid_dist + ny * perp_offset
+    junction_stations = sorted(set(round(s, 2) for s in junction_stations))
+    # Build candidate stations at midpoints and third-points of each clear segment between junctions
+    cand_stations: List[float] = []
+    segs = [
+        (junction_stations[i], junction_stations[i + 1])
+        for i in range(len(junction_stations) - 1)
+        if (junction_stations[i + 1] - junction_stations[i]) >= 0.65
+    ]
+    segs.sort(key=lambda ab: ab[1] - ab[0], reverse=True)
+    for a, b in segs:
+        mid = (a + b) * 0.50
+        cand_stations.extend([mid, a + (b - a) * 0.35, a + (b - a) * 0.65])
+    if not cand_stations:
+        cand_stations = [length * 0.50, length * 0.32, length * 0.68]
 
-    for shift_try in [0.0, first_span_mid - mid_dist, 0.50, -0.50, 0.95, -0.95]:
-        tx = sx + ux * (mid_dist + shift_try) + nx * perp_offset
-        ty = sy + uy * (mid_dist + shift_try) + ny * perp_offset
-        collision = False
-        for col in columns:
-            cx, cy = float(col.get("x", 0.0)), float(col.get("y", 0.0))
-            if ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5 < 0.42:
-                collision = True
-                break
-        if not collision:
-            for px, py in placed_positions:
-                if ((tx - px) ** 2 + (ty - py) ** 2) ** 0.5 < 0.40:
-                    collision = True
-                    break
-        if not collision:
-            placed_positions.append((tx, ty))
-            return round(tx, 3), round(ty, 3), rot_deg
+    # Collect obstacle centers (columns, slab badge boxes, and already-placed tags)
+    obstacles: List[Tuple[float, float, float]] = []  # (ox, oy, min_dist)
+    for col in columns:
+        if col.get("active", True):
+            obstacles.append((float(col.get("x", 0.0)), float(col.get("y", 0.0)), 0.52))
+    if slabs:
+        for slb in slabs:
+            if "min_x" in slb:
+                cmin_x = float(slb.get("clear_min_x", slb["min_x"]))
+                cmax_x = float(slb.get("clear_max_x", slb["max_x"]))
+                cmin_y = float(slb.get("clear_min_y", slb["min_y"]))
+                cmax_y = float(slb.get("clear_max_y", slb["max_y"]))
+                obstacles.append(((cmin_x + cmax_x) / 2.0, (cmin_y + cmax_y) / 2.0, 0.82))
+    for px, py in placed_positions:
+        obstacles.append((float(px), float(py), 0.55))
 
-    placed_positions.append((cand_x, cand_y))
-    return round(cand_x, 3), round(cand_y, 3), rot_deg
+    best_pt = (sx + ux * cand_stations[0] + nx * perp_offset, sy + uy * cand_stations[0] + ny * perp_offset)
+    best_score = -1e9
+
+    for side_sign in (1.0, -1.0):
+        for st in cand_stations:
+            tx = sx + ux * st + nx * (perp_offset * side_sign)
+            ty = sy + uy * st + ny * (perp_offset * side_sign)
+            min_clearance = 99.0
+            for ox, oy, req_d in obstacles:
+                d = ((tx - ox) ** 2 + (ty - oy) ** 2) ** 0.5
+                clearance_margin = d - req_d
+                if clearance_margin < min_clearance:
+                    min_clearance = clearance_margin
+            # Slight preference for positive side (+nx, +ny) when both sides are completely clear
+            side_bonus = 0.08 if side_sign > 0 else 0.0
+            score = min(min_clearance, 0.60) + side_bonus
+            if min_clearance >= 0.0 and score > best_score:
+                best_score = score
+                best_pt = (tx, ty)
+                if side_sign > 0 and min_clearance >= 0.25:
+                    placed_positions.append((round(tx, 3), round(ty, 3)))
+                    return round(tx, 3), round(ty, 3), rot_deg
+            elif score > best_score:
+                best_score = score
+                best_pt = (tx, ty)
+
+    placed_positions.append((round(best_pt[0], 3), round(best_pt[1], 3)))
+    return round(best_pt[0], 3), round(best_pt[1], 3), rot_deg
 
 
 def _write_ascii_dxf_fallback(story_data: Dict[str, Any], dxf_path: str) -> None:

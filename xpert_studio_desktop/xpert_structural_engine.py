@@ -535,14 +535,19 @@ def ensure_beam_wall_flags(story_data: Dict[str, Any], beam: Dict[str, Any]) -> 
     """
     Ensures `beam['span_wall_flags']` has a boolean flag for each span and cantilever of `beam`,
     initializing missing flags from `story_data['wall_load_policy']` ('all_beams' -> True, 'no_walls' -> False).
+    Also initializes `beam['span_wall_thickness_cm']` (default 20.0 cm per span).
     """
     policy = str(story_data.get("wall_load_policy", "all_beams"))
     default_flag = (policy != "no_walls")
+    default_t_cm = float(story_data.get("default_wall_thickness_cm", 20.0))
     flags: Dict[str, bool] = beam.setdefault("span_wall_flags", {})
+    thick_map: Dict[str, float] = beam.setdefault("span_wall_thickness_cm", {})
     for seg in get_beam_span_segments(beam):
         k = seg["key"]
         if k not in flags:
             flags[k] = default_flag
+        if k not in thick_map:
+            thick_map[k] = default_t_cm
     return flags
 
 
@@ -552,32 +557,50 @@ def set_story_wall_load_policy(
     wall_load_kn_m: Optional[float] = None,
     apply_to_all_existing_spans: bool = True,
     slab_load_kpa: Optional[float] = None,
+    wall_thickness_cm: Optional[float] = None,
 ) -> Tuple[int, str]:
     """
     Sets the Story-Level General Wall & Slab Load Policy:
     - policy = 'all_beams': Default wall load ON for all beam spans.
     - policy = 'no_walls': Default wall load OFF for all beam spans (e.g., Roof slab, allowing selective stair walls).
+    - Default wall load for a 20 cm wall: W_wall = 2.5 * (t_wall / 20.0) * H_story * 1.4.
     """
     clean_policy = "no_walls" if policy == "no_walls" else "all_beams"
     story_data["wall_load_policy"] = clean_policy
+    story_h = float(story_data.get("height_m", 3.0))
+    if wall_thickness_cm is not None:
+        story_data["default_wall_thickness_cm"] = round(max(5.0, float(wall_thickness_cm)), 1)
+    t_wall_def = float(story_data.get("default_wall_thickness_cm", 20.0))
+    formula_wall_w = round(2.5 * (t_wall_def / 20.0) * story_h * 1.4, 2)
+
     if wall_load_kn_m is not None:
         story_data["default_wall_load_kn_m"] = round(max(0.0, float(wall_load_kn_m)), 2)
+        story_data["custom_wall_load_override"] = (abs(float(wall_load_kn_m) - formula_wall_w) > 0.05)
+    else:
+        story_data["default_wall_load_kn_m"] = formula_wall_w
+        story_data["custom_wall_load_override"] = False
+
     if slab_load_kpa is not None:
         story_data["slab_factored_wu_kpa"] = round(max(1.0, float(slab_load_kpa)), 2)
-    w_val = float(story_data.get("default_wall_load_kn_m", 10.0))
-    q_val = float(story_data.get("slab_factored_wu_kpa", 8.5))
+        story_data["custom_slab_wu_override"] = True
+
+    w_val = float(story_data.get("default_wall_load_kn_m", formula_wall_w))
+    q_val = float(story_data.get("slab_factored_wu_kpa", 11.71))
 
     target_bool = (clean_policy == "all_beams")
     updated_spans = 0
     for bm in story_data.get("beams", []):
         flags = ensure_beam_wall_flags(story_data, bm)
+        thick_map = bm.setdefault("span_wall_thickness_cm", {})
         if apply_to_all_existing_spans:
             for k in list(flags.keys()):
                 flags[k] = target_bool
+                if wall_thickness_cm is not None:
+                    thick_map[k] = t_wall_def
                 updated_spans += 1
         bm.pop("manual_loads_override", None)
 
-    mode_desc = f"Wall Load ({w_val:.1f} kN/m) ON | Slab q = {q_val:.1f} kN/m²" if target_bool else f"Wall Load OFF by default | Slab q = {q_val:.1f} kN/m²"
+    mode_desc = f"Wall Load ({w_val:.2f} kN/m, t={t_wall_def:.0f}cm) ON | Slab Wu = {q_val:.2f} kN/m²" if target_bool else f"Wall Load OFF by default | Slab Wu = {q_val:.2f} kN/m²"
     return updated_spans, f"Story Load Policy updated: {mode_desc}."
 
 
@@ -601,15 +624,264 @@ def set_beam_span_wall_flag(
     return True, f"Beam {beam_id} ({span_key}): Masonry Wall Load {state_str}."
 
 
+def set_beam_span_wall_thickness(
+    story_data: Dict[str, Any],
+    beam_id: str,
+    span_key: Any,
+    wall_thickness_cm: float,
+) -> Tuple[bool, str]:
+    """
+    Sets custom masonry wall thickness `t_wall` (in cm, default 20.0 cm) for a specific span
+    (`span_1`, `span_2`, `cant_left`, `cant_right`, or integer index `1`, `2`) of `beam_id`,
+    updating W_wall = 2.5 * (t_wall/20) * H * 1.4.
+    """
+    bm = next((b for b in story_data.get("beams", []) if b.get("id") == beam_id), None)
+    if not bm:
+        return False, f"Beam {beam_id} not found."
+    ensure_beam_wall_flags(story_data, bm)
+    skey = f"span_{span_key}" if str(span_key).isdigit() else str(span_key)
+    t_clean = round(max(5.0, min(60.0, float(wall_thickness_cm))), 1)
+    bm.setdefault("span_wall_thickness_cm", {})[skey] = t_clean
+    bm.pop("manual_loads_override", None)
+    story_h = float(story_data.get("height_m", 3.0))
+    w_wall = round(2.5 * (t_clean / 20.0) * story_h * 1.4, 2)
+    return True, f"Beam {beam_id} ({skey}): Wall thickness set to {t_clean:.0f} cm (W_wall = {w_wall:.2f} kN/m)."
+
+
+def design_hollow_block_slab_rib(
+    slab_obj: Dict[str, Any],
+    story_data: Dict[str, Any],
+    fc_mpa: float = 20.0,
+    fy_mpa: float = 350.0,
+    db_mm_override: Optional[int] = None,
+    custom_span_l_m: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Designs a One-Way Hollow-Block (Hordi) Slab Rib strictly following Eng. Yousef's
+    Excel sheet ('Design of rib slab'):
+    1. Geometry & Material Inputs:
+       - h = Story Slab Thickness (default 300 mm = 30.0 cm)
+       - hs = Topping Slab Thickness (100 mm)
+       - S = Block Width (400 mm), bw1 = 150 mm, bw2 = 150 mm, b = bw1 + S = 550 mm
+       - γc = 24 kN/m³, W_finishing = 1.5 kN/m², LL = 2.0 kN/m², W_block = 0.10 kN (4 blocks/m = 0.40 kN/m'/rib)
+       - dc = 20 mm concrete cover, ds = 6 mm triangular stirrup (كانة مثلثة ∅6)
+       - Top fixation bar = 1∅10 mm (سيخ واحد علوي للتثبيت فقط)
+       - Bottom reinforcement diameter db in {12, 14, 16} mm (default 12 mm)
+    2. Load Distinction:
+       - Per-Rib Factored Load (used for Rib Flexure & Shear Design):
+         Wu_rib = 1.4 * DL_rib + 1.7 * LL_rib  [kN/m'/rib]  (6.44 kN/m'/rib for h=300mm)
+       - Per-Square-Meter Factored Load (transferred to Supporting Beams):
+         Wu_m2 = Wu_rib / (b / 1000)           [kN/m²]      (11.71 kN/m² for h=300mm)
+    3. Design Span L & Moment Mu:
+       - L = Total Center-to-Center Span between carrying beams along the rib direction (NOT clear span).
+       - Simply supported assumption for all slabs: Mu = Wu_rib * L² / 8  [kN.m/rib].
+    4. Flexure & Shear Equations:
+       - d = h - ds - dc - db/2
+       - Ku = (Mu * 10^6) / (0.9 * (bw1 + S) * fc' * d²)
+       - ω = (1 - sqrt(1 - 2.36 * Ku)) / 1.18
+       - ρ = ω * (fc' / Fy)
+       - As_min = (1.4 / Fy) * bw2 * d
+       - As = max(ρ * b * d, As_min)
+       - Nbar = As / (3.14 * db² / 4) -> adopted bars = max(2, ceil(Nbar))
+       - Vc = 1.1 * sqrt(fc') * bw2 * d / 6000, φVc = 0.85 * Vc, Vu = Wu_rib * (L/2 - d/1000)
+    """
+    hb_cfg = story_data.get("hollow_block", {})
+    h_cm = float(story_data.get("adopted_slab_thickness_cm", hb_cfg.get("total_thickness_cm", 30.0)))
+    hs_cm = float(hb_cfg.get("topping_thickness_cm", 10.0))
+    if h_cm < hs_cm + 5.0:
+        h_cm = max(15.0, hs_cm + 5.0)
+
+    h_mm = round(h_cm * 10.0, 1)
+    hs_mm = round(hs_cm * 10.0, 1)
+    s_mm = round(float(hb_cfg.get("block_width_cm", 40.0)) * 10.0, 1)
+    bw1_mm = round(float(hb_cfg.get("rib_width_top_cm", hb_cfg.get("rib_width_cm", 15.0))) * 10.0, 1)
+    bw2_mm = round(float(hb_cfg.get("rib_width_cm", 15.0)) * 10.0, 1)
+    b_mm = bw1_mm + s_mm
+    b_m = b_mm / 1000.0
+
+    gamma_c = float(hb_cfg.get("gamma_c_kn_m3", 24.0))
+    w_finishing = float(hb_cfg.get("finishing_load_kpa", 1.5))
+    ll_kpa = float(hb_cfg.get("live_load_kpa", 2.0))
+    w_block_kn = float(hb_cfg.get("block_weight_kn", 0.10))
+    blocks_per_m = int(hb_cfg.get("blocks_per_m", 4))
+
+    if db_mm_override is not None and int(db_mm_override) in (12, 14, 16):
+        db_mm = int(db_mm_override)
+        slab_obj["rib_bar_dia_mm"] = db_mm
+    else:
+        raw_db = int(slab_obj.get("rib_bar_dia_mm", 12))
+        db_mm = raw_db if raw_db in (12, 14, 16) else 12
+        slab_obj["rib_bar_dia_mm"] = db_mm
+
+    ds_mm = 6
+    dc_mm = 20
+    top_bar_dia_mm = 10
+
+    # 1. Dead & Live Loads per Rib (kN/m'/rib)
+    topping_wt_rib = round((hs_mm / 1000.0) * b_m * gamma_c, 4)
+    rib_web_wt_rib = round(((bw1_mm + bw2_mm) / 2000.0) * ((h_mm - hs_mm) / 1000.0) * gamma_c, 4)
+    block_wt_rib = round(blocks_per_m * w_block_kn, 4)
+    finishing_wt_rib = round(w_finishing * b_m, 4)
+
+    total_dl_rib = round(topping_wt_rib + rib_web_wt_rib + block_wt_rib + finishing_wt_rib, 4)
+    factored_dl_rib = round(1.4 * total_dl_rib, 4)
+
+    ll_rib = round(ll_kpa * b_m, 4)
+    factored_ll_rib = round(1.7 * ll_rib, 4)
+
+    wu_rib_exact = round(factored_dl_rib + factored_ll_rib, 4)
+    wu_rib_display = round(wu_rib_exact, 2)
+    wu_m2_kpa = round(wu_rib_exact / b_m, 2)
+
+    # 2. Center-to-Center Design Span L (along the rib direction)
+    rib_dir = int(slab_obj.get("rib_direction_deg", slab_obj.get("rib_angle_deg", 0)))
+    if "min_x" in slab_obj and "max_x" in slab_obj:
+        lx_cc = max(0.5, float(slab_obj["max_x"]) - float(slab_obj["min_x"]))
+        ly_cc = max(0.5, float(slab_obj.get("max_y", 0.0)) - float(slab_obj.get("min_y", 0.0)))
+    elif "x_min" in slab_obj and "x_max" in slab_obj:
+        lx_cc = max(0.5, float(slab_obj["x_max"]) - float(slab_obj["x_min"]))
+        ly_cc = max(0.5, float(slab_obj["y_max"]) - float(slab_obj["y_min"]))
+    else:
+        lx_cc = max(0.5, float(slab_obj.get("lx_m", 4.0)))
+        ly_cc = max(0.5, float(slab_obj.get("ly_m", 4.0)))
+
+    if custom_span_l_m is not None and float(custom_span_l_m) > 0.3:
+        span_l_m = round(float(custom_span_l_m), 3)
+    elif "custom_design_span_m" in slab_obj and float(slab_obj["custom_design_span_m"]) > 0.3:
+        span_l_m = round(float(slab_obj["custom_design_span_m"]), 3)
+    else:
+        span_l_m = round(lx_cc if rib_dir == 0 else ly_cc, 3)
+
+    # 3. Simply Supported Design Moment Mu = Wu_rib * L² / 8
+    if "custom_mu_knm" in slab_obj and slab_obj["custom_mu_knm"] is not None:
+        mu_knm_exact = float(slab_obj["custom_mu_knm"])
+    else:
+        mu_knm_exact = (wu_rib_exact * (span_l_m ** 2)) / 8.0
+    mu_knm = round(mu_knm_exact, 2)
+
+    # 4. Flexural Design per Excel Sheet
+    d_mm = round(h_mm - ds_mm - dc_mm - (db_mm / 2.0), 1)
+    ku_raw = (mu_knm_exact * 1_000_000.0) / max(1.0, 0.9 * b_mm * fc_mpa * (d_mm ** 2))
+    ku_clamped = min(0.38, max(0.0001, ku_raw))
+    ku_val = round(ku_clamped, 4)
+
+    disc = max(0.0, 1.0 - 2.36 * ku_val)
+    omega_raw = (1.0 - math.sqrt(disc)) / 1.18
+    omega_val = round(omega_raw, 4)
+
+    # Match Excel cell progression: ρ = ω * (fc' / Fy)
+    rho_raw = omega_val * (fc_mpa / fy_mpa)
+    rho_val = round(rho_raw, 6)
+
+    beta1 = 0.85 if fc_mpa <= 28.0 else max(0.65, 0.85 - 0.05 * ((fc_mpa - 28.0) / 7.0))
+    rho_max = round(0.85 * beta1 * (fc_mpa / fy_mpa) * (600.0 / (600.0 + fy_mpa)), 5)
+    as_min_mm2 = round((1.4 / fy_mpa) * bw2_mm * d_mm, 1)
+    as_max_mm2 = round(0.75 * rho_max * bw2_mm * d_mm, 1)
+
+    as_calc_mm2 = round(rho_val * b_mm * d_mm, 2)
+    as_req_mm2 = round(max(as_calc_mm2, as_min_mm2), 2)
+    governs_min = (as_calc_mm2 < as_min_mm2)
+
+    # Bar Area per Excel: 3.14 * db² / 4
+    area_one_bar_mm2 = round(math.pi * (db_mm ** 2) / 4.0, 2)
+    n_bar_exact = round(as_req_mm2 / max(1.0, area_one_bar_mm2), 2)
+    n_bars_adopted = max(2, int(math.ceil(n_bar_exact - 1e-6)))
+    as_provided_mm2 = round(n_bars_adopted * area_one_bar_mm2, 1)
+
+    # 5. Shear Design per Excel Sheet
+    vc_kn = round((1.1 * math.sqrt(fc_mpa) * bw2_mm * d_mm) / 6000.0, 2)
+    phi_vc_kn = round(0.85 * vc_kn, 2)
+    vu_kn = round(max(0.0, wu_rib_exact * ((span_l_m / 2.0) - (d_mm / 1000.0))), 2)
+    shear_ok = (vu_kn <= phi_vc_kn)
+    shear_status_note = (
+        "No Stirrups are required for shear (Constructive ∅6 triangular stirrups @ 200mm used)"
+        if shear_ok
+        else "WARNING: Vu > φVc! Increase slab thickness (h) or widen rib web (bw)!"
+    )
+
+    result = {
+        "slab_id": str(slab_obj.get("id", "S1")),
+        "rib_direction_deg": rib_dir,
+        "rib_direction_label": "X-Direction (0°)" if rib_dir == 0 else "Y-Direction (90°)",
+        "span_l_m": span_l_m,
+        "lx_m": round(lx_cc, 2),
+        "ly_m": round(ly_cc, 2),
+        "h_mm": h_mm,
+        "hs_mm": hs_mm,
+        "block_height_mm": round(h_mm - hs_mm, 1),
+        "s_mm": s_mm,
+        "bw1_mm": bw1_mm,
+        "bw2_mm": bw2_mm,
+        "b_mm": b_mm,
+        "dc_mm": dc_mm,
+        "ds_mm": ds_mm,
+        "db_mm": db_mm,
+        "top_bar_dia_mm": top_bar_dia_mm,
+        "d_mm": d_mm,
+        "fc_mpa": fc_mpa,
+        "fy_mpa": fy_mpa,
+        "gamma_c_kn_m3": gamma_c,
+        "w_finishing_kpa": w_finishing,
+        "ll_kpa": ll_kpa,
+        "w_block_kn": w_block_kn,
+        "blocks_per_m": blocks_per_m,
+        "topping_wt_rib": round(topping_wt_rib, 3),
+        "rib_web_wt_rib": round(rib_web_wt_rib, 3),
+        "block_wt_rib": round(block_wt_rib, 3),
+        "finishing_wt_rib": round(finishing_wt_rib, 3),
+        "total_dl_rib": round(total_dl_rib, 3),
+        "factored_dl_rib": round(factored_dl_rib, 3),
+        "ll_rib": round(ll_rib, 3),
+        "factored_ll_rib": round(factored_ll_rib, 3),
+        "wu_rib_kn_m": wu_rib_display,
+        "wu_rib_exact": wu_rib_exact,
+        "wu_m2_kpa": wu_m2_kpa,
+        "mu_knm": mu_knm,
+        "mu_formula": f"Mu = Wu_rib × L² / 8 = {wu_rib_display:.2f} × {span_l_m:.2f}² / 8 = {mu_knm:.2f} kN.m/rib",
+        "ku": ku_val,
+        "omega": omega_val,
+        "rho": rho_val,
+        "beta1": round(beta1, 2),
+        "rho_max": rho_max,
+        "as_min_mm2": as_min_mm2,
+        "as_max_mm2": as_max_mm2,
+        "as_calc_mm2": as_calc_mm2,
+        "as_req_mm2": as_req_mm2,
+        "governs_min": governs_min,
+        "area_one_bar_mm2": area_one_bar_mm2,
+        "n_bar_exact": n_bar_exact,
+        "n_bars_adopted": n_bars_adopted,
+        "as_provided_mm2": as_provided_mm2,
+        "bottom_rebar_callout": f"{n_bars_adopted}∅{db_mm} Bottom (per rib)",
+        "top_rebar_callout": f"1∅{top_bar_dia_mm} Top (Fixation Bar / سيخ تثبيت علوي)",
+        "stirrup_callout": f"∅{ds_mm} @ 200 mm Open Triangular Stirrups (كانة مثلثة مفتوحة)",
+        "vc_kn": vc_kn,
+        "phi_vc_kn": phi_vc_kn,
+        "vu_kn": vu_kn,
+        "shear_ok": shear_ok,
+        "shear_status_note": shear_status_note,
+    }
+    slab_obj["rib_design"] = result
+    return result
+
+
 def analyze_all_story_beams_and_columns(
     story_data: Dict[str, Any],
     fc_mpa: float = 20.0,
     fy_mpa: float = 350.0,
 ) -> Dict[str, Any]:
     """
-    1-Click Story Analysis (v1.9.0):
+    1-Click Story Analysis (v2.0.0-structural-bim-pro):
     - First reconciles all beam supports and spans against the active columns and perpendicular carrier beams
       so deleted or moved columns are 100% reflected in beam spans and supports.
+    - Synchronizes Hollow-Block (Hordi) slab weights from `adopted_slab_thickness_cm` (default 30.0 cm)
+      using Eng. Yousef's Excel formulas:
+        * Wu_rib (kN/m'/rib) -> used to design each slab rib S1..Sn (Mu = Wu_rib * L² / 8).
+        * Wu_m2 (kN/m²) = Wu_rib / (S + bw1) -> transferred to supporting beams (11.71 kN/m² for h=30 cm).
+    - Computes Beam Self-Weight on all beams without exception:
+        * O.W = b * h * 24 * 1.4  [kN/m]
+    - Computes Masonry Wall Load on enabled spans:
+        * W_wall = 2.5 * (t_wall_cm / 20.0) * H_story * 1.4  [kN/m]
     - Dynamically computes piecewise distributed loads along each span (splitting spans at slab and void-opening
       boundaries so an opening carries 0.00 kN/m slab load while an adjacent sub-slab like S5 applies its exact
       tributary load only over its true physical extent).
@@ -625,9 +897,69 @@ def analyze_all_story_beams_and_columns(
     openings = story_data.get("openings", [])
     story_h = float(story_data.get("height_m", 3.0))
 
-    # Realistic default slab load (8.5 kN/m²) and wall load (10.0 kN/m) matching classic Xpert Beam Analysis (~30-35 kN/m)
-    slab_wu_kpa = float(story_data.get("slab_factored_wu_kpa", 8.5))
-    default_wall_w = float(story_data.get("default_wall_load_kn_m", 10.0))
+    # Synchronize Hollow-Block (Hordi) parameters from story's adopted_slab_thickness_cm (default 30.0 cm)
+    adopted_t_cm = float(story_data.get("adopted_slab_thickness_cm", 30.0))
+    hb_prev = story_data.get("hollow_block", {})
+    hs_cm = float(hb_prev.get("topping_thickness_cm", 10.0))
+    bw_cm = float(hb_prev.get("rib_width_cm", 15.0))
+    bw_top_cm = float(hb_prev.get("rib_width_top_cm", bw_cm))
+    s_cm = float(hb_prev.get("block_width_cm", 40.0))
+    gamma_c = float(hb_prev.get("gamma_c_kn_m3", 24.0))
+    w_fin = float(hb_prev.get("finishing_load_kpa", 1.5))
+    ll_kpa = float(hb_prev.get("live_load_kpa", 2.0))
+    w_blk = float(hb_prev.get("block_weight_kn", 0.10))
+    n_blk = int(hb_prev.get("blocks_per_m", 4))
+
+    b_m_pitch = (s_cm + bw_top_cm) / 100.0
+    block_h_cm = max(5.0, adopted_t_cm - hs_cm)
+    dl_rib = (
+        (hs_cm / 100.0) * b_m_pitch * gamma_c
+        + ((bw_cm + bw_top_cm) / 200.0) * (block_h_cm / 100.0) * gamma_c
+        + (n_blk * w_blk)
+        + (w_fin * b_m_pitch)
+    )
+    wu_rib_kn_m = round(1.4 * dl_rib + 1.7 * (ll_kpa * b_m_pitch), 4)
+    auto_slab_wu_kpa = round(wu_rib_kn_m / max(0.1, b_m_pitch), 2)
+
+    hb_summary = {
+        "total_thickness_cm": round(adopted_t_cm, 1),
+        "topping_thickness_cm": round(hs_cm, 1),
+        "block_height_cm": round(block_h_cm, 1),
+        "rib_width_cm": round(bw_cm, 1),
+        "rib_width_top_cm": round(bw_top_cm, 1),
+        "block_width_cm": round(s_cm, 1),
+        "rib_pitch_cm": round(s_cm + bw_top_cm, 1),
+        "gamma_c_kn_m3": gamma_c,
+        "finishing_load_kpa": w_fin,
+        "live_load_kpa": ll_kpa,
+        "block_weight_kn": w_blk,
+        "blocks_per_m": n_blk,
+        "dl_rib_kn_m": round(dl_rib, 3),
+        "factored_dl_rib_kn_m": round(1.4 * dl_rib, 3),
+        "ll_rib_kn_m": round(ll_kpa * b_m_pitch, 3),
+        "factored_ll_rib_kn_m": round(1.7 * ll_kpa * b_m_pitch, 3),
+        "wu_rib_kn_m": round(wu_rib_kn_m, 2),
+        "factored_wu_kpa": auto_slab_wu_kpa,
+    }
+    story_data["hollow_block"] = hb_summary
+
+    if not story_data.get("custom_slab_wu_override", False):
+        story_data["slab_factored_wu_kpa"] = auto_slab_wu_kpa
+    slab_wu_kpa = float(story_data.get("slab_factored_wu_kpa", auto_slab_wu_kpa))
+
+    default_t_wall_cm = float(story_data.get("default_wall_thickness_cm", 20.0))
+    formula_wall_20cm = round(2.5 * story_h * 1.4, 2)
+    if not story_data.get("custom_wall_load_override", False):
+        story_data["default_wall_load_kn_m"] = round(formula_wall_20cm * (default_t_wall_cm / 20.0), 2)
+    default_wall_w = float(story_data.get("default_wall_load_kn_m", formula_wall_20cm))
+
+    # Design all Hollow-Block (Hordi) Slabs S1..Sn
+    slab_designs: Dict[str, Dict[str, Any]] = {}
+    for slb in slabs:
+        if slb.get("is_void", False):
+            continue
+        sid = str(slb.get("id", f"S{len(slab_designs) + 1}"))
+        slab_designs[sid] = design_hollow_block_slab_rib(slb, story_data, fc_mpa=fc_mpa, fy_mpa=fy_mpa)
 
     # Helper to find the world coordinate of Support 1's centerline for any beam
     col_coord_map = {c["id"]: (float(c["x"]), float(c["y"])) for c in columns if "id" in c}
@@ -771,7 +1103,7 @@ def analyze_all_story_beams_and_columns(
             segs = next_segs
         return segs
 
-    # Now compute piecewise distributed loads (Self-Weight + Exact Sub-Interval Slab Loads + Wall Loads)
+    # Now compute piecewise distributed loads (Beam O.W + Exact Sub-Interval Slab Loads + Wall Loads)
     for idx_b, b in enumerate(beams):
         bid = b["id"]
         b_copy = beam_map[bid]
@@ -785,15 +1117,16 @@ def analyze_all_story_beams_and_columns(
         b_w = float(b_copy.get("width_m", 0.40))
         b_h = float(b_copy.get("depth_m", 0.30))
 
-        # Beam Self-Weight: w_SW = 25.0 kN/m³ * b * h
-        w_sw = round(max(2.5, 25.0 * b_w * b_h), 2)
-        sw_eq_str = f"w_SW = 25 × {b_w:.2f} × {b_h:.2f} = {w_sw:.2f} kN/m"
+        # Beam Self-Weight (always applied on all beams): O.W = b * h * 24.0 * 1.4
+        w_sw = round(b_w * b_h * 24.0 * 1.4, 2)
+        sw_eq_str = f"O.W = {b_w:.2f} × {b_h:.2f} × 24 × 1.4 = {w_sw:.2f} kN/m"
         sup1_world = get_beam_first_support_world_coord(b_copy)
 
         if b_copy.get("manual_loads_override") and b_copy.get("loads"):
             b_copy["loads"] = [dict(ld) for ld in b_copy["loads"] if not ld.get("is_transferred_reaction")]
         else:
             flags = ensure_beam_wall_flags(story_data, b_copy)
+            thick_map = b_copy.setdefault("span_wall_thickness_cm", {})
             segments = get_beam_span_segments(b_copy)
             computed_loads: List[Dict[str, Any]] = []
             breakdown_list: List[Dict[str, Any]] = []
@@ -851,7 +1184,7 @@ def analyze_all_story_beams_and_columns(
                                 trib_m = ly if is_cant_slb else (ly * 0.50)
                                 add_w = round(slab_wu_kpa * trib_m, 2)
                                 factor_txt = f"{ly:.2f}m[Cant]" if is_cant_slb else f"({ly:.2f}/2)m"
-                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.1f}×{factor_txt}={add_w:.2f}"
+                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
                                 for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
                                     slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
                     elif (not b_horiz) and rib_dir == 0:
@@ -863,7 +1196,7 @@ def analyze_all_story_beams_and_columns(
                                 trib_m = lx if is_cant_slb else (lx * 0.50)
                                 add_w = round(slab_wu_kpa * trib_m, 2)
                                 factor_txt = f"{lx:.2f}m[Cant]" if is_cant_slb else f"({lx:.2f}/2)m"
-                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.1f}×{factor_txt}={add_w:.2f}"
+                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
                                 for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
                                     slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
 
@@ -886,7 +1219,20 @@ def analyze_all_story_beams_and_columns(
                 clean_cuts.append(w_max)
 
                 wall_on = bool(flags.get(skey, True))
-                w_wall_seg = round(default_wall_w if wall_on else 0.0, 2)
+                t_wall_span_cm = float(thick_map.get(skey, default_t_wall_cm))
+                if not wall_on:
+                    w_wall_seg = 0.0
+                    wall_eq_str = "0.00 (No Wall)"
+                else:
+                    if story_data.get("custom_wall_load_override", False) and abs(t_wall_span_cm - default_t_wall_cm) < 0.1:
+                        w_wall_seg = round(default_wall_w, 2)
+                        wall_eq_str = f"{w_wall_seg:.2f} kN/m"
+                    else:
+                        w_wall_seg = round(2.5 * (t_wall_span_cm / 20.0) * story_h * 1.4, 2)
+                        if abs(t_wall_span_cm - 20.0) < 0.1:
+                            wall_eq_str = f"2.5×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
+                        else:
+                            wall_eq_str = f"2.5×({t_wall_span_cm:.0f}/20)×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
 
                 sub_records: List[Dict[str, Any]] = []
                 for k_sub in range(len(clean_cuts) - 1):
@@ -927,21 +1273,21 @@ def analyze_all_story_beams_and_columns(
                     slab_eq_parts = sr["slab_eq_parts"]
                     w_total_seg = round(w_sw + w_slab_seg + w_wall_seg, 2)
 
-                    parts = [f"SW={w_sw:.2f}"]
+                    parts = [f"O.W={w_sw:.2f}"]
                     if w_slab_seg > 0.01:
                         parts.append(f"Slabs[{'+'.join(slab_tags)}]={w_slab_seg:.2f}")
                     else:
                         parts.append("Slabs=0.00")
                     if w_wall_seg > 0.01:
-                        parts.append(f"Wall={w_wall_seg:.2f}")
+                        parts.append(f"Wall({t_wall_span_cm:.0f}cm)={w_wall_seg:.2f}")
                     else:
                         parts.append("Wall=0.00")
 
                     lbl_prefix = seg["label"] if len(sub_records) == 1 else f"{seg['label']} [{sr['x1']:.2f}->{sr['x2']:.2f}m]"
                     desc_label = f"{lbl_prefix}: {' + '.join(parts)} = {w_total_seg:.2f} kN/m"
                     formula_detail = (
-                        f"w_total = w_SW ({w_sw:.2f}) + w_Slab ({w_slab_seg:.2f}"
-                        f"{' [' + '; '.join(slab_eq_parts) + ']' if slab_eq_parts else ''}) + w_Wall ({w_wall_seg:.2f}) = {w_total_seg:.2f} kN/m"
+                        f"w_total = O.W ({w_sw:.2f} [{b_w:.2f}×{b_h:.2f}×24×1.4]) + w_Slab ({w_slab_seg:.2f}"
+                        f"{' [' + '; '.join(slab_eq_parts) + ']' if slab_eq_parts else ''}) + W_wall ({w_wall_seg:.2f} [{wall_eq_str}]) = {w_total_seg:.2f} kN/m"
                     )
 
                     computed_loads.append({
@@ -959,6 +1305,8 @@ def analyze_all_story_beams_and_columns(
                         "w_slab": w_slab_seg,
                         "slab_eq_parts": slab_eq_parts,
                         "w_wall": w_wall_seg,
+                        "wall_thickness_cm": t_wall_span_cm,
+                        "wall_eq": wall_eq_str,
                         "wall_enabled": wall_on,
                         "label": desc_label,
                         "formula_str": formula_detail,
@@ -973,6 +1321,7 @@ def analyze_all_story_beams_and_columns(
             b_copy["load_breakdown"] = breakdown_list
             if idx_b < len(orig_beams):
                 orig_beams[idx_b]["span_wall_flags"] = dict(flags)
+                orig_beams[idx_b]["span_wall_thickness_cm"] = dict(thick_map)
                 orig_beams[idx_b]["loads"] = [dict(x) for x in computed_loads]
                 orig_beams[idx_b]["load_breakdown"] = [dict(x) for x in breakdown_list]
                 orig_beams[idx_b]["supports"] = [dict(s) for s in b_copy.get("supports", [])]
@@ -1106,6 +1455,8 @@ def analyze_all_story_beams_and_columns(
         "beam_results": beam_results,
         "beam_designs": beam_designs,
         "column_records": column_records,
+        "slab_designs": slab_designs,
+        "hollow_block_summary": hb_summary,
     }
 
 

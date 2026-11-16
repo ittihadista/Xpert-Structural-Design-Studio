@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v1.9.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.0.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -94,6 +94,8 @@ from xpert_structural_engine import (
     ensure_beam_wall_flags,
     set_story_wall_load_policy,
     set_beam_span_wall_flag,
+    set_beam_span_wall_thickness,
+    design_hollow_block_slab_rib,
     convert_beam_kind_and_section,
 )
 
@@ -709,6 +711,511 @@ class MoveNumericDeltaDialog(QDialog):
         vbox.addWidget(btns)
 
 
+class SlabRibDesignDialog(QDialog):
+    """
+    Hollow-Block (Hordi) Slab Rib Design & Cross-Section Window (v2.0.0-structural-bim-pro):
+    Matches Eng. Yousef's Excel Sheet ('Design of rib slab') 100%:
+    - Interactive Slab Selector (S1..Sn) and Main Bottom Bar Diameter Selector (12 mm, 14 mm, 16 mm).
+    - Full Load Breakdown distinguishing:
+        1. Wu_rib (kN/m'/rib) -> used for Rib Flexure & Shear Design (e.g. 6.44 kN/m'/rib for h=300mm).
+        2. Wu(m×m) (kN/m²) = Wu_rib / (S + bw1) -> transferred to Supporting Beams (e.g. 11.71 kN/m² for h=300mm).
+    - Simply Supported Moment Mu = Wu_rib * L² / 8 using full center-to-center span L.
+    - 2D Engineered Cross-Section Drawing of One Rib + Adjacent Hollow Blocks + Open Triangular Stirrup (∅6)
+      + 1 Top Fixation Bar (1∅10) + Bottom Main Bars (e.g. 2∅12).
+    """
+
+    def __init__(
+        self,
+        parent_studio: "XpertStudioMainWindow",
+        story_data: Dict[str, Any],
+        initial_slab_id: Optional[str] = None,
+    ):
+        super().__init__(parent_studio)
+        self.studio = parent_studio
+        self.story_data = story_data
+        self.slabs = [s for s in self.story_data.get("slabs", []) if not s.get("is_void", False)]
+        self.fc_mpa = float(self.studio.master_project["materials_and_soil"]["fc_mpa"]) if self.studio.master_project else 20.0
+        self.fy_mpa = float(self.studio.master_project["materials_and_soil"]["fy_mpa"]) if self.studio.master_project else 350.0
+        self.setWindowTitle("Design of Hollow-Block (Hordi) Rib Slab — Loads, Flexure, Shear & Cross-Section (ACI 318)")
+        self.setMinimumSize(1120, 740)
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self._updating_controls = False
+        self._build_ui(initial_slab_id)
+
+    def _build_ui(self, initial_slab_id: Optional[str]) -> None:
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(10, 10, 10, 10)
+        vbox.setSpacing(8)
+
+        # Top Control Bar
+        top_bar = QFrame()
+        top_bar.setStyleSheet(
+            "QFrame { background: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 5px; } "
+            "QLabel { color: #0F172A; font-weight: bold; border: none; } "
+            "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 4px 8px; font-weight: bold; }"
+        )
+        top_lay = QHBoxLayout(top_bar)
+        top_lay.setContentsMargins(10, 6, 10, 6)
+        top_lay.setSpacing(12)
+
+        lbl_slb = QLabel("Select Slab (البلاطة):")
+        lbl_slb.setStyleSheet("color: #0284C7; font-weight: bold;")
+        top_lay.addWidget(lbl_slb)
+
+        self.cb_slab = QComboBox()
+        self.cb_slab.setMinimumWidth(260)
+        target_idx = 0
+        for idx, slb in enumerate(self.slabs):
+            sid = str(slb.get("id", f"S{idx + 1}"))
+            r_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
+            des = design_hollow_block_slab_rib(slb, self.story_data, self.fc_mpa, self.fy_mpa)
+            self.cb_slab.addItem(
+                f"{sid} — Span L = {des['span_l_m']:.2f} m ({des['lx_m']:.2f}×{des['ly_m']:.2f}m | Ribs {r_dir}°)",
+                sid,
+            )
+            if initial_slab_id and sid == str(initial_slab_id):
+                target_idx = idx
+        self.cb_slab.currentIndexChanged.connect(self._on_slab_changed)
+        top_lay.addWidget(self.cb_slab)
+
+        lbl_db = QLabel("Bottom Rebar Dia db (قطر التسليح السفلي):")
+        lbl_db.setStyleSheet("color: #0D9488; font-weight: bold;")
+        top_lay.addWidget(lbl_db)
+
+        self.cb_db = QComboBox()
+        for d_val in (12, 14, 16):
+            self.cb_db.addItem(f"∅{d_val} mm {'(Default)' if d_val == 12 else ''}".strip(), d_val)
+        self.cb_db.currentIndexChanged.connect(self._on_db_changed)
+        top_lay.addWidget(self.cb_db)
+
+        self.lbl_fixed_rebar_info = QLabel(
+            "Stirrups: ∅6 mm Triangular (كانة مثلثة) | Top Bar: 1∅10 mm (سيخ واحد علوي للتثبيت)"
+        )
+        self.lbl_fixed_rebar_info.setStyleSheet("color: #475569; font-weight: bold;")
+        top_lay.addWidget(self.lbl_fixed_rebar_info)
+        top_lay.addStretch(1)
+        vbox.addWidget(top_bar)
+
+        # Main Horizontal Splitter: Left = Excel Sheet Calculation Report | Right = 2D Rib Cross-Section Drawing
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self.report_view = QTextBrowser()
+        self.report_view.setMinimumWidth(520)
+        self.report_view.setStyleSheet(
+            "QTextBrowser { background: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; padding: 8px; font-family: 'Segoe UI', Arial, sans-serif; }"
+        )
+        splitter.addWidget(self.report_view)
+
+        right_panel = QFrame()
+        right_panel.setStyleSheet("QFrame { background: #FFFFFF; border: 1px solid #CBD5E1; }")
+        right_lay = QVBoxLayout(right_panel)
+        right_lay.setContentsMargins(6, 6, 6, 6)
+        right_lay.setSpacing(6)
+
+        self.lbl_section_title = QLabel("2D Cross-Section of One Hordi Rib & Adjacent Hollow Blocks")
+        self.lbl_section_title.setStyleSheet("color: #1E3A8A; font-weight: bold; font-size: 13px; border: none;")
+        right_lay.addWidget(self.lbl_section_title)
+
+        self.sec_scene = QGraphicsScene(self)
+        self.sec_view = QGraphicsView(self.sec_scene)
+        self.sec_view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.sec_view.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
+        self.sec_view.setStyleSheet("border: 1px solid #E2E8F0; background: #FFFFFF;")
+        right_lay.addWidget(self.sec_view, 1)
+
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        vbox.addWidget(splitter, 1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(self.accept)
+        vbox.addWidget(btns)
+
+        if self.slabs:
+            self.cb_slab.setCurrentIndex(target_idx)
+            self._on_slab_changed(target_idx)
+
+    def _get_current_slab_obj(self) -> Optional[Dict[str, Any]]:
+        idx = self.cb_slab.currentIndex()
+        if idx < 0 or idx >= len(self.slabs):
+            return None
+        return self.slabs[idx]
+
+    def _on_slab_changed(self, _idx: int) -> None:
+        slb = self._get_current_slab_obj()
+        if slb is None:
+            return
+        self._updating_controls = True
+        cur_db = int(slb.get("rib_bar_dia_mm", 12))
+        db_idx = {12: 0, 14: 1, 16: 2}.get(cur_db, 0)
+        self.cb_db.setCurrentIndex(db_idx)
+        self._updating_controls = False
+        self._refresh_design_and_drawing()
+
+    def _on_db_changed(self, _idx: int) -> None:
+        if self._updating_controls:
+            return
+        self._refresh_design_and_drawing()
+        self.studio.save_and_sync_current_story()
+
+    def _refresh_design_and_drawing(self) -> None:
+        slb = self._get_current_slab_obj()
+        if slb is None:
+            return
+        db_val = int(self.cb_db.currentData() or 12)
+        des = design_hollow_block_slab_rib(slb, self.story_data, self.fc_mpa, self.fy_mpa, db_mm_override=db_val)
+        self._populate_excel_sheet_html(des)
+        self._draw_rib_cross_section(des)
+
+    def _populate_excel_sheet_html(self, d: Dict[str, Any]) -> None:
+        shear_color = "#15803D" if d["shear_ok"] else "#DC2626"
+        html = f"""
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; color: #0F172A;">
+          <h3 style="margin: 0 0 8px 0; color: #1E3A8A; border-bottom: 2px solid #0284C7; padding-bottom: 4px;">
+            Design of Rib Slab — {d['slab_id']} ({d['rib_direction_label']} | Center-to-Center L = {d['span_l_m']:.2f} m)
+          </h3>
+
+          <table width="100%" cellspacing="0" cellpadding="4" style="border-collapse: collapse; margin-bottom: 10px;">
+            <tr style="background: #E2E8F0; font-weight: bold;">
+              <td colspan="2" style="border: 1px solid #94A3B8;">1. Rib &amp; Block Geometry</td>
+              <td colspan="2" style="border: 1px solid #94A3B8;">2. Material &amp; Load Constants</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Total Slab Thickness (<b>h</b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['h_mm']:.0f} mm ({d['h_mm']/10.0:.1f} cm)</td>
+              <td style="border: 1px solid #CBD5E1;">Live Load (<b>LL</b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['ll_kpa']:.2f} kN/m²</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Topping Slab (<b>h<sub>s</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['hs_mm']:.0f} mm</td>
+              <td style="border: 1px solid #CBD5E1;">Finishing Weight (<b>W<sub>finishing</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['w_finishing_kpa']:.2f} kN/m²</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Block Width (<b>S</b>) / Height</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['s_mm']:.0f} mm / {d['block_height_mm']:.0f} mm</td>
+              <td style="border: 1px solid #CBD5E1;">Concrete <b>f'c</b> / Steel <b>Fy</b></td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['fc_mpa']:.0f} MPa / {d['fy_mpa']:.0f} MPa</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Rib Width (<b>b<sub>w1</sub> = b<sub>w2</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['bw1_mm']:.0f} mm</td>
+              <td style="border: 1px solid #CBD5E1;">Concrete Unit Weight (<b>γ<sub>c</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['gamma_c_kn_m3']:.1f} kN/m³</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Effective Flange Pitch (<b>b = S + b<sub>w1</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEF9C3; font-weight: bold;">{d['b_mm']:.0f} mm (0.55 m)</td>
+              <td style="border: 1px solid #CBD5E1;">1 Hollow Block Weight (<b>W<sub>Block</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['w_block_kn']:.2f} kN ({d['blocks_per_m']} blocks/m)</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Bar Dia (<b>d<sub>b</sub></b>) / Stirrup (<b>d<sub>s</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #DCFCE7; font-weight: bold;">{d['db_mm']} mm / {d['ds_mm']} mm</td>
+              <td style="border: 1px solid #CBD5E1;">Cover (<b>d<sub>c</sub></b>) / Effective Depth (<b>d</b>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['dc_mm']} mm / d = {d['d_mm']:.0f} mm</td>
+            </tr>
+          </table>
+
+          <table width="100%" cellspacing="0" cellpadding="4" style="border-collapse: collapse; margin-bottom: 10px;">
+            <tr style="background: #E2E8F0; font-weight: bold;">
+              <td style="border: 1px solid #94A3B8;">3. Hollow-Block Loads Breakdown</td>
+              <td style="border: 1px solid #94A3B8;">Formula</td>
+              <td style="border: 1px solid #94A3B8;">Value</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Topping Slab Weight</td>
+              <td style="border: 1px solid #CBD5E1;">(h<sub>s</sub> × (S + b<sub>w1</sub>)) × γ<sub>c</sub></td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['topping_wt_rib']:.3f} kN/m'/rib</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Rib Web Weight</td>
+              <td style="border: 1px solid #CBD5E1;">((b<sub>w1</sub>+b<sub>w2</sub>)/2) × (h - h<sub>s</sub>) × γ<sub>c</sub></td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['rib_web_wt_rib']:.3f} kN/m'/rib</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Hollow Blocks Weight</td>
+              <td style="border: 1px solid #CBD5E1;">{d['blocks_per_m']} blocks/m × {d['w_block_kn']:.2f} kN</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['block_wt_rib']:.3f} kN/m'/rib</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Finishing Weight</td>
+              <td style="border: 1px solid #CBD5E1;">W<sub>finishing</sub> × (S + b<sub>w1</sub>)</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['finishing_wt_rib']:.3f} kN/m'/rib</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Total Service Dead Load / Factored DL</td>
+              <td style="border: 1px solid #CBD5E1;">DL = {d['total_dl_rib']:.3f} &rarr; 1.4 × DL</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['factored_dl_rib']:.3f} kN/m'/rib</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Service Live Load / Factored LL</td>
+              <td style="border: 1px solid #CBD5E1;">LL = {d['ll_rib']:.3f} &rarr; 1.7 × LL</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['factored_ll_rib']:.3f} kN/m'/rib</td>
+            </tr>
+            <tr style="background: #FEF3C7; font-weight: bold;">
+              <td style="border: 1px solid #D97706;">Design Load per Rib (W<sub>u,rib</sub> — Used for Rib Design)</td>
+              <td style="border: 1px solid #D97706;">1.4 DL + 1.7 LL</td>
+              <td style="border: 1px solid #D97706; color: #B45309; font-size: 13px;">{d['wu_rib_kn_m']:.2f} kN/m'/rib</td>
+            </tr>
+            <tr style="background: #E0F2FE; font-weight: bold;">
+              <td style="border: 1px solid #0284C7;">Slab Load per m² (W<sub>u</sub>(m×m) — Transferred to Beams)</td>
+              <td style="border: 1px solid #0284C7;">W<sub>u,rib</sub> / ({d['b_mm']/1000.0:.2f} m)</td>
+              <td style="border: 1px solid #0284C7; color: #0369A1; font-size: 13px;">{d['wu_m2_kpa']:.2f} kN/m²</td>
+            </tr>
+          </table>
+
+          <table width="100%" cellspacing="0" cellpadding="4" style="border-collapse: collapse; margin-bottom: 10px;">
+            <tr style="background: #E2E8F0; font-weight: bold;">
+              <td colspan="3" style="border: 1px solid #94A3B8;">4. Design of Flexure (Simply Supported Center-to-Center Span L = {d['span_l_m']:.2f} m)</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Ultimate Moment (<b>M<sub>u</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1;">W<sub>u,rib</sub> × L² / 8 = {d['wu_rib_kn_m']:.2f} × {d['span_l_m']:.2f}² / 8</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">{d['mu_knm']:.2f} kN.m / rib</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;"><b>K<sub>u</sub></b> / <b>&omega;</b> / <b>&rho;</b></td>
+              <td style="border: 1px solid #CBD5E1;">M<sub>u</sub>×10<sup>6</sup> / (0.9 × b × f'c × d²)</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">K<sub>u</sub>={d['ku']:.4f} | &omega;={d['omega']:.4f} | &rho;={d['rho']:.6f}</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;"><b>A<sub>s,min</sub></b> / <b>A<sub>s,max</sub></b></td>
+              <td style="border: 1px solid #CBD5E1;">(1.4/Fy)×b<sub>w</sub>×d | &rho;<sub>max</sub>={d['rho_max']:.5f}</td>
+              <td style="border: 1px solid #CBD5E1;">A<sub>s,min</sub> = <b>{d['as_min_mm2']:.1f} mm²</b> | A<sub>s,max</sub> = <b>{d['as_max_mm2']:.1f} mm²</b></td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Required Steel (<b>A<sub>s</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1;">&rho; × b × d = {d['as_calc_mm2']:.2f} mm²</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">A<sub>s,req</sub> = {d['as_req_mm2']:.2f} mm²</td>
+            </tr>
+            <tr style="background: #DCFCE7; font-weight: bold;">
+              <td style="border: 1px solid #16A34A;">Adopted Bottom Reinforcement</td>
+              <td style="border: 1px solid #16A34A;">N<sub>bar</sub> = {d['as_req_mm2']:.2f} / {d['area_one_bar_mm2']:.2f} = {d['n_bar_exact']:.2f} &rArr; {d['n_bars_adopted']} bars</td>
+              <td style="border: 1px solid #16A34A; color: #15803D; font-size: 13px;">{d['bottom_rebar_callout']} (A<sub>s,prov</sub> = {d['as_provided_mm2']:.1f} mm²)</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Top Fixation Bar &amp; Stirrups</td>
+              <td style="border: 1px solid #CBD5E1;">Constructive Hordi Detailing</td>
+              <td style="border: 1px solid #CBD5E1; font-weight: bold; color: #1E3A8A;">{d['top_rebar_callout']} + {d['stirrup_callout']}</td>
+            </tr>
+          </table>
+
+          <table width="100%" cellspacing="0" cellpadding="4" style="border-collapse: collapse;">
+            <tr style="background: #E2E8F0; font-weight: bold;">
+              <td colspan="3" style="border: 1px solid #94A3B8;">5. Design of Shear (b<sub>w</sub> = {d['bw2_mm']:.0f} mm, d = {d['d_mm']:.0f} mm)</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Concrete Shear Capacity (<b>V<sub>c</sub></b> / <b>&phi;V<sub>c</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1;">1.1 &radic;f'c × b<sub>w</sub> × d / 6</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">V<sub>c</sub> = {d['vc_kn']:.2f} kN | &phi;V<sub>c</sub> = {d['phi_vc_kn']:.2f} kN</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1;">Ultimate Shear at d (<b>V<sub>u</sub></b>)</td>
+              <td style="border: 1px solid #CBD5E1;">W<sub>u,rib</sub> × (L/2 - d)</td>
+              <td style="border: 1px solid #CBD5E1; background: #FEE2E2; font-weight: bold;">V<sub>u</sub> = {d['vu_kn']:.2f} kN</td>
+            </tr>
+            <tr>
+              <td style="border: 1px solid #CBD5E1; font-weight: bold;">Shear Check Result</td>
+              <td colspan="2" style="border: 1px solid #CBD5E1; font-weight: bold; color: {shear_color};">{d['shear_status_note']}</td>
+            </tr>
+          </table>
+        </div>
+        """
+        self.report_view.setHtml(html)
+
+    def _draw_rib_cross_section(self, d: Dict[str, Any]) -> None:
+        """
+        Draws an engineered 2D Cross-Section of One Hollow-Block (Hordi) Rib + Left & Right
+        Hollow Blocks + Open Triangular Stirrup (∅6) + 1 Top Fixation Bar (1∅10) + Bottom Main Bars.
+        Matches the cross-section diagram in Eng. Yousef's Excel sheet.
+        """
+        self.sec_scene.clear()
+        self.lbl_section_title.setText(
+            f"2D Rib Cross-Section — {d['slab_id']} | h={d['h_mm']:.0f}mm, hs={d['hs_mm']:.0f}mm, bw={d['bw2_mm']:.0f}mm | "
+            f"{d['n_bars_adopted']}∅{d['db_mm']} Bottom + 1∅10 Top + ∅6 Triangular Stirrup"
+        )
+
+        # Scale: 1 mm = 0.42 px
+        sc = 0.42
+        h_mm = float(d["h_mm"])
+        hs_mm = float(d["hs_mm"])
+        blk_h_mm = max(50.0, h_mm - hs_mm)
+        s_mm = float(d["s_mm"])
+        bw1_mm = float(d["bw1_mm"])
+        bw2_mm = float(d["bw2_mm"])
+
+        total_w_mm = s_mm + bw2_mm + s_mm
+        ox = 70.0
+        oy = 90.0
+
+        tot_w_px = total_w_px = total_w_mm * sc
+        h_px = h_mm * sc
+        hs_px = hs_mm * sc
+        blk_h_px = blk_h_mm * sc
+        s_px = s_mm * sc
+        bw1_px = bw1_mm * sc
+        bw2_px = bw2_mm * sc
+
+        # 1. Concrete Top Compression Slab + Central Rib Polygon
+        conc_pen = QPen(QColor("#334155"), 2.0)
+        conc_brush = QBrush(QColor("#F1F5F9"))
+        top_rect = QRectF(ox, oy, tot_w_px, hs_px)
+        self.sec_scene.addRect(top_rect, conc_pen, conc_brush)
+
+        rib_left_top = ox + s_px + (bw2_px - bw1_px) / 2.0
+        rib_right_top = rib_left_top + bw1_px
+        rib_left_bot = ox + s_px
+        rib_right_bot = ox + s_px + bw2_px
+        rib_poly = QPolygonF([
+            QPointF(rib_left_top, oy + hs_px),
+            QPointF(rib_right_top, oy + hs_px),
+            QPointF(rib_right_bot, oy + h_px),
+            QPointF(rib_left_bot, oy + h_px),
+        ])
+        self.sec_scene.addPolygon(rib_poly, conc_pen, conc_brush)
+
+        # Redraw top slab continuous outline cleanly over rib joint
+        self.sec_scene.addLine(ox, oy, ox + tot_w_px, oy, conc_pen)
+        self.sec_scene.addLine(ox, oy, ox, oy + hs_px, conc_pen)
+        self.sec_scene.addLine(ox + tot_w_px, oy, ox + tot_w_px, oy + hs_px, conc_pen)
+
+        # Concrete stipple dots in topping slab
+        dot_pen = QPen(QColor("#94A3B8"), 1.5)
+        for dx_mm in range(30, int(total_w_mm) - 20, 55):
+            for dy_mm in (25, 65):
+                if dy_mm < hs_mm - 10:
+                    self.sec_scene.addEllipse(ox + dx_mm * sc, oy + dy_mm * sc, 2, 2, dot_pen)
+
+        # 2. Left & Right Hollow Blocks (Reddish-Brown Hollow Masonry Blocks with 2 Internal Voids)
+        blk_pen = QPen(QColor("#7C2D12"), 2.0)
+        blk_brush = QBrush(QColor("#9A3412"))
+        void_brush = QBrush(QColor("#FFFFFF"))
+
+        for blk_x0 in (ox, ox + s_px + bw2_px):
+            outer_blk = QRectF(blk_x0, oy + hs_px, s_px, blk_h_px)
+            self.sec_scene.addRect(outer_blk, blk_pen, blk_brush)
+            wall_t = 12.0
+            cell_w = (s_px - 3.0 * wall_t) / 2.0
+            cell_h = max(16.0, blk_h_px - 2.0 * wall_t)
+            c1 = QRectF(blk_x0 + wall_t, oy + hs_px + wall_t, cell_w, cell_h)
+            c2 = QRectF(blk_x0 + 2.0 * wall_t + cell_w, oy + hs_px + wall_t, cell_w, cell_h)
+            self.sec_scene.addRect(c1, blk_pen, void_brush)
+            self.sec_scene.addRect(c2, blk_pen, void_brush)
+
+        # 3. Open Triangular Stirrup (كانة مثلثة مفتوحة ∅6) inside Central Rib
+        cover_px = float(d["dc_mm"]) * sc
+        rib_cx = ox + s_px + bw2_px / 2.0
+        bot_y = oy + h_px - cover_px
+        top_apex_y = oy + cover_px + 4.0
+        left_bot_x = rib_left_bot + cover_px
+        right_bot_x = rib_right_bot - cover_px
+
+        stirrup_pen = QPen(QColor("#1D4ED8"), 2.4, Qt.PenStyle.SolidLine)
+        # Triangular stirrup legs: bottom horizontal + left inclined leg + right inclined leg + top saddle
+        tri_poly = QPolygonF([
+            QPointF(left_bot_x, bot_y),
+            QPointF(right_bot_x, bot_y),
+            QPointF(rib_cx + 10.0, top_apex_y),
+            QPointF(rib_cx - 10.0, top_apex_y),
+        ])
+        self.sec_scene.addPolygon(tri_poly, stirrup_pen, QBrush(Qt.BrushStyle.NoBrush))
+
+        # 4. Top Fixation Bar (1∅10 mm — سيخ واحد علوي للتثبيت فقط)
+        top_bar_r = 5.5
+        self.sec_scene.addEllipse(
+            rib_cx - top_bar_r,
+            top_apex_y + 2.0,
+            top_bar_r * 2.0,
+            top_bar_r * 2.0,
+            QPen(QColor("#0F172A"), 1.5),
+            QBrush(QColor("#0284C7")),
+        )
+
+        # 5. Bottom Main Reinforcement Bars (n_bars_adopted ∅ db_mm — تسليح العصب السفلي)
+        n_bars = int(d["n_bars_adopted"])
+        bar_r = 6.5 if d["db_mm"] >= 14 else 5.8
+        usable_bot_w = max(16.0, (right_bot_x - left_bot_x) - 2.0 * bar_r)
+        for i in range(n_bars):
+            frac = 0.5 if n_bars == 1 else (i / float(n_bars - 1))
+            bx = (left_bot_x + bar_r) + frac * usable_bot_w
+            by = bot_y - bar_r - 1.5
+            self.sec_scene.addEllipse(
+                bx - bar_r,
+                by - bar_r,
+                bar_r * 2.0,
+                bar_r * 2.0,
+                QPen(QColor("#0F172A"), 1.5),
+                QBrush(QColor("#DC2626")),
+            )
+
+        # 6. Engineering Dimension Lines & Callouts (matching Excel Diagram)
+        dim_pen = QPen(QColor("#0284C7"), 1.4)
+        font_dim = QFont("Arial", 9, QFont.Weight.Bold)
+
+        # Top bw1 dimension
+        y_top_dim = oy - 24.0
+        self.sec_scene.addLine(rib_left_top, oy - 4, rib_left_top, y_top_dim - 6, dim_pen)
+        self.sec_scene.addLine(rib_right_top, oy - 4, rib_right_top, y_top_dim - 6, dim_pen)
+        self.sec_scene.addLine(rib_left_top, y_top_dim, rib_right_top, y_top_dim, dim_pen)
+        t_bw1 = self.sec_scene.addText(f"bw1 = {bw1_mm:.0f} mm", font_dim)
+        t_bw1.setDefaultTextColor(QColor("#0369A1"))
+        t_bw1.setPos(rib_cx - 42, y_top_dim - 22)
+
+        # Bottom S and bw2 dimensions
+        y_bot_dim = oy + h_px + 26.0
+        for x_tick in (ox, ox + s_px, ox + s_px + bw2_px, ox + tot_w_px):
+            self.sec_scene.addLine(x_tick, oy + h_px + 4, x_tick, y_bot_dim + 6, dim_pen)
+        self.sec_scene.addLine(ox, y_bot_dim, ox + s_px + bw2_px, y_bot_dim, dim_pen)
+
+        t_s = self.sec_scene.addText(f"S = {s_mm:.0f} mm", font_dim)
+        t_s.setDefaultTextColor(QColor("#0369A1"))
+        t_s.setPos(ox + s_px / 2.0 - 38, y_bot_dim + 4)
+
+        t_bw2 = self.sec_scene.addText(f"bw2 = {bw2_mm:.0f} mm", font_dim)
+        t_bw2.setDefaultTextColor(QColor("#0369A1"))
+        t_bw2.setPos(rib_cx - 42, y_bot_dim + 4)
+
+        # Right-side hs and h dimensions
+        x_r1 = ox + tot_w_px + 24.0
+        x_r2 = ox + tot_w_px + 68.0
+        self.sec_scene.addLine(ox + tot_w_px + 4, oy, x_r2 + 6, oy, dim_pen)
+        self.sec_scene.addLine(ox + tot_w_px + 4, oy + hs_px, x_r1 + 6, oy + hs_px, dim_pen)
+        self.sec_scene.addLine(ox + tot_w_px + 4, oy + h_px, x_r2 + 6, oy + h_px, dim_pen)
+        self.sec_scene.addLine(x_r1, oy, x_r1, oy + hs_px, dim_pen)
+        self.sec_scene.addLine(x_r2, oy, x_r2, oy + h_px, dim_pen)
+
+        t_hs = self.sec_scene.addText(f"hs={hs_mm:.0f}", font_dim)
+        t_hs.setDefaultTextColor(QColor("#0369A1"))
+        t_hs.setPos(x_r1 + 4, oy + hs_px / 2.0 - 10)
+
+        t_h = self.sec_scene.addText(f"h={h_mm:.0f}mm", font_dim)
+        t_h.setDefaultTextColor(QColor("#0F172A"))
+        t_h.setPos(x_r2 + 4, oy + h_px / 2.0 - 10)
+
+        # Reinforcement Callout Box below section
+        y_box = y_bot_dim + 36.0
+        callout_rect = QRectF(ox, y_box, tot_w_px, 82.0)
+        self.sec_scene.addRect(callout_rect, QPen(QColor("#94A3B8"), 1.2), QBrush(QColor("#F8FAFC")))
+
+        c_lines = [
+            (f"● Bottom Main Steel: {d['n_bars_adopted']}∅{d['db_mm']} per rib (As,prov = {d['as_provided_mm2']:.1f} mm² >= As,req = {d['as_req_mm2']:.1f} mm²)", "#DC2626"),
+            (f"● Top Fixation Bar: 1∅{d['top_bar_dia_mm']} mm (سيخ واحد علوي للتثبيت فقط)", "#0284C7"),
+            (f"● Rib Stirrups: ∅{d['ds_mm']} @ 200 mm Open Triangular Stirrups (كانة مثلثة مفتوحة)", "#1D4ED8"),
+            (f"● Loads: Wu_rib = {d['wu_rib_kn_m']:.2f} kN/m'/rib  |  Wu(m×m) = {d['wu_m2_kpa']:.2f} kN/m²  |  Mu = {d['mu_knm']:.2f} kN.m", "#0F172A"),
+        ]
+        for idx_l, (txt_str, col_hex) in enumerate(c_lines):
+            item_t = self.sec_scene.addText(txt_str, QFont("Segoe UI", 9, QFont.Weight.Bold))
+            item_t.setDefaultTextColor(QColor(col_hex))
+            item_t.setPos(ox + 8, y_box + 4 + idx_l * 18)
+
+        bounds = self.sec_scene.itemsBoundingRect().adjusted(-20, -20, 25, 20)
+        self.sec_scene.setSceneRect(bounds)
+        self.sec_view.fitInView(bounds, Qt.AspectRatioMode.KeepAspectRatio)
+
+
 class StructuralCadCanvas2D(QGraphicsView):
     """
     Revit + AutoCAD Hybrid 2D Structural BIM Canvas:
@@ -1242,16 +1749,22 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         elif kind == "slab":
             slb_obj = next((s for s in story.get("slabs", []) if str(s.get("id")) == eid), None)
-            ang = int(round(float((slb_obj or {}).get("rib_angle_deg", 0))))
+            ang = int(round(float((slb_obj or {}).get("rib_direction_deg", (slb_obj or {}).get("rib_angle_deg", 0)))))
             lx = float((slb_obj or {}).get("lx_m", 0.0))
             ly = float((slb_obj or {}).get("ly_m", 0.0))
             hdr = menu.addAction(f"Slab {eid} ({lx:.2f} × {ly:.2f} m | Ribs {ang}°)")
             hdr.setEnabled(False)
             menu.addSeparator()
+            act_rib = menu.addAction(
+                f"Inspect {eid} Rib Loads, Flexural/Shear Design & Cross-Section (تصميم العصب الهوردي)..."
+            )
             act_sched = menu.addAction("View Story Schedules & Calculation Report (Tab 4)")
+            menu.addSeparator()
             act_zext = menu.addAction("Zoom Extents (Fit Floor Plan)")
             chosen = menu.exec(global_pt)
-            if chosen == act_sched:
+            if chosen == act_rib:
+                self.studio.open_slab_rib_design_dialog(eid)
+            elif chosen == act_sched:
                 self.studio.run_analyze_all_beams(switch_to_tab=3)
             elif chosen == act_zext:
                 self.zoom_extents()
@@ -1264,6 +1777,22 @@ class StructuralCadCanvas2D(QGraphicsView):
             chosen = menu.exec(global_pt)
             if chosen == act_zext:
                 self.zoom_extents()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.active_tool == "SELECT":
+            scene_pt = self.mapToScene(event.position().toPoint())
+            raw_x, raw_y = self._scene_to_world_m(scene_pt)
+            found = self._find_element_near(raw_x, raw_y)
+            if found:
+                if found["kind"] == "slab":
+                    self.studio.open_slab_rib_design_dialog(str(found["id"]))
+                    event.accept()
+                    return
+                if found["kind"] == "beam":
+                    self.studio.run_analyze_all_beams(switch_to_tab=1, select_beam_id=str(found["id"]))
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         if self._is_panning:
@@ -1929,10 +2458,24 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self.scene_2d.addPolygon(beam_poly, QPen(border_col, 2.5 if is_sel_bm else 1.5, pen_style), hatch_brush)
 
                 if self.layer_show_tags:
-                    tx, ty, _ = compute_smart_beam_tag_position(bm, columns, placed_tags)
-                    txt = self.scene_2d.addText(f"{bm['id']}", QFont("Arial", 9, QFont.Weight.Bold))
+                    tx, ty, _ = compute_smart_beam_tag_position(
+                        bm,
+                        columns,
+                        placed_tags,
+                        all_beams=story_data.get("beams", []),
+                        slabs=story_data.get("slabs", []),
+                    )
+                    b_tag_str = str(bm["id"])
+                    tag_w = max(24.0, len(b_tag_str) * 8.5 + 8.0)
+                    tag_bg = QRectF(tx * s - tag_w / 2.0, -ty * s - 10.0, tag_w, 18.0)
+                    self.scene_2d.addRect(
+                        tag_bg,
+                        QPen(QColor("#FB923C"), 1.0),
+                        QBrush(QColor(15, 23, 42, 225)),
+                    )
+                    txt = self.scene_2d.addText(b_tag_str, QFont("Arial", 8, QFont.Weight.Bold))
                     txt.setDefaultTextColor(QColor("#FB923C"))
-                    txt.setPos(tx * s - 10, -ty * s - 12)
+                    txt.setPos(tx * s - tag_w / 2.0 + 2.0, -ty * s - 12.0)
 
         # 4. Columns (0.20 x 0.40 m Strictly Inside Boundary) & Bright Green Column Tags
         if self.layer_show_cols:
@@ -2200,21 +2743,22 @@ class BeamDiagramsViewWidget(QWidget):
         self.cb_wall_policy.setStyleSheet(combo_light_qss)
         top_lay.addWidget(self.cb_wall_policy)
 
-        top_lay.addWidget(QLabel("Slab q_u (kN/m²):"))
+        top_lay.addWidget(QLabel("Slab Wu (kN/m²):"))
         self.sp_slab_load = QDoubleSpinBox()
         self.sp_slab_load.setRange(2.0, 40.0)
-        self.sp_slab_load.setValue(8.5)
+        self.sp_slab_load.setValue(11.71)
         self.sp_slab_load.setSingleStep(0.5)
         self.sp_slab_load.setDecimals(2)
-        self.sp_slab_load.setToolTip("Factored Hollow-Block Slab Load q_u (kN/m²) transferred by one-way ribs")
+        self.sp_slab_load.setToolTip("Factored Hollow-Block Slab Area Load Wu(m×m) (kN/m²) transferred by one-way ribs to beams")
         top_lay.addWidget(self.sp_slab_load)
 
         top_lay.addWidget(QLabel("Wall w (kN/m):"))
         self.sp_wall_load = QDoubleSpinBox()
         self.sp_wall_load.setRange(0.0, 60.0)
-        self.sp_wall_load.setValue(10.0)
-        self.sp_wall_load.setSingleStep(1.0)
-        self.sp_wall_load.setDecimals(1)
+        self.sp_wall_load.setValue(10.50)
+        self.sp_wall_load.setSingleStep(0.5)
+        self.sp_wall_load.setDecimals(2)
+        self.sp_wall_load.setToolTip("Default Masonry Wall Load (20cm wall: Wwall = 2.5 × H × 1.4)")
         top_lay.addWidget(self.sp_wall_load)
 
         btn_apply_policy = QPushButton("Apply Loads && Re-Solve")
@@ -2340,8 +2884,8 @@ class BeamDiagramsViewWidget(QWidget):
         story = self.studio.current_story_data
         policy = str(self.cb_wall_policy.currentData() or "all_beams")
         w_val = float(self.sp_wall_load.value())
-        story["slab_factored_wu_kpa"] = round(float(self.sp_slab_load.value()), 2)
-        set_story_wall_load_policy(story, policy, w_val, apply_to_all_existing_spans=True)
+        q_val = round(float(self.sp_slab_load.value()), 2)
+        set_story_wall_load_policy(story, policy, w_val, apply_to_all_existing_spans=True, slab_load_kpa=q_val)
         current_bid = self.cb_beam_select.currentData()
         self.studio.save_and_sync_current_story()
         self.studio.run_analyze_all_beams(switch_to_tab=1, select_beam_id=current_bid)
@@ -2352,9 +2896,13 @@ class BeamDiagramsViewWidget(QWidget):
             return
         bid = self.cb_beam_select.itemData(idx)
         story = self.studio.current_story_data
+        story.pop("custom_slab_wu_override", None)
+        story.pop("custom_wall_load_override", None)
         bm = next((b for b in story.get("beams", []) if str(b["id"]) == str(bid)), None)
         if bm is not None:
             bm.pop("loads", None)
+            bm.pop("manual_loads_override", None)
+            bm.pop("span_wall_thickness_cm", None)
             ensure_beam_wall_flags(story, bm)
             self.studio.save_and_sync_current_story()
             self.studio.run_analyze_all_beams(switch_to_tab=1, select_beam_id=str(bid))
@@ -2370,11 +2918,11 @@ class BeamDiagramsViewWidget(QWidget):
         self.cb_wall_policy.blockSignals(False)
 
         self.sp_slab_load.blockSignals(True)
-        self.sp_slab_load.setValue(float(story_data.get("slab_factored_wu_kpa", 8.5)))
+        self.sp_slab_load.setValue(float(story_data.get("slab_factored_wu_kpa", 11.71)))
         self.sp_slab_load.blockSignals(False)
 
         self.sp_wall_load.blockSignals(True)
-        self.sp_wall_load.setValue(float(story_data.get("default_wall_load_kn_m", 10.0)))
+        self.sp_wall_load.setValue(float(story_data.get("default_wall_load_kn_m", 10.50)))
         self.sp_wall_load.blockSignals(False)
 
         beams = story_data.get("beams", [])
@@ -2413,20 +2961,47 @@ class BeamDiagramsViewWidget(QWidget):
 
         segs = get_beam_span_segments(bm)
         flags = ensure_beam_wall_flags(story_data, bm)
+        thick_map = bm.setdefault("span_wall_thickness_cm", {})
+        default_t_cm = float(story_data.get("default_wall_thickness_cm", 20.0))
         bid = str(bm["id"])
         for seg in segs:
             skey = str(seg["key"])
             chk = QCheckBox(f"{seg['label']} ({seg['length_m']:.2f}m)")
-            chk.setChecked(bool(flags.get(skey, True)))
+            is_on = bool(flags.get(skey, True))
+            chk.setChecked(is_on)
             chk.toggled.connect(
                 lambda checked, b_id=bid, k=skey: self._on_span_wall_flag_toggled(b_id, k, checked)
             )
             self.span_chk_lay.addWidget(chk)
+
+            sp_tw = QDoubleSpinBox()
+            sp_tw.setRange(5.0, 60.0)
+            sp_tw.setSingleStep(5.0)
+            sp_tw.setDecimals(0)
+            sp_tw.setSuffix("cm wall")
+            sp_tw.setValue(float(thick_map.get(skey, default_t_cm)))
+            sp_tw.setEnabled(is_on)
+            sp_tw.setToolTip(f"Wall thickness on {seg['label']} (default 20 cm): W_wall = 2.5 × (t_wall/20) × H × 1.4")
+            sp_tw.setStyleSheet(
+                "QDoubleSpinBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; padding: 1px 4px; font-weight: bold; }"
+            )
+            sp_tw.valueChanged.connect(
+                lambda val, b_id=bid, k=skey: self._on_span_wall_thickness_changed(b_id, k, val)
+            )
+            self.span_chk_lay.addWidget(sp_tw)
             self._span_wall_checkboxes.append((skey, chk))
 
     def _on_span_wall_flag_toggled(self, beam_id: str, span_key: str, checked: bool) -> None:
         story = self.studio.current_story_data
         ok, msg = set_beam_span_wall_flag(story, beam_id, span_key, checked)
+        if ok:
+            self.studio.save_and_sync_current_story()
+            self.studio.run_analyze_all_beams(switch_to_tab=1, select_beam_id=beam_id)
+            self.studio.update_contextual_prompt(msg)
+
+    def _on_span_wall_thickness_changed(self, beam_id: str, span_key: str, wall_t_cm: float) -> None:
+        story = self.studio.current_story_data
+        ok, msg = set_beam_span_wall_thickness(story, beam_id, span_key, wall_t_cm)
         if ok:
             self.studio.save_and_sync_current_story()
             self.studio.run_analyze_all_beams(switch_to_tab=1, select_beam_id=beam_id)
@@ -3511,6 +4086,11 @@ class XpertStudioMainWindow(QMainWindow):
         act_sched_tab.triggered.connect(lambda: self.run_analyze_all_beams(switch_to_tab=3))
         m_analyze.addAction(act_sched_tab)
 
+        m_analyze.addSeparator()
+        act_slab_rib = QAction("Open Hollow-Block Slab Rib Design && Cross-Section (تصميم الأعصاب والقطاع العرضي للبلاطات)...", self)
+        act_slab_rib.triggered.connect(lambda: self.open_slab_rib_design_dialog())
+        m_analyze.addAction(act_slab_rib)
+
         # 7. OPTIONS MENU (Startup Defaults & Materials/Hollow-Block Slab Options)
         m_options = mbar.addMenu("&Options")
         act_opt_start = QAction("Startup Defaults (إعدادات البداية — المجلد وأقطار التسليح)...", self)
@@ -3608,7 +4188,7 @@ class XpertStudioMainWindow(QMainWindow):
             btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             self.zoom_tb.addWidget(btn)
 
-        # 2. Dedicated MODIFY Toolbar (Includes Convert Beam Hidden<->Drop & Flip Slab Rib)
+        # 2. Dedicated MODIFY Toolbar (Includes Convert Beam Hidden<->Drop, Flip Slab Rib & Slab Rib Design)
         self.modify_tb = QToolBar("Modify Toolbar", self)
         self.modify_tb.setStyleSheet("QToolBar { spacing: 4px; padding: 2px 6px; background: #F1F5F9; }")
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.modify_tb)
@@ -3619,6 +4199,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("Select / Box", "SELECT"),
             ("Convert Beam (Hid↔Drop)", "CONVERT_BEAM_KIND"),
             ("Flip Slab Rib (0°↔90°)", "FLIP_SLAB_RIB_NOW"),
+            ("Slab Rib Design", "SLAB_RIB_DESIGN_DLG"),
             ("Align Face (AL)", "ALIGN_ELEMENT"),
             ("Move: Pt->Pt (MV)", "MOVE_ELEMENT"),
             ("Move: ΔX, ΔY", "MOVE_NUMERIC_DLG"),
@@ -3640,6 +4221,10 @@ class XpertStudioMainWindow(QMainWindow):
             elif tid == "FLIP_SLAB_RIB_NOW":
                 btn.setStyleSheet("background-color: #FEF3C7; color: #92400E; border: 1px solid #D97706; font-weight: bold; padding: 3px 8px;")
                 btn.clicked.connect(self.flip_selected_or_pick_slab_rib)
+                self._slab_only_widgets.append(btn)
+            elif tid == "SLAB_RIB_DESIGN_DLG":
+                btn.setStyleSheet("background-color: #DCFCE7; color: #166534; border: 1px solid #16A34A; font-weight: bold; padding: 3px 8px;")
+                btn.clicked.connect(lambda: self.open_slab_rib_design_dialog())
                 self._slab_only_widgets.append(btn)
             elif tid == "MOVE_NUMERIC_DLG":
                 btn.setStyleSheet("padding: 3px 8px; font-weight: bold;")
@@ -4281,6 +4866,11 @@ class XpertStudioMainWindow(QMainWindow):
         for w in self._slab_only_widgets:
             w.setEnabled(not is_tie)
 
+        adopted_cm = float(self.current_story_data.get("adopted_slab_thickness_cm", 30.0))
+        self.sp_adopted_thick.blockSignals(True)
+        self.sp_adopted_thick.setValue(adopted_cm)
+        self.sp_adopted_thick.blockSignals(False)
+
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._last_saved_snapshot = json.dumps(self.current_story_data, sort_keys=True)
@@ -4308,27 +4898,110 @@ class XpertStudioMainWindow(QMainWindow):
         else:
             self.btn_smart_opt.setVisible(False)
 
-    def apply_story_thickness(self) -> None:
+    def _check_and_apply_slab_thickness(self, interactive: bool = True) -> float:
+        """
+        v2.0.0: Evaluates the entered slab thickness in `sp_adopted_thick` (default 30.0 cm)
+        against the calculated minimum thickness from the floor plan (`calculated_min_thickness_cm`).
+        If entered < calculated_min_thickness_cm and `interactive=True`, shows a warning dialog
+        giving the user two explicit choices:
+          1. Continue with entered thickness (`الاستمرار بالسمك المدخل`) -> keep entered value.
+          2. Modify thickness to calculated minimum (`تعديل السمك إلى القيمة المحسوبة`) -> update spinbox & story thickness.
+        Then updates `adopted_slab_thickness_cm`, hidden beam depths, and Hordi area load `Wu (m×m)`.
+        """
+        if self.is_tie_beams_story():
+            return 30.0
         fy = float(self.master_project["materials_and_soil"]["fy_mpa"]) if self.master_project else 350.0
         eval_res = evaluate_story_thickness_and_optimization(self.current_story_data, fy)
-        entered = self.sp_adopted_thick.value()
+        entered = float(self.sp_adopted_thick.value())
         req = float(eval_res.get("calculated_min_thickness_cm", 0.0))
 
-        if eval_res.get("has_data") and entered < req:
-            ans = QMessageBox.warning(
-                self,
-                "ACI 318 Minimum Thickness Warning",
-                f"Entered slab thickness ({entered:.1f} cm) is less than the ACI 318 calculated minimum "
-                f"thickness ({req:.1f} cm) governed by {eval_res['governing_member']}.\n\n"
-                f"Do you want to continue with your entered value ({entered:.1f} cm) or modify it?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        if interactive and "--check" not in sys.argv and eval_res.get("has_data") and entered < req - 1e-4:
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setWindowTitle("تحذير الحد الأدنى لسمك السقف الهوردي (Minimum Slab Thickness Warning)")
+            msg_box.setText(
+                f"السمك المدخل للسقف ({entered:.1f} cm) أقل من السمك الأدنى المسموح به والمحسوب من المسقط "
+                f"({req:.1f} cm) والمحكوم بالعنصر: {eval_res.get('governing_member', '')}.\n\n"
+                f"Launched thickness ({entered:.1f} cm) is less than the calculated minimum thickness ({req:.1f} cm).\n\n"
+                f"اختر الإجراء المطلوب لحساب الأحمال والتصميم:"
             )
-            if ans == QMessageBox.StandardButton.No:
-                self.sp_adopted_thick.setFocus()
-                return
+            btn_continue = msg_box.addButton(
+                f"الاستمرار بالسمك المدخل ({entered:.1f} cm)", QMessageBox.ButtonRole.AcceptRole
+            )
+            btn_modify = msg_box.addButton(
+                f"تعديل السمك إلى ({req:.1f} cm) وحساب الأحمال", QMessageBox.ButtonRole.ActionRole
+            )
+            msg_box.setDefaultButton(btn_modify)
+            msg_box.exec()
+            if msg_box.clickedButton() == btn_modify:
+                entered = round(req, 1)
+                self.sp_adopted_thick.blockSignals(True)
+                self.sp_adopted_thick.setValue(entered)
+                self.sp_adopted_thick.blockSignals(False)
 
         self.current_story_data["adopted_slab_thickness_cm"] = entered
+        h_m = round(entered / 100.0, 3)
+        for bm in self.current_story_data.get("beams", []):
+            kind_str = str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower()
+            if "drop" not in kind_str:
+                bm["depth_m"] = h_m
+        if self.master_project and isinstance(self.master_project.get("hollow_block_slab_options"), dict):
+            hb = self.master_project["hollow_block_slab_options"]
+            hb["total_slab_thickness_cm"] = entered
+            hb_res = compute_hollow_block_slab_loads(hb)
+            hb.update(hb_res)
+            self.current_story_data["hollow_block_slab_options"] = dict(hb)
+            assump = self.current_story_data.setdefault("beam_load_assumptions", {})
+            assump["slab_qu_kn_m2"] = float(hb_res["area_factored_qu_kn_m2"])
+        return entered
+
+    def apply_story_thickness(self) -> None:
+        final_cm = self._check_and_apply_slab_thickness(interactive=True)
         self.save_and_sync_current_story()
+        self.refresh_story_ui()
+        if self.current_story_data.get("beams"):
+            self._solve_story_and_refresh_views()
+        hb_opts = self.current_story_data.get("hollow_block_slab_options", {})
+        wu_m2 = float(hb_opts.get("area_factored_qu_kn_m2", 11.71))
+        wu_rib = float(hb_opts.get("rib_factored_wu_kn_m", 6.44))
+        self.update_contextual_prompt(
+            f"Applied Slab Thickness h = {final_cm:.1f} cm ({final_cm*10:.0f} mm) -> "
+            f"Wu(rib) = {wu_rib:.2f} kN/m'/rib | Area Load Wu(m×m) = {wu_m2:.2f} kN/m²."
+        )
+
+    def open_slab_rib_design_dialog(self, initial_slab_id: Optional[str] = None) -> None:
+        if self.is_tie_beams_story():
+            QMessageBox.information(
+                self,
+                "Tie-Beams Story (مسقط السملات)",
+                "Tie-Beams story (00_TieBeams) does not contain hollow-block slabs.",
+            )
+            return
+        slabs = self.current_story_data.get("slabs", [])
+        if not slabs:
+            QMessageBox.information(
+                self,
+                "Hollow-Block Slab Rib Design (تصميم الأعصاب الهوردي)",
+                "No slabs found on the active story. Click 'Auto-Fill All Slabs' or '4A. Pick: Slab' first.",
+            )
+            return
+        if not initial_slab_id:
+            sel_slabs = [eid for kind, eid in self.cad_canvas.selected_items if kind == "slab"]
+            if sel_slabs:
+                initial_slab_id = str(sel_slabs[0])
+        self._check_and_apply_slab_thickness(interactive=False)
+        fc = float(self.master_project["materials_and_soil"]["fc_mpa"]) if self.master_project else 20.0
+        fy = float(self.master_project["materials_and_soil"]["fy_mpa"]) if self.master_project else 350.0
+        dlg = SlabRibDesignDialog(
+            self,
+            story_data=self.current_story_data,
+            fc_mpa=fc,
+            fy_mpa=fy,
+            initial_slab_id=initial_slab_id,
+        )
+        dlg.exec()
+        self.save_and_sync_current_story()
+        self.refresh_story_ui()
 
     def convert_critical_beam_to_drop(self) -> None:
         fy = float(self.master_project["materials_and_soil"]["fy_mpa"]) if self.master_project else 350.0
@@ -4579,11 +5252,14 @@ class XpertStudioMainWindow(QMainWindow):
             )
             return
 
+        self._check_and_apply_slab_thickness(interactive=True)
+        self.save_and_sync_current_story()
         self._solve_story_and_refresh_views(select_beam_id=select_beam_id)
         col_recs = self.last_analysis_bundle.get("column_records", []) if self.last_analysis_bundle else []
+        slab_recs = self.last_analysis_bundle.get("slab_designs", []) if self.last_analysis_bundle else []
         self.switch_workspace_mode(switch_to_tab, auto_solve=False)
         self.update_contextual_prompt(
-            f"Analysis & Design Complete (ACI 318-19): Solved {len(beams)} beam(s) and {len(col_recs)} column(s)."
+            f"Analysis & Design Complete (ACI 318-19): Solved {len(slab_recs)} slab(s), {len(beams)} beam(s), and {len(col_recs)} column(s)."
         )
 
     def switch_workspace_mode(self, mode_idx: int, auto_solve: bool = True) -> None:

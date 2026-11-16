@@ -742,9 +742,9 @@ class TestXpertStudioEngine(unittest.TestCase):
         # Over opening [5.30, 7.30], w_Slab == 0, so mag == w_SW + w_Wall (no slab term in formula_str)
         op_seg = next(ld for ld in b6_loads if abs(ld["start"] - 5.30) < 0.1)
         self.assertIn("w_Slab (0.00)", op_seg["formula_str"])
-        # Over S5 [7.30, 9.30], S5 contributes full 10.0*(2.00/2)=10.00 kN/m
+        # Over S5 [7.30, 9.30], S5 contributes full 11.71*(2.00/2)=11.71 kN/m
         s5_seg = next(ld for ld in b6_loads if abs(ld["start"] - 7.30) < 0.1)
-        self.assertIn("S5: 10.0×(2.00/2)m=10.00", s5_seg["formula_str"])
+        self.assertIn("S5: 11.71×(2.00/2)m=11.71", s5_seg["formula_str"])
 
         # 3. Verify Tie-Beams story allows drawing a Drop Beam with empty slab_edge_polygon
         tie_cols = [
@@ -757,9 +757,147 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertTrue(ok_tie)
         self.assertEqual(tie_bm["beam_kind"], "drop")
 
+    def test_v200_excel_hordi_slab_rib_design_beam_ow_wall_and_wu_transfer(self):
+        """
+        Verifies all v2.0.0 upgrades requested by Eng. Yousef matching his Excel sheet (`Design of rib slab`):
+        1. Hollow-Block (Hordi) Slab Load Calculation & Rib Design (`design_hollow_block_slab_rib`):
+           - For h = 300 mm (30 cm), hs = 100 mm, S = 400 mm, bw1 = bw2 = 150 mm, b = 550 mm,
+             γc = 24 kN/m³, W_finishing = 1.5 kN/m², LL = 2.0 kN/m², W_block = 0.10 kN,
+             fy = 350 MPa, fc' = 20 MPa, db = 12 mm, ds = 6 mm, dc = 20 mm, Center-to-Center Span L = 4.55 m:
+           - Topping = 1.320, Rib = 0.720, Blocks = 0.400, Finishing = 0.825 -> DL = 3.265 kN/m'/rib -> 1.4*DL = 4.571
+           - LL = 1.100 kN/m'/rib -> 1.7*LL = 1.870
+           - Design Load per Rib: Wu(rib) = 6.441 kN/m'/rib (6.44 kN/m'/rib)
+           - Area Load per Square Meter (transferred to Beams): Wu(m×m) = 6.441 / 0.55 = 11.71 kN/m²
+           - Flexure: Mu = Wu(rib) * L² / 8 = 6.441 * 4.55² / 8 = 16.67 kN.m, d = 268 mm,
+             Ku = 0.0234, ω = 0.0237, ρ = 0.001354, As = 199.58 mm², Nbar = 1.76 -> 2∅12 Bottom,
+             1∅10 Top fixation bar, ∅6 @ 200 mm open triangular stirrup.
+           - Shear: Vc = 32.96 kN, φVc = 28.02 kN, Vu = 12.93 kN <= φVc (OK).
+        2. Exact Beam Self-Weight (`O.W = b * h * 24 * 1.4`) and Masonry Wall Load (`W_wall = 2.5 * (t_wall/20) * H * 1.4`):
+           - Hidden beam 0.40×0.30m -> O.W = 0.40 * 0.30 * 24 * 1.4 = 4.032 kN/m (4.03 kN/m).
+           - Drop beam 0.20×0.50m -> O.W = 0.20 * 0.50 * 24 * 1.4 = 3.360 kN/m (3.36 kN/m).
+           - Wall height H = 3.0m, t_wall = 20 cm -> W_wall = 2.5 * 1.0 * 3.0 * 1.4 = 10.50 kN/m.
+           - Per-span wall thickness override (`set_beam_span_wall_thickness`): t_wall = 15 cm -> W_wall = 7.88 kN/m.
+        """
+        from xpert_structural_engine import (
+            design_hollow_block_slab_rib,
+            set_beam_span_wall_thickness,
+        )
+
+        # 1. Exact Excel verification for L = 4.55 m (Center-to-Center Span) and h = 30.0 cm (300 mm)
+        slab_excel = {
+            "id": "S1",
+            "min_x": 0.0,
+            "max_x": 4.55,
+            "min_y": 0.0,
+            "max_y": 4.00,
+            "lx_m": 4.55,
+            "ly_m": 4.00,
+            "rib_angle_deg": 0,
+            "rib_direction_deg": 0,
+            "rib_bar_dia_mm": 12,
+        }
+        story_excel = {
+            "story_id": "02_Ground_Floor",
+            "height_m": 3.00,
+            "adopted_slab_thickness_cm": 30.0,
+        }
+        res_rib = design_hollow_block_slab_rib(slab_excel, story_excel, fc_mpa=20.0, fy_mpa=350.0)
+
+        self.assertAlmostEqual(res_rib["topping_wt_rib"], 1.32, places=2)
+        self.assertAlmostEqual(res_rib["rib_web_wt_rib"], 0.72, places=2)
+        self.assertAlmostEqual(res_rib["block_wt_rib"], 0.40, places=2)
+        self.assertAlmostEqual(res_rib["finishing_wt_rib"], 0.825, places=3)
+        self.assertAlmostEqual(res_rib["total_dl_rib"], 3.265, places=3)
+        self.assertAlmostEqual(res_rib["factored_dl_rib"], 4.571, places=3)
+        self.assertAlmostEqual(res_rib["ll_rib"], 1.10, places=2)
+        self.assertAlmostEqual(res_rib["factored_ll_rib"], 1.87, places=2)
+        self.assertAlmostEqual(res_rib["wu_rib_kn_m"], 6.44, places=2)
+        self.assertAlmostEqual(res_rib["wu_m2_kpa"], 11.71, places=2)
+        self.assertAlmostEqual(res_rib["d_mm"], 268.0, places=1)
+        self.assertAlmostEqual(res_rib["mu_knm"], 16.67, places=2)
+        self.assertAlmostEqual(res_rib["ku"], 0.0234, places=4)
+        self.assertAlmostEqual(res_rib["omega"], 0.0237, places=4)
+        self.assertAlmostEqual(res_rib["rho"], 0.001354, places=5)
+        self.assertAlmostEqual(res_rib["as_calc_mm2"], 199.58, places=1)
+        self.assertAlmostEqual(res_rib["n_bar_exact"], 1.76, places=2)
+        self.assertEqual(res_rib["n_bars_adopted"], 2)
+        self.assertIn("2∅12", res_rib["bottom_rebar_callout"])
+        self.assertIn("1∅10", res_rib["top_rebar_callout"])
+        self.assertAlmostEqual(res_rib["vc_kn"], 32.96, places=1)
+        self.assertAlmostEqual(res_rib["phi_vc_kn"], 28.02, places=1)
+        self.assertAlmostEqual(res_rib["vu_kn"], 12.93, places=1)
+        self.assertTrue(res_rib["shear_ok"])
+
+        # 2. Verify changing slab thickness h from 30.0 cm to 25.0 cm dynamically updates Wu(rib) and Wu(m×m)
+        story_excel["adopted_slab_thickness_cm"] = 25.0
+        res_rib_25 = design_hollow_block_slab_rib(slab_excel, story_excel, fc_mpa=20.0, fy_mpa=350.0)
+        self.assertLess(res_rib_25["wu_rib_kn_m"], res_rib["wu_rib_kn_m"])
+        self.assertLess(res_rib_25["wu_m2_kpa"], res_rib["wu_m2_kpa"])
+
+        # 3. Verify Beam O.W = b*h*24*1.4, W_wall = 2.5*(t_wall/20)*H*1.4, and Area Load Wu(m×m) = 11.71 kN/m² transfer
+        story_beams = {
+            "story_id": "02_Ground_Floor",
+            "height_m": 3.00,
+            "adopted_slab_thickness_cm": 30.0,
+            "wall_load_policy": "all_beams",
+            "slab_edge_polygon": [[0.0, 0.0], [5.0, 0.0], [5.0, 4.0], [0.0, 4.0]],
+            "columns": [
+                {"id": "C1", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 4.90, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 0.10, "y": 3.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 4.90, "y": 3.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {
+                    "id": "B1", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
+                    "start_x": 0.10, "start_y": 0.20, "end_x": 4.90, "end_y": 0.20,
+                    "spans": [4.80],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.20, "center_coord_m": 0.10},
+                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.20, "center_coord_m": 4.90},
+                    ],
+                },
+                {
+                    "id": "B2", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50,
+                    "start_x": 0.10, "start_y": 3.80, "end_x": 4.90, "end_y": 3.80,
+                    "spans": [4.80],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C3", "width_m": 0.20, "center_coord_m": 0.10},
+                        {"support_index": 2, "kind": "column", "target_id": "C4", "width_m": 0.20, "center_coord_m": 4.90},
+                    ],
+                },
+            ],
+            "slabs": [
+                {
+                    "id": "S1", "min_x": 0.10, "max_x": 4.90, "min_y": 0.20, "max_y": 3.80,
+                    "lx_m": 4.80, "ly_m": 3.60, "rib_angle_deg": 90, "rib_direction_deg": 90,
+                },
+            ],
+            "openings": [],
+        }
+        bundle = analyze_all_story_beams_and_columns(story_beams, 20.0, 350.0)
+        b1_ld = bundle["beam_results"]["B1"]["loads_applied"][0]
+        b2_ld = bundle["beam_results"]["B2"]["loads_applied"][0]
+
+        # B1 (Hidden 0.40×0.30m): O.W = 4.03 kN/m, w_Slab = 11.71*(3.60/2) = 21.08 kN/m, W_wall(20cm, H=3.0m) = 10.50 kN/m -> Total = 35.61 kN/m
+        self.assertIn("O.W (4.03", b1_ld["formula_str"])
+        self.assertIn("W_wall (10.50", b1_ld["formula_str"])
+        self.assertAlmostEqual(b1_ld["mag"], 4.032 + 11.71 * 1.80 + 10.50, places=1)
+
+        # B2 (Drop 0.20×0.50m): O.W = 3.36 kN/m
+        self.assertIn("O.W (3.36", b2_ld["formula_str"])
+
+        # Change B2 Span 1 wall thickness to 15 cm -> W_wall = 2.5*(15/20)*3.0*1.4 = 7.875 kN/m
+        ok_wt, _ = set_beam_span_wall_thickness(story_beams, "B2", 1, 15.0)
+        self.assertTrue(ok_wt)
+        bundle2 = analyze_all_story_beams_and_columns(story_beams, 20.0, 350.0)
+        b2_ld2 = bundle2["beam_results"]["B2"]["loads_applied"][0]
+        self.assertIn("2.5×(15/20)×3.0×1.4", b2_ld2["formula_str"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
