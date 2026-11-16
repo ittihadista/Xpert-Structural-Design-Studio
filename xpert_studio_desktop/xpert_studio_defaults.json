@@ -110,33 +110,124 @@
       "block_width_cm": 40.0,
       "block_length_cm": 25.0,
       "rib_width_cm": 15.0,
+      "rib_bw2_cm": 15.0,
+      "slab_cover_mm": 20.0,
+      "rib_bar_dia_mm": 12,
+      "rib_stirrup_dia_mm": 6,
       "block_weight_kn": 0.1,
       "finish_load_kn_m2": 2.0,
       "live_load_kn_m2": 2.0,
+      "dl_factor": 1.4,
+      "ll_factor": 1.7,
       "slab_factored_wu_kpa": 8.5,
+      "wall_thickness_cm": 20.0,
+      "wall_unit_wt_20cm_kn_m2": 2.5,
       "default_wall_load_kn_m": 10.0,
       "hidden_beam_min_width_cm": 40.0,
       "drop_beam_width_cm": 20.0,
+      "drop_beam_min_depth_cm": 40.0,
       "drop_beam_depth_cm": 50.0
     }
   },
-  "materials_and_soil": {
-    "fc_mpa": 20.0,
-    "fy_mpa": 350.0,
-    "fy_stirrups_mpa": 280.0,
-    "concrete_unit_weight_kn_m3": 25.0,
-    "soil_bearing_qall_kn_m2": 150.0
-  },
-  "hollow_block_slab_data": {
-    "slab_thickness_cm": 30.0,
-    "top_compression_slab_cm": 5.0,
-    "block_height_cm": 20.0,
-    "block_width_cm": 40.0,
-    "block_length_cm": 25.0,
-    "rib_width_cm": 15.0,
-    "slab_factored_wu_kpa": 10.0,
-    "finish_load_kn_m2": 2.0,
-    "live_load_kn_m2": 1.5,
-    "default_wall_load_kn_m": 10.0
-  }
+  "default_projects_root_folder": "C:/Users/Xpert/Documents/cad test",
+  "default_stirrup_bar_mm": 8,
+  "default_main_bar_mm": 14,
+  "rebar_diameters_table": [
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Slab Stirrups",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Stirrups",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Both",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    },
+    {
+      "bar_name": "\u03a616",
+      "diameter_mm": 16,
+      "area_mm2": 201.06,
+      "weight_kg_m": 1.578,
+      "role": "Longitudinal",
+      "enabled": true
+    }
+  ]
 }
