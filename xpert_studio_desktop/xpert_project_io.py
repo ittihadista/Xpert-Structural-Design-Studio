@@ -15,9 +15,11 @@ Handles:
 """
 
 from __future__ import annotations
+import datetime
 import json
 import os
 import re
+import threading
 import uuid
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -27,7 +29,97 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.2.1-structural-bim-pro"
+STUDIO_VERSION = "v2.3.0-structural-bim-pro"
+
+_LOG_LOCK = threading.Lock()
+_ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
+
+
+def set_active_project_log_dir(project_dir: Optional[str]) -> None:
+    global _ACTIVE_PROJECT_LOG_DIR
+    if project_dir and os.path.isdir(project_dir):
+        _ACTIVE_PROJECT_LOG_DIR = os.path.abspath(project_dir)
+    else:
+        _ACTIVE_PROJECT_LOG_DIR = None
+
+
+def get_studio_log_file_path(project_dir: Optional[str] = None) -> str:
+    if project_dir and os.path.isdir(project_dir):
+        abs_dir = os.path.abspath(project_dir)
+        stories_sub = os.path.join(abs_dir, "Stories_Data")
+        if os.path.isdir(stories_sub):
+            return os.path.join(stories_sub, "xpert_studio_session.log")
+        return os.path.join(abs_dir, "xpert_studio_session.log")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpert_studio_session.log")
+
+
+def log_studio_event(
+    category: str,
+    message: str,
+    details: Optional[Any] = None,
+    level: str = "INFO",
+) -> None:
+    """
+    Appends a timestamped structured diagnostic entry to `xpert_studio_session.log`
+    (both in the desktop module folder and in the active project folder when open).
+    Never raises exceptions into callers.
+    """
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        entry = f"[{ts}] [{STUDIO_VERSION}] [{level.upper()}] [{category.upper()}] {message}"
+        if details is not None:
+            if isinstance(details, str):
+                det_str = details.strip()
+            else:
+                try:
+                    det_str = json.dumps(details, ensure_ascii=False, indent=2, default=str)
+                except Exception:
+                    det_str = str(details)
+            if det_str:
+                indented = "\n".join(f"    {ln}" for ln in det_str.splitlines())
+                entry = f"{entry}\n{indented}"
+        entry += "\n"
+
+        targets = [get_studio_log_file_path()]
+        if _ACTIVE_PROJECT_LOG_DIR:
+            proj_log = get_studio_log_file_path(_ACTIVE_PROJECT_LOG_DIR)
+            if proj_log not in targets:
+                targets.append(proj_log)
+
+        with _LOG_LOCK:
+            for tpath in targets:
+                try:
+                    os.makedirs(os.path.dirname(tpath), exist_ok=True)
+                    with open(tpath, "a", encoding="utf-8") as lf:
+                        lf.write(entry)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+def read_studio_log_tail(max_lines: int = 500, project_dir: Optional[str] = None) -> str:
+    path = get_studio_log_file_path(project_dir)
+    if not os.path.isfile(path):
+        return f"No diagnostic log recorded yet at: {path}"
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as lf:
+            lines = lf.readlines()
+        if max_lines > 0 and len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        return "".join(lines)
+    except OSError as exc:
+        return f"Unable to read log file {path}: {exc}"
+
+
+def clear_studio_log(project_dir: Optional[str] = None) -> None:
+    path = get_studio_log_file_path(project_dir)
+    try:
+        with _LOG_LOCK:
+            with open(path, "w", encoding="utf-8") as lf:
+                lf.write("")
+    except OSError:
+        pass
 
 DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
     {"active": True, "enabled": True, "label": "Φ 6", "bar_name": "Φ6", "dia_mm": 6, "diameter_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Stirrups (كانات الأعصاب والكمرات)"},
@@ -135,7 +227,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
     rebar_table = _normalize_rebar_table(DEFAULT_REBAR_DIAMETERS_TABLE)
 
     defaults: Dict[str, Any] = {
-        "schema_version": "2.2.1",
+        "schema_version": "2.3.0",
         "default_projects_root_folder": default_root,
         "default_stirrup_bar_mm": 6,
         "default_main_bar_mm": 16,
@@ -207,7 +299,7 @@ def save_studio_global_settings(settings: Dict[str, Any]) -> str:
     """
     Saves global 'Startup Defaults' and 'Options' to `xpert_studio_defaults.json`.
     """
-    settings["schema_version"] = "2.2.1"
+    settings["schema_version"] = "2.3.0"
     if "rebar_diameters_table" in settings:
         settings["rebar_diameters_table"] = _normalize_rebar_table(settings["rebar_diameters_table"])
     fpath = _get_global_settings_file_path()
@@ -737,6 +829,8 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     cleanup_unprefixed_duplicates(project_dir, clean_name)
+    set_active_project_log_dir(project_dir)
+    log_studio_event("PROJECT_INIT", f"Initialized project Stractural-{clean_name} with {len(stories_meta)} stories", {"project_dir": project_dir, "master_file": master_xsd_file})
     return master_payload
 
 
@@ -883,7 +977,7 @@ def _write_ascii_dxf_fallback(story_data: Dict[str, Any], dxf_path: str) -> None
             continue
         cx, cy = float(col["x"]), float(col["y"])
         b, h = float(col.get("b_m", 0.25)), float(col.get("h_m", 0.50))
-        cid = str(col["id"])
+        cid = str(col["id"]) + (" (2H)" if col.get("double_height") else "")
         tag_x = round(cx + b / 2.0 + 0.12, 3)
         tag_y = round(cy + h / 2.0 + 0.12, 3)
         placed_tags.append((tag_x, tag_y))
@@ -892,6 +986,22 @@ def _write_ascii_dxf_fallback(story_data: Dict[str, Any], dxf_path: str) -> None
             "10", str(tag_x), "20", str(tag_y), "30", "0.0",
             "40", "0.22", "1", cid,
         ])
+
+    for op in story_data.get("openings", []):
+        pts = op.get("polygon") or [
+            [float(op.get("min_x", 0.0)), float(op.get("min_y", 0.0))],
+            [float(op.get("max_x", 0.0)), float(op.get("min_y", 0.0))],
+            [float(op.get("max_x", 0.0)), float(op.get("max_y", 0.0))],
+            [float(op.get("min_x", 0.0)), float(op.get("max_y", 0.0))],
+        ]
+        for k_p in range(len(pts)):
+            p1 = pts[k_p]
+            p2 = pts[(k_p + 1) % len(pts)]
+            lines.extend([
+                "0", "LINE", "8", "00-XD-OPEN", "62", "6",
+                "10", str(p1[0]), "20", str(p1[1]), "30", "0.0",
+                "11", str(p2[0]), "21", str(p2[1]), "31", "0.0",
+            ])
 
     for bm in story_data.get("beams", []):
         sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
@@ -953,7 +1063,7 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
         cy = float(col["y"])
         b = float(col.get("b_m", 0.25))
         h = float(col.get("h_m", 0.50))
-        cid = str(col["id"])
+        cid = str(col["id"]) + (" (2H)" if col.get("double_height") else "")
 
         corners = [
             (cx - b / 2.0, cy - h / 2.0),
@@ -978,6 +1088,22 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
                 "insert": (tag_x, tag_y, 0.0),
             },
         )
+
+    # 2B. Slab Openings (00-XD-OPEN in Magenta)
+    for op in story_data.get("openings", []):
+        pts = op.get("polygon") or [
+            [float(op.get("min_x", 0.0)), float(op.get("min_y", 0.0))],
+            [float(op.get("max_x", 0.0)), float(op.get("min_y", 0.0))],
+            [float(op.get("max_x", 0.0)), float(op.get("max_y", 0.0))],
+            [float(op.get("min_x", 0.0)), float(op.get("max_y", 0.0))],
+        ]
+        if len(pts) >= 3:
+            opoly = msp.add_lwpolyline([(float(p[0]), float(p[1])) for p in pts], dxfattribs={"layer": "00-XD-OPEN", "color": 6})
+            opoly.closed = True
+            omin_x, omax_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
+            omin_y, omax_y = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
+            msp.add_line((omin_x, omin_y), (omax_x, omax_y), dxfattribs={"layer": "00-XD-OPEN", "color": 6})
+            msp.add_line((omin_x, omax_y), (omax_x, omin_y), dxfattribs={"layer": "00-XD-OPEN", "color": 6})
 
     # 3. Beams (00-XD-BEAM-HID / 00-XD-BEAM-DROP) & Bright Orange Beam Tags (00-XD-TAG-BEAM)
     beams = story_data.get("beams", [])

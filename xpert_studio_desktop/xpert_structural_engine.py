@@ -16,7 +16,38 @@ Core Structural Analysis, Optimization & ACI 318 Design Engine:
 
 from __future__ import annotations
 import math
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Tuple
+
+try:
+    from xpert_project_io import log_studio_event as _io_log_studio_event
+except ImportError:
+    def _io_log_studio_event(*args: Any, **kwargs: Any) -> None:
+        pass
+
+
+def _log_eng(category: str, message: str, details: Any = None, level: str = "INFO") -> None:
+    _io_log_studio_event(category, message, details, level=level)
+
+
+def _snap_drop_depth_m(depth_m: float, min_h_m: float = 0.40) -> float:
+    """
+    Ensures Drop Beam depths are clean multiples of 100 mm (0.40, 0.50, 0.60, ...),
+    eliminating legacy non-standard heights such as 0.51 m (510 mm).
+    """
+    h_mm = round(float(depth_m) * 1000.0)
+    min_mm_raw = max(400, round(float(min_h_m) * 1000.0))
+    rem_min = min_mm_raw % 100
+    min_mm = min_mm_raw if rem_min == 0 else ((min_mm_raw // 100) * 100 if rem_min <= 20 else ((min_mm_raw // 100) + 1) * 100)
+    min_mm = max(400, min_mm)
+
+    rem = h_mm % 100
+    if rem == 0:
+        snapped = h_mm
+    elif rem <= 20:
+        snapped = (h_mm // 100) * 100
+    else:
+        snapped = ((h_mm // 100) + 1) * 100
+    return round(max(min_mm, snapped) / 1000.0, 3)
 
 
 def get_aci_deflection_divisor(continuity_case: str) -> float:
@@ -428,11 +459,19 @@ def solve_continuous_beam_analytical(beam: Dict[str, Any], fc_mpa: float = 20.0,
     span_positive_moments = []
     for s_i in range(ns):
         s_st, s_en = span_starts[s_i], span_starts[s_i + 1]
-        span_pts = [(x_full[k], m_full[k], v_full[k]) for k in range(len(x_full)) if s_st <= x_full[k] <= s_en]
-        best_x, best_m, _ = max(span_pts, key=lambda t: t[1]) if span_pts else (s_st, 0.0, 0.0)
-        v_max_span = max([ abs(t[2]) for t in span_pts ] or [0.0])
-        v_start = span_pts[0][2] if span_pts else 0.0
-        v_end = span_pts[-1][2] if span_pts else 0.0
+        # Evaluate strictly on interior stations of Span (s_st, s_en) plus left/right just-inside support faces
+        # so an adjacent support shear jump (e.g. Span 2 reaction into Span 1 end) NEVER leaks into Span i!
+        span_pts = [(x_full[k], m_full[k], v_full[k]) for k in range(len(x_full)) if (s_st + 1e-4) < x_full[k] < (s_en - 1e-4)]
+        v_left_edge, _ = eval_vm_at(s_st + 2e-6)
+        v_right_edge, _ = eval_vm_at(s_en - 2e-6)
+        if span_pts:
+            best_x, best_m, _ = max(span_pts, key=lambda t: t[1])
+            v_max_span = max(abs(v_left_edge), abs(v_right_edge), max(abs(t[2]) for t in span_pts))
+        else:
+            best_x, best_m = s_st, 0.0
+            v_max_span = max(abs(v_left_edge), abs(v_right_edge))
+        v_start = v_left_edge
+        v_end = v_right_edge
         span_positive_moments.append({
             "span_index": s_i + 1,
             "start_x_m": round(s_st, 2),
@@ -915,6 +954,7 @@ def analyze_all_story_beams_and_columns(
     - Topologically sorts beams so secondary supported beams are solved before their carrier beams,
       transfers centerline point reactions (`type: "P"`), and applies VBA `Sub ReDesign_Sec()` (+100 mm step) post-analysis.
     """
+    enforce_opening_adjacent_drop_beams_and_cascade(story_data)
     reconcile_all_story_beams_supports_and_spans(story_data)
     orig_beams = story_data.get("beams", [])
     beams = [dict(b) for b in orig_beams]
@@ -922,6 +962,20 @@ def analyze_all_story_beams_and_columns(
     slabs = story_data.get("slabs", [])
     openings = story_data.get("openings", [])
     story_h = float(story_data.get("height_m", 3.0))
+    _log_eng(
+        "ANALYSIS_START",
+        f"Starting full story analysis for {story_data.get('story_id', 'Story')}",
+        {
+            "fc_mpa": fc_mpa,
+            "fy_mpa": fy_mpa,
+            "story_h_m": story_h,
+            "adopted_slab_thickness_cm": story_data.get("adopted_slab_thickness_cm", 30.0),
+            "num_columns": len([c for c in columns if c.get("active", True)]),
+            "num_beams": len(beams),
+            "num_slabs": len(slabs),
+            "num_openings": len(openings),
+        },
+    )
 
     # Synchronize Hollow-Block (Hordi) parameters from story's adopted_slab_thickness_cm (default 30.0 cm)
     # using fixed commercial block height (20 cm for h >= 25 cm, 16 cm for h < 25 cm) and hs = h - block_h
@@ -980,6 +1034,7 @@ def analyze_all_story_beams_and_columns(
         "factored_wu_kpa": auto_slab_wu_kpa,
     }
     story_data["hollow_block"] = hb_summary
+    _log_eng("HORDI_CALC", f"Slab h={adopted_t_cm:.1f}cm (block={block_h_cm:.0f}cm, hs={hs_cm:.1f}cm) -> Wu_rib={round(wu_rib_kn_m, 2):.2f} kN/m'/rib, Wu_m2={auto_slab_wu_kpa:.2f} kN/m²", hb_summary)
 
     if not story_data.get("custom_slab_wu_override", False):
         story_data["slab_factored_wu_kpa"] = auto_slab_wu_kpa
@@ -1094,7 +1149,8 @@ def analyze_all_story_beams_and_columns(
                 init_h = slab_h_m
             else:
                 init_w = float(b_copy.get("initial_width_m", b_copy.get("width_m", wall_b_m)))
-                init_h = max(min_h_drop_m, slab_h_m, float(b_copy.get("initial_depth_m", b_copy.get("depth_m", min_h_drop_m))))
+                raw_init_h = float(b_copy.get("initial_depth_m", b_copy.get("depth_m", min_h_drop_m)))
+                init_h = _snap_drop_depth_m(max(min_h_drop_m, raw_init_h), min_h_drop_m)
             b_copy["initial_width_m"] = round(init_w, 3)
             b_copy["initial_depth_m"] = round(init_h, 3)
             b_copy["width_m"] = round(init_w, 3)
@@ -1125,11 +1181,15 @@ def analyze_all_story_beams_and_columns(
                         if sec_bm.get("beam_kind") == "drop" and car_bm.get("beam_kind") == "hidden":
                             car_bm["beam_kind"] = "drop"
                             car_bm["kind"] = "drop"
-                            car_bm["width_m"] = min(float(car_bm.get("width_m", 0.20)), 0.25)
+                            car_bm["width_m"] = min(float(car_bm.get("width_m", 0.20)), 0.20)
+                            car_bm["depth_m"] = _snap_drop_depth_m(max(0.40, sec_d), 0.40)
                             if sync_initial:
                                 car_bm["initial_width_m"] = car_bm["width_m"]
+                                car_bm["initial_depth_m"] = car_bm["depth_m"]
+                            _log_eng("CASCADE", f"Carrier beam {car_id} converted Hidden -> Drop (supports Drop {sec_id})")
                         if car_d < sec_d:
-                            car_bm["depth_m"] = round(sec_d, 3)
+                            new_car_d = _snap_drop_depth_m(sec_d, 0.40) if car_bm.get("beam_kind") == "drop" else round(sec_d, 3)
+                            car_bm["depth_m"] = new_car_d
                             if sync_initial:
                                 car_bm["initial_depth_m"] = max(float(car_bm.get("initial_depth_m", car_bm["depth_m"])), car_bm["depth_m"])
                         if car_bm.get("beam_kind") == "drop" and sec_bm.get("beam_kind") == "drop":
@@ -1454,6 +1514,21 @@ def analyze_all_story_beams_and_columns(
         bm["width_m"] = new_w
         bm["depth_m"] = new_h
 
+        _log_eng(
+            "BEAM_SOLVE_DESIGN",
+            f"Beam {bid} ({bm.get('beam_kind','hidden').upper()}) Init={bm.get('initial_width_m', new_w):.2f}x{bm.get('initial_depth_m', new_h):.2f} -> Designed={new_w:.2f}x{new_h:.2f}m",
+            {
+                "loads": [ld.get("label", ld.get("formula_str", "")) for ld in res.get("loads_applied", [])],
+                "reactions": res.get("reactions"),
+                "max_pos_mu_knm": res.get("max_pos_mu_knm"),
+                "max_neg_face_mu_knm": res.get("max_neg_face_mu_knm"),
+                "max_face_vu_kn": res.get("max_face_vu_kn"),
+                "span_shears_kn": [s.get("max_abs_vu_kn") for s in res.get("span_positive_moments", [])],
+                "stirrups": des.get("stirrups"),
+                "sizing_iterations": des.get("sizing_iterations", []),
+            },
+        )
+
         # Sync updated loads and sized dimensions back to story_data["beams"]
         for orig_b in orig_beams:
             if orig_b.get("id") == bid:
@@ -1561,9 +1636,23 @@ def analyze_all_story_beams_and_columns(
                         if mid_y <= cy:
                             framing_directions["South"] = beam_info
 
-        self_wt_kn = round(b_m * h_m * story_h * 25.0 * 1.2, 2)
+        is_double_h = bool(col.get("double_height", False))
+        col_eff_h = round(story_h * 2.0, 2) if is_double_h else round(story_h, 2)
+        col["effective_height_m"] = col_eff_h
+        self_wt_kn = round(b_m * h_m * col_eff_h * 25.0 * 1.2, 2)
         story_pu_kn = round(max(45.0, total_beam_reaction_kn) + self_wt_kn, 2)
-        col_design = design_column_and_pm_curve(cid, b_m, h_m, story_pu_kn, round(mux_knm, 1), round(muy_knm, 1), fc_mpa, fy_mpa)
+        col_design = design_column_and_pm_curve(
+            cid,
+            b_m,
+            h_m,
+            story_pu_kn,
+            round(mux_knm, 1),
+            round(muy_knm, 1),
+            fc_mpa,
+            fy_mpa,
+            lu_m=col_eff_h,
+            double_height=is_double_h,
+        )
 
         column_records.append({
             "column_id": cid,
@@ -1571,12 +1660,24 @@ def analyze_all_story_beams_and_columns(
             "y": cy,
             "b_m": b_m,
             "h_m": h_m,
+            "double_height": is_double_h,
+            "in_slab_opening": bool(col.get("in_slab_opening", False)),
+            "effective_height_m": col_eff_h,
             "story_pu_kn": story_pu_kn,
             "mux_knm": round(mux_knm, 2),
             "muy_knm": round(muy_knm, 2),
             "framing_4way": framing_directions,
             "design": col_design,
         })
+
+    # Post-sizing verification: if any enlarged Hidden beam expanded into an opening/boundary, convert & cascade safely
+    conv_ids, conv_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story_data)
+
+    _log_eng(
+        "ANALYSIS_DONE",
+        f"Completed analysis for {story_data.get('story_id', 'Story')} ({len(beam_results)} beams, {len(column_records)} columns)",
+        {"post_sizing_drop_conversions": conv_ids, "alerts": conv_alerts},
+    )
 
     return {
         "ordered_beam_ids": ordered_ids,
@@ -1585,6 +1686,7 @@ def analyze_all_story_beams_and_columns(
         "column_records": column_records,
         "slab_designs": slab_designs,
         "hollow_block_summary": hb_summary,
+        "post_sizing_alerts": conv_alerts,
     }
 
 
@@ -1639,6 +1741,8 @@ def design_beam_aci318(
     if auto_size_section and not beam.get("lock_section_dimensions", False):
         init_w_m = float(beam.get("initial_width_m", 0.40 if b_kind == "hidden" else 0.20))
         init_h_m = float(beam.get("initial_depth_m", beam.get("depth_m", 0.30 if b_kind == "hidden" else 0.40)))
+        if b_kind == "drop":
+            init_h_m = _snap_drop_depth_m(init_h_m, 0.40)
         b_mm = round(max(400.0 if b_kind == "hidden" else 150.0, init_w_m * 1000.0))
         h_mm = round(max(200.0 if b_kind == "hidden" else 400.0, init_h_m * 1000.0))
     else:
@@ -1767,6 +1871,17 @@ def design_beam_aci318(
                 new_ddc = round(sum_nd / max(1, nbr_cur), 2)
                 new_d = round(h_mm - new_ddc, 1)
                 if abs(new_d - d_mm) < 0.2:
+                    # Also check ACI 318 Zone 5 Shear Limit (Vs <= 2/3 sqrt(fc') bw d) for Drop Beams
+                    vu_max_abs = abs(float(analysis_res.get("max_face_vu_kn", 0.0)))
+                    vc_try = (math.sqrt(fc_mpa) * b_mm * new_d) / 6000.0
+                    vs_req_try = max(0.0, (vu_max_abs / 0.85) - vc_try)
+                    vs2_lim_try = (2.0 * math.sqrt(fc_mpa) * b_mm * new_d) / 3000.0
+                    if vs_req_try > vs2_lim_try and h_mm < 1900.0:
+                        sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"Shear Zone 5 (Vs={vs_req_try:.1f} > 2/3√fc'bwd={vs2_lim_try:.1f}) -> h + 100 mm"})
+                        h_mm += 100.0
+                        ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
+                        d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
+                        continue
                     nrow_gov = nrow_try
                     ddc_weighted_mm = new_ddc
                     d_mm = new_d
@@ -1774,6 +1889,19 @@ def design_beam_aci318(
                 nrow_gov = nrow_try
                 ddc_weighted_mm = new_ddc
                 d_mm = new_d
+
+            # Final Zone 5 Shear check if loop exited via nrow_cur <= nbs_cur
+            for _sh_iter in range(10):
+                vu_max_abs = abs(float(analysis_res.get("max_face_vu_kn", 0.0)))
+                vc_try = (math.sqrt(fc_mpa) * b_mm * d_mm) / 6000.0
+                vs_req_try = max(0.0, (vu_max_abs / 0.85) - vc_try)
+                vs2_lim_try = (2.0 * math.sqrt(fc_mpa) * b_mm * d_mm) / 3000.0
+                if vs_req_try > vs2_lim_try and h_mm < 1900.0:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"Shear Zone 5 (Vs={vs_req_try:.1f} > 2/3√fc'bwd={vs2_lim_try:.1f}) -> h + 100 mm"})
+                    h_mm += 100.0
+                    d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
+                else:
+                    break
 
     # Finalize section geometry after iterative sizing
     beam["width_m"] = round(b_mm / 1000.0, 3)
@@ -2157,13 +2285,20 @@ def design_column_and_pm_curve(
     muy_knm: float,
     fc_mpa: float = 20.0,
     fy_mpa: float = 350.0,
+    lu_m: Optional[float] = None,
+    double_height: bool = False,
 ) -> Dict[str, Any]:
     """
     Designs column per ACI 318 and generates P-M Interaction Diagram envelope points.
+    Supports Double-Height (2H) columns located inside slab openings (`lu_m = 2 * story_h`).
     """
     b_mm = round(b_m * 1000.0)
     h_mm = round(h_m * 1000.0)
     ag = b_mm * h_mm
+    eff_lu_m = round(float(lu_m if lu_m is not None else 3.0), 2)
+    r_min_m = 0.30 * min(b_m, h_m)
+    slenderness_kl_r = round(eff_lu_m / max(0.01, r_min_m), 1)
+
     ast_req = max(0.01 * ag, ((pu_kn * 1000.0) / (0.65 * 0.80) - 0.85 * fc_mpa * ag) / (fy_mpa - 0.85 * fc_mpa))
     n_bars = max(6, math.ceil(ast_req / 201.06 / 2.0) * 2)
     ast_prov = n_bars * 201.06
@@ -2187,6 +2322,10 @@ def design_column_and_pm_curve(
         "rho_pct": round((ast_prov / ag) * 100.0, 2),
         "phi_pn_max_kn": round(phi_pn_max, 1),
         "phi_mb_knm": round(phi_mb, 1),
+        "lu_m": eff_lu_m,
+        "double_height": bool(double_height),
+        "effective_height_note": f"2H Double-Height ({eff_lu_m:.2f}m, kL/r={slenderness_kl_r})" if double_height else f"1H ({eff_lu_m:.2f}m)",
+        "slenderness_kl_r": slenderness_kl_r,
         "pm_curve_points": pm_curve_points,
         "status": "SAFE" if pu_kn <= phi_pn_max else "INCREASE SECTION",
     }
@@ -2515,15 +2654,18 @@ def validate_and_build_beam_with_cantilevers(
     existing_beams: List[Dict[str, Any]],
     slab_edge_polygon: List[List[float]],
     is_tie_beam_story: bool = False,
+    openings: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """
     Validates strict Revit-style structural beam rules:
     1. Outer Slab Boundary (Polyline) must exist on Slab stories, UNLESS `is_tie_beam_story=True`
        (00_TieBeams / مسقط السملات), where Tie Beams can be drawn directly between columns without a boundary!
     2. On `00_TieBeams`, only Drop Beams (Tie Beams / سملات) are allowed (Hidden Beams are forbidden).
-    3. Structural Hierarchy Rule: A Drop Beam (`drop`) CANNOT rest on a Hidden Beam (`hidden`)!
-    4. Full Outer-Face Column Bearing & Full-Width Beam Boundary Shift.
-    5. Duplicate Overlapping Beam Prevention & Continuous Multi-Span Recognition.
+    3. Opening-Adjacent Rule: A Hidden Beam bordering or lying between slab openings (`openings`) is
+       automatically converted to a Drop Beam (`0.20 × 0.40 m`) so its width never expands into the opening!
+    4. Structural Hierarchy Rule: A Drop Beam (`drop`) CANNOT rest on a Hidden Beam (`hidden`)!
+    5. Full Outer-Face Column Bearing & Full-Width Beam Boundary Shift.
+    6. Duplicate Overlapping Beam Prevention & Continuous Multi-Span Recognition.
     """
     if is_tie_beam_story and str(beam_kind).lower() == "hidden":
         return (
@@ -2654,6 +2796,35 @@ def validate_and_build_beam_with_cantilevers(
     if len(supports_raw) == 0:
         return False, None, "Beam must rest on at least one Column or Supporting Beam."
 
+    # Check if beam borders an opening when drawn as Hidden -> force to Drop Beam (0.20 x 0.40 m) with alert note
+    opening_note = ""
+    if openings and str(beam_kind).lower() == "hidden":
+        probe_bm = {
+            "id": beam_id,
+            "beam_kind": beam_kind,
+            "width_m": width_m,
+            "depth_m": depth_m,
+            "start_x": sx,
+            "start_y": sy,
+            "end_x": ex,
+            "end_y": ey,
+        }
+        adj_ops = [
+            str(op.get("id", "OP"))
+            for op in openings
+            if beam_borders_or_crosses_opening(probe_bm, op) in ("borders", "crosses")
+        ]
+        if adj_ops:
+            beam_kind = "drop"
+            width_m = 0.20
+            depth_m = 0.40
+            half_w = width_m / 2.0
+            opening_note = (
+                f" [تنبيه فتحة سقف: الكمرة {beam_id} محاذية للفتحة {', '.join(adj_ops)} — "
+                f"تم تحويلها تلقائياً إلى كمرة ساقطة (0.20×0.40م) لمنع تمددها داخل الفتحة أو خارج السقف]"
+            )
+            _log_eng("OPENING_BEAM_RULE", f"Beam {beam_id} drawn near opening(s) {adj_ops} forced to Drop 0.20x0.40m")
+
     # STRICT STRUCTURAL RULE: A Drop Beam CANNOT rest on a Hidden Beam!
     if str(beam_kind).lower() == "drop":
         hidden_carriers = [
@@ -2661,7 +2832,7 @@ def validate_and_build_beam_with_cantilevers(
             for s in supports_raw
             if s.get("kind") == "beam" and s.get("beam_kind") == "hidden"
         ]
-        if hidden_carriers:
+        if hidden_carriers and not opening_note:
             return (
                 False,
                 None,
@@ -2803,7 +2974,7 @@ def validate_and_build_beam_with_cantilevers(
     return (
         True,
         beam_dict,
-        f"Beam {beam_id} created ({len(spans)} span(s) [{', '.join(f'{s:.2f}m' for s in spans)}] over {sup_names}, full outer-column bearing [{sx:.2f},{sy:.2f}]->[{ex:.2f},{ey:.2f}]).{shifted_note}",
+        f"Beam {beam_id} created ({len(spans)} span(s) [{', '.join(f'{s:.2f}m' for s in spans)}] over {sup_names}, full outer-column bearing [{sx:.2f},{sy:.2f}]->[{ex:.2f},{ey:.2f}]).{shifted_note}{opening_note}",
     )
 
 
@@ -3371,19 +3542,21 @@ def reconcile_and_split_slabs_after_beam_change(story_data: Dict[str, Any]) -> T
 def auto_fill_all_story_slabs(story_data: Dict[str, Any]) -> Tuple[int, str]:
     """
     1-Click Productivity Tool: Automatically populates all closed beam-bounded bays (>= 3 beams)
-    that are not Void Openings with Hollow-Block Slabs using optimal default rib directions
-    and enforces Cantilever Back-Span continuity.
+    that are not Void Openings (including polygonal / merged openings) with Hollow-Block Slabs
+    using optimal default rib directions and enforces Cantilever Back-Span continuity.
     """
     bays = detect_story_grid_bays(story_data)
     if not bays:
         return 0, "Draw Building Boundary and Beams first before Auto-Filling Slabs."
 
-    open_keys = {o.get("bay_key") for o in story_data.get("openings", [])}
+    openings = story_data.get("openings", [])
+    open_keys = {o.get("bay_key") for o in openings if o.get("bay_key")}
     created = 0
     for b in bays:
-        if b["beam_count"] >= 3 and b["bay_key"] not in open_keys:
-            cx = (b["min_x"] + b["max_x"]) / 2.0
-            cy = (b["min_y"] + b["max_y"]) / 2.0
+        cx = (b["min_x"] + b["max_x"]) / 2.0
+        cy = (b["min_y"] + b["max_y"]) / 2.0
+        in_op = any(is_point_in_opening(cx, cy, op, include_edge=False, tol=0.05) for op in openings)
+        if b["beam_count"] >= 3 and b["bay_key"] not in open_keys and not in_op:
             ok, _, _ = pick_area_create_or_update_slab(story_data, cx, cy, target_mode="SLAB")
             if ok:
                 created += 1
@@ -4481,6 +4654,692 @@ def auto_generate_exterior_dimensions(story_data: Dict[str, Any]) -> Tuple[int, 
     return len(dims), f"Generated {len(dims)} Exterior & Column-Grid Dimensions strictly outside the building boundary."
 
 
+def _raycast_point_in_poly(px: float, py: float, poly: List[List[float]]) -> bool:
+    n = len(poly)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(poly[i][0]), float(poly[i][1])
+        xj, yj = float(poly[j][0]), float(poly[j][1])
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / ((yj - yi) + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _min_dist_to_poly_edges(px: float, py: float, poly: List[List[float]]) -> float:
+    n = len(poly)
+    if n < 2:
+        return 1e9
+    best = 1e9
+    for idx in range(n):
+        x1, y1 = float(poly[idx][0]), float(poly[idx][1])
+        x2, y2 = float(poly[(idx + 1) % n][0]), float(poly[(idx + 1) % n][1])
+        dx, dy = x2 - x1, y2 - y1
+        seg2 = dx * dx + dy * dy
+        if seg2 <= 1e-9:
+            d = math.hypot(px - x1, py - y1)
+        else:
+            t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg2))
+            d = math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+        if d < best:
+            best = d
+    return best
+
+
+def normalize_opening_dict(op: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensures every opening dict has valid `polygon` (closed vertex loop), bounding box
+    `min_x, max_x, min_y, max_y`, and `sub_rects`.
+    """
+    poly = op.get("polygon")
+    if isinstance(poly, list) and len(poly) >= 3:
+        clean_poly = [[round(float(p[0]), 3), round(float(p[1]), 3)] for p in poly]
+        xs = [p[0] for p in clean_poly]
+        ys = [p[1] for p in clean_poly]
+        min_x, max_x = round(min(xs), 3), round(max(xs), 3)
+        min_y, max_y = round(min(ys), 3), round(max(ys), 3)
+        op["polygon"] = clean_poly
+        op["min_x"], op["max_x"], op["min_y"], op["max_y"] = min_x, max_x, min_y, max_y
+    else:
+        min_x = round(float(op.get("min_x", op.get("x_min", 0.0))), 3)
+        max_x = round(float(op.get("max_x", op.get("x_max", 0.0))), 3)
+        min_y = round(float(op.get("min_y", op.get("y_min", 0.0))), 3)
+        max_y = round(float(op.get("max_y", op.get("y_max", 0.0))), 3)
+        if min_x > max_x:
+            min_x, max_x = max_x, min_x
+        if min_y > max_y:
+            min_y, max_y = max_y, min_y
+        op["min_x"], op["max_x"], op["min_y"], op["max_y"] = min_x, max_x, min_y, max_y
+        op["polygon"] = [
+            [min_x, min_y],
+            [max_x, min_y],
+            [max_x, max_y],
+            [min_x, max_y],
+        ]
+    if not op.get("sub_rects"):
+        if len(op["polygon"]) == 4:
+            op["sub_rects"] = [[op["min_x"], op["min_y"], op["max_x"], op["max_y"]]]
+    return op
+
+
+def is_point_in_opening(
+    px: float,
+    py: float,
+    op: Dict[str, Any],
+    include_edge: bool = False,
+    tol: float = 0.08,
+) -> bool:
+    """
+    Accurate geometric test for whether `(px, py)` lies inside an opening (supports
+    rectangular, merged multi-wing orthogonal, and general polygonal openings).
+    - `include_edge=False`: strictly interior (`dist_to_edge >= tol`).
+    - `include_edge=True`: interior or within `tol` of opening edge.
+    """
+    normalize_opening_dict(op)
+    poly = op["polygon"]
+    inside = _raycast_point_in_poly(px, py, poly)
+    dist_e = _min_dist_to_poly_edges(px, py, poly)
+    if include_edge:
+        return inside or (dist_e <= tol)
+    return inside and (dist_e >= tol)
+
+
+def _trace_union_polygon_from_rects(rects: List[List[float]]) -> List[List[float]]:
+    """
+    Computes an exact closed orthogonal boundary loop from a list of touching/overlapping
+    rectangles `[x1, y1, x2, y2]` using elementary grid decomposition + boundary walk.
+    """
+    if not rects:
+        return []
+    if len(rects) == 1:
+        r = rects[0]
+        return [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]]
+
+    xs = sorted({round(float(r[0]), 3) for r in rects} | {round(float(r[2]), 3) for r in rects})
+    ys = sorted({round(float(r[1]), 3) for r in rects} | {round(float(r[3]), 3) for r in rects})
+    nx = len(xs) - 1
+    ny = len(ys) - 1
+    if nx <= 0 or ny <= 0:
+        return []
+
+    filled = [[False] * nx for _ in range(ny)]
+    for j in range(ny):
+        cy = (ys[j] + ys[j + 1]) / 2.0
+        for i in range(nx):
+            cx = (xs[i] + xs[i + 1]) / 2.0
+            for r in rects:
+                if r[0] <= cx <= r[2] and r[1] <= cy <= r[3]:
+                    filled[j][i] = True
+                    break
+
+    # Directed CCW boundary edges around filled cells
+    edges: Dict[Tuple[float, float], List[Tuple[float, float]]] = {}
+
+    def add_edge(p1: Tuple[float, float], p2: Tuple[float, float]) -> None:
+        edges.setdefault(p1, []).append(p2)
+
+    for j in range(ny):
+        for i in range(nx):
+            if not filled[j][i]:
+                continue
+            if j == 0 or not filled[j - 1][i]:
+                add_edge((xs[i], ys[j]), (xs[i + 1], ys[j]))
+            if i == nx - 1 or not filled[j][i + 1]:
+                add_edge((xs[i + 1], ys[j]), (xs[i + 1], ys[j + 1]))
+            if j == ny - 1 or not filled[j + 1][i]:
+                add_edge((xs[i + 1], ys[j + 1]), (xs[i], ys[j + 1]))
+            if i == 0 or not filled[j][i - 1]:
+                add_edge((xs[i], ys[j + 1]), (xs[i], ys[j]))
+
+    if not edges:
+        return []
+
+    # Start at bottom-most, left-most vertex
+    start_v = min(edges.keys(), key=lambda p: (p[1], p[0]))
+    loop: List[Tuple[float, float]] = [start_v]
+    cur = start_v
+    for _ in range(len(edges) * 4 + 10):
+        nxt_list = edges.get(cur)
+        if not nxt_list:
+            break
+        nxt = nxt_list.pop(0)
+        if nxt == start_v:
+            break
+        loop.append(nxt)
+        cur = nxt
+
+    if len(loop) < 3:
+        return [[xs[0], ys[0]], [xs[-1], ys[0]], [xs[-1], ys[-1]], [xs[0], ys[-1]]]
+
+    # Simplify collinear points
+    simplified: List[List[float]] = []
+    m = len(loop)
+    for k in range(m):
+        p_prev = loop[(k - 1) % m]
+        p_curr = loop[k]
+        p_next = loop[(k + 1) % m]
+        dx1, dy1 = p_curr[0] - p_prev[0], p_curr[1] - p_prev[1]
+        dx2, dy2 = p_next[0] - p_curr[0], p_next[1] - p_curr[1]
+        if abs(dx1 * dy2 - dy1 * dx2) < 1e-6:
+            continue
+        simplified.append([round(p_curr[0], 3), round(p_curr[1], 3)])
+    return simplified if len(simplified) >= 3 else [[round(p[0], 3), round(p[1], 3)] for p in loop]
+
+
+def _beam_lies_between_openings(
+    op_a: Dict[str, Any],
+    op_b: Dict[str, Any],
+    beams: List[Dict[str, Any]],
+) -> bool:
+    """
+    Returns True if a physical beam separates the touching border of `op_a` and `op_b`.
+    """
+    normalize_opening_dict(op_a)
+    normalize_opening_dict(op_b)
+    rects_a = op_a.get("sub_rects") or [[op_a["min_x"], op_a["min_y"], op_a["max_x"], op_a["max_y"]]]
+    rects_b = op_b.get("sub_rects") or [[op_b["min_x"], op_b["min_y"], op_b["max_x"], op_b["max_y"]]]
+
+    for ra in rects_a:
+        for rb in rects_b:
+            # Shared vertical interface
+            if abs(ra[2] - rb[0]) <= 0.18 or abs(rb[2] - ra[0]) <= 0.18:
+                shared_x = (ra[2] + rb[0]) / 2.0 if abs(ra[2] - rb[0]) <= 0.18 else (rb[2] + ra[0]) / 2.0
+                ov_y1 = max(ra[1], rb[1])
+                ov_y2 = min(ra[3], rb[3])
+                if ov_y2 - ov_y1 >= 0.30:
+                    for bm in beams:
+                        bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                        bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+                        if abs(bex - bsx) < abs(bey - bsy):
+                            if abs(bsx - shared_x) <= max(0.25, float(bm.get("width_m", 0.30)) / 2.0 + 0.12):
+                                b_ov = min(max(bsy, bey), ov_y2) - max(min(bsy, bey), ov_y1)
+                                if b_ov >= (ov_y2 - ov_y1) * 0.50:
+                                    return True
+            # Shared horizontal interface
+            if abs(ra[3] - rb[1]) <= 0.18 or abs(rb[3] - ra[1]) <= 0.18:
+                shared_y = (ra[3] + rb[1]) / 2.0 if abs(ra[3] - rb[1]) <= 0.18 else (rb[3] + ra[1]) / 2.0
+                ov_x1 = max(ra[0], rb[0])
+                ov_x2 = min(ra[2], rb[2])
+                if ov_x2 - ov_x1 >= 0.30:
+                    for bm in beams:
+                        bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                        bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+                        if abs(bex - bsx) >= abs(bey - bsy):
+                            if abs(bsy - shared_y) <= max(0.25, float(bm.get("width_m", 0.30)) / 2.0 + 0.12):
+                                b_ov = min(max(bsx, bex), ov_x2) - max(min(bsx, bex), ov_x1)
+                                if b_ov >= (ov_x2 - ov_x1) * 0.50:
+                                    return True
+    return False
+
+
+def _openings_touch_or_overlap(op_a: Dict[str, Any], op_b: Dict[str, Any], gap_tol: float = 0.15) -> bool:
+    normalize_opening_dict(op_a)
+    normalize_opening_dict(op_b)
+    rects_a = op_a.get("sub_rects") or [[op_a["min_x"], op_a["min_y"], op_a["max_x"], op_a["max_y"]]]
+    rects_b = op_b.get("sub_rects") or [[op_b["min_x"], op_b["min_y"], op_b["max_x"], op_b["max_y"]]]
+    for ra in rects_a:
+        for rb in rects_b:
+            ov_x = min(ra[2], rb[2]) - max(ra[0], rb[0])
+            ov_y = min(ra[3], rb[3]) - max(ra[1], rb[1])
+            if (ov_x >= -gap_tol and ov_y >= 0.25) or (ov_y >= -gap_tol and ov_x >= 0.25) or (ov_x >= 0.10 and ov_y >= 0.10):
+                return True
+    return False
+
+
+def coalesce_adjacent_openings(story_data: Dict[str, Any]) -> Tuple[int, List[str]]:
+    """
+    Automatically merges touching or overlapping openings whenever NO physical beam
+    separates their shared border, forming one unified polygonal/orthogonal opening (`OP#`).
+    """
+    openings = story_data.get("openings", [])
+    beams = story_data.get("beams", [])
+    if len(openings) <= 1:
+        for idx, op in enumerate(openings):
+            normalize_opening_dict(op)
+            op["id"] = f"OP{idx + 1}"
+        return 0, []
+
+    for op in openings:
+        normalize_opening_dict(op)
+
+    merged_events: List[str] = []
+    merges = 0
+    changed = True
+    while changed:
+        changed = False
+        n = len(openings)
+        for i in range(n):
+            for j in range(i + 1, n):
+                oa, ob = openings[i], openings[j]
+                if _openings_touch_or_overlap(oa, ob) and not _beam_lies_between_openings(oa, ob, beams):
+                    rects_a = oa.get("sub_rects") or [[oa["min_x"], oa["min_y"], oa["max_x"], oa["max_y"]]]
+                    rects_b = ob.get("sub_rects") or [[ob["min_x"], ob["min_y"], ob["max_x"], ob["max_y"]]]
+                    combined_rects = list(rects_a) + list(rects_b)
+                    # Snap near-touching rectangle edges together cleanly (gap <= 0.15m)
+                    for idx_r in range(len(rects_a)):
+                        for idx_s in range(len(rects_b)):
+                            ra = combined_rects[idx_r]
+                            rb = combined_rects[len(rects_a) + idx_s]
+                            if 0.0 < abs(rb[0] - ra[2]) <= 0.15:
+                                rb[0] = ra[2]
+                            elif 0.0 < abs(ra[0] - rb[2]) <= 0.15:
+                                ra[0] = rb[2]
+                            if 0.0 < abs(rb[1] - ra[3]) <= 0.15:
+                                rb[1] = ra[3]
+                            elif 0.0 < abs(ra[1] - rb[3]) <= 0.15:
+                                ra[1] = rb[3]
+                    new_poly = _trace_union_polygon_from_rects(combined_rects)
+                    if not new_poly:
+                        # Fallback to bounding hull of non-orthogonal polylines
+                        all_pts = list(oa["polygon"]) + list(ob["polygon"])
+                        nmin_x, nmax_x = min(p[0] for p in all_pts), max(p[0] for p in all_pts)
+                        nmin_y, nmax_y = min(p[1] for p in all_pts), max(p[1] for p in all_pts)
+                        new_poly = [[nmin_x, nmin_y], [nmax_x, nmin_y], [nmax_x, nmax_y], [nmin_x, nmax_y]]
+                    oa["sub_rects"] = combined_rects
+                    oa["polygon"] = new_poly
+                    oa["merged_from"] = [str(oa.get("id")), str(ob.get("id"))]
+                    normalize_opening_dict(oa)
+                    merged_events.append(f"تم دمج الفتحتين المتلاصقتين ({oa.get('id')} + {ob.get('id')}) في فتحة واحدة موحدة لعدم وجود كمرة فاصلة بينهما.")
+                    openings.pop(j)
+                    merges += 1
+                    changed = True
+                    break
+            if changed:
+                break
+
+    for idx, op in enumerate(openings):
+        op["id"] = f"OP{idx + 1}"
+    if merges > 0:
+        _log_eng("OPENING_MERGE", f"Merged {merges} adjacent opening(s)", merged_events)
+    return merges, merged_events
+
+
+def beam_borders_or_crosses_opening(
+    bm: Dict[str, Any],
+    op: Dict[str, Any],
+    edge_tol: float = 0.25,
+) -> Optional[str]:
+    """
+    Determines the geometric relationship between beam `bm` and opening `op`:
+    - `'crosses'`: beam centerline cuts strictly through the interior of `op`.
+    - `'borders'`: beam runs parallel along/adjacent to an edge of `op` (or lies between two openings),
+      where a Hidden Beam's width would expand into the opening void!
+    - `None`: completely clear of `op`.
+    """
+    normalize_opening_dict(op)
+    sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+    ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+    is_horiz = abs(ex - sx) >= abs(ey - sy)
+    half_w = float(bm.get("width_m", 0.30)) / 2.0
+    poly = op["polygon"]
+
+    # Sample 9 interior points strictly along the beam centerline
+    inside_hits = 0
+    for k in range(1, 10):
+        t = k / 10.0
+        px = sx + (ex - sx) * t
+        py = sy + (ey - sy) * t
+        if is_point_in_opening(px, py, op, include_edge=False, tol=0.14):
+            inside_hits += 1
+    if inside_hits >= 2:
+        return "crosses"
+
+    # Check if beam borders any parallel edge of `op` or touches an opening edge with its width
+    n_v = len(poly)
+    b_min_x, b_max_x = min(sx, ex), max(sx, ex)
+    b_min_y, b_max_y = min(sy, ey), max(sy, ey)
+    prox = max(edge_tol, half_w + 0.10)
+
+    for idx in range(n_v):
+        x1, y1 = float(poly[idx][0]), float(poly[idx][1])
+        x2, y2 = float(poly[(idx + 1) % n_v][0]), float(poly[(idx + 1) % n_v][1])
+        e_horiz = abs(x2 - x1) >= abs(y2 - y1)
+        if is_horiz and e_horiz:
+            ov = min(b_max_x, max(x1, x2)) - max(b_min_x, min(x1, x2))
+            if ov >= 0.35 and abs(sy - ((y1 + y2) / 2.0)) <= prox:
+                return "borders"
+        elif (not is_horiz) and (not e_horiz):
+            ov = min(b_max_y, max(y1, y2)) - max(b_min_y, min(y1, y2))
+            if ov >= 0.35 and abs(sx - ((x1 + x2) / 2.0)) <= prox:
+                return "borders"
+
+    # Also check if widened Hidden Beam section crosses outside L-shaped/recessed opening bounds
+    omin_x, omax_x = float(op["min_x"]), float(op["max_x"])
+    omin_y, omax_y = float(op["min_y"]), float(op["max_y"])
+    if is_horiz and (min(b_max_x, omax_x) - max(b_min_x, omin_x)) >= 0.35:
+        if omin_y - prox <= sy <= omax_y + prox:
+            # Verify midpoint near opening edge
+            mid_x = (max(b_min_x, omin_x) + min(b_max_x, omax_x)) / 2.0
+            if is_point_in_opening(mid_x, sy + half_w * 0.9, op, include_edge=True, tol=0.05) or is_point_in_opening(mid_x, sy - half_w * 0.9, op, include_edge=True, tol=0.05):
+                return "borders"
+    elif (not is_horiz) and (min(b_max_y, omax_y) - max(b_min_y, omin_y)) >= 0.35:
+        if omin_x - prox <= sx <= omax_x + prox:
+            mid_y = (max(b_min_y, omin_y) + min(b_max_y, omax_y)) / 2.0
+            if is_point_in_opening(sx + half_w * 0.9, mid_y, op, include_edge=True, tol=0.05) or is_point_in_opening(sx - half_w * 0.9, mid_y, op, include_edge=True, tol=0.05):
+                return "borders"
+    return None
+
+
+def enforce_opening_adjacent_drop_beams_and_cascade(story_data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """
+    Enforces two mandatory rules requested by Eng. Yousef:
+    1. Any beam adjacent to / bordering / between Slab Openings (e.g., Beam B7 between stairwell openings)
+       or whose widened width expands outside the slab boundary into a void/edge MUST be a Drop Beam
+       (`0.20 × 0.40 m`) — Hidden Beams are forbidden there!
+    2. Recursive Carrier Cascade: Whenever any beam becomes a Drop Beam, EVERY carrier beam supporting
+       it (`sup['kind'] == 'beam'`) MUST also convert from Hidden Beam -> Drop Beam, cascading upstream!
+    """
+    beams = story_data.get("beams", [])
+    openings = story_data.get("openings", [])
+    if not beams:
+        return [], []
+
+    reconcile_all_story_beams_supports_and_spans(story_data)
+    beam_by_id = {str(b.get("id")): b for b in beams if b.get("id")}
+    slab_poly = story_data.get("slab_edge_polygon", [])
+    has_bnd, pmin_x, pmin_y, pmax_x, pmax_y = get_slab_bounding_box(slab_poly)
+    slab_h_m = max(0.25, float(story_data.get("adopted_slab_thickness_cm", 30.0)) / 100.0)
+
+    converted_ids: List[str] = []
+    alerts: List[str] = []
+
+    # Step 1: Convert any Hidden beam bordering/crossing an opening (or overflowing outside boundary) -> Drop Beam
+    for bm in beams:
+        bid = str(bm.get("id", ""))
+        b_kind = "drop" if "drop" in str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower() else "hidden"
+        if b_kind != "hidden":
+            continue
+
+        touch_ops: List[str] = []
+        for op in openings:
+            rel = beam_borders_or_crosses_opening(bm, op)
+            if rel in ("borders", "crosses"):
+                touch_ops.append(str(op.get("id", "OP")))
+
+        overflows_boundary = False
+        if has_bnd and float(bm.get("width_m", 0.40)) > 0.405:
+            bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+            bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+            hw = float(bm.get("width_m", 0.40)) / 2.0
+            if abs(bex - bsx) >= abs(bey - bsy):
+                if (bsy - hw) < (pmin_y - 0.05) or (bsy + hw) > (pmax_y + 0.05):
+                    overflows_boundary = True
+            else:
+                if (bsx - hw) < (pmin_x - 0.05) or (bsx + hw) > (pmax_x + 0.05):
+                    overflows_boundary = True
+
+        if touch_ops or overflows_boundary:
+            bm["beam_kind"] = "drop"
+            bm["kind"] = "drop"
+            bm["width_m"] = 0.20
+            bm["depth_m"] = _snap_drop_depth_m(max(0.40, slab_h_m), 0.40)
+            bm["initial_width_m"] = 0.20
+            bm["initial_depth_m"] = bm["depth_m"]
+            bm.pop("manual_loads_override", None)
+            converted_ids.append(bid)
+            if touch_ops:
+                msg = (
+                    f"تنبيه فتحة سقف: تم تحويل الكمرة {bid} إلى كمرة ساقطة (0.20×{bm['depth_m']:.2f}م) ومنع أن تكون مدفونة "
+                    f"لمحاذاتها للفتحة ({', '.join(touch_ops)}) حتى لا تتمدد داخل الفتحة أو خارج حدود السقف."
+                )
+            else:
+                msg = (
+                    f"تنبيه حدود السقف: الكمرة {bid} تمدد عرضها خارج حدود السقف فتم تحويلها تلقائياً إلى كمرة ساقطة (0.20×{bm['depth_m']:.2f}م)."
+                )
+            alerts.append(msg)
+            _log_eng("OPENING_DROP_FORCE", msg, {"beam_id": bid, "openings": touch_ops})
+
+    # Step 2: Recursive Upstream Carrier Cascade (Drop secondary beam -> Drop carrier beam!)
+    changed = True
+    while changed:
+        changed = False
+        for bm in beams:
+            bid = str(bm.get("id", ""))
+            b_kind = "drop" if "drop" in str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower() else "hidden"
+            if b_kind != "drop":
+                continue
+            b_depth = float(bm.get("depth_m", 0.40))
+            for sup in bm.get("supports", []):
+                if sup.get("kind") == "beam":
+                    car_id = str(sup.get("target_id", ""))
+                    car_bm = beam_by_id.get(car_id)
+                    if car_bm is None:
+                        continue
+                    car_kind = "drop" if "drop" in str(car_bm.get("beam_kind", car_bm.get("kind", "hidden"))).lower() else "hidden"
+                    if car_kind == "hidden":
+                        car_bm["beam_kind"] = "drop"
+                        car_bm["kind"] = "drop"
+                        car_bm["width_m"] = 0.20
+                        car_bm["depth_m"] = _snap_drop_depth_m(max(0.40, b_depth, slab_h_m), 0.40)
+                        car_bm["initial_width_m"] = 0.20
+                        car_bm["initial_depth_m"] = car_bm["depth_m"]
+                        car_bm.pop("manual_loads_override", None)
+                        if car_id not in converted_ids:
+                            converted_ids.append(car_id)
+                        cmsg = (
+                            f"تسلسل التحميل الإنشائي (Cascade): تم تحويل الكمرة الحاملة {car_id} تلقائياً إلى كمرة ساقطة "
+                            f"(0.20×{car_bm['depth_m']:.2f}م) لأن الكمرة الساقطة {bid} محملة عليها."
+                        )
+                        alerts.append(cmsg)
+                        _log_eng("CARRIER_CASCADE", cmsg, {"secondary": bid, "carrier": car_id})
+                        changed = True
+
+    if converted_ids:
+        reconcile_all_story_beams_supports_and_spans(story_data)
+    return converted_ids, alerts
+
+
+def find_nearest_solid_edge_for_column(
+    story_data: Dict[str, Any],
+    col: Dict[str, Any],
+    op: Dict[str, Any],
+) -> Tuple[float, float]:
+    """
+    Computes the nearest valid solid position `(new_x, new_y)` just outside opening `op`
+    and strictly inside `slab_edge_polygon` so a conflicting column can be shifted cleanly.
+    """
+    normalize_opening_dict(op)
+    cx, cy = float(col.get("x", 0.0)), float(col.get("y", 0.0))
+    hb = float(col.get("b_m", 0.20)) / 2.0
+    hh = float(col.get("h_m", 0.40)) / 2.0
+    has_bnd, pmin_x, pmin_y, pmax_x, pmax_y = get_slab_bounding_box(story_data.get("slab_edge_polygon", []))
+
+    poly = op["polygon"]
+    candidates: List[Tuple[float, float, float]] = []
+    n_v = len(poly)
+    for idx in range(n_v):
+        x1, y1 = float(poly[idx][0]), float(poly[idx][1])
+        x2, y2 = float(poly[(idx + 1) % n_v][0]), float(poly[(idx + 1) % n_v][1])
+        # Project point onto segment and step outward by column half-size + 0.01m
+        dx, dy = x2 - x1, y2 - y1
+        seg2 = dx * dx + dy * dy
+        if seg2 <= 1e-8:
+            continue
+        t = max(0.0, min(1.0, ((cx - x1) * dx + (cy - y1) * dy) / seg2))
+        px = x1 + t * dx
+        py = y1 + t * dy
+        L = math.sqrt(seg2)
+        # Try both normals to find whichever side is outside `op`
+        nx, ny = -dy / L, dx / L
+        for sgn in (1.0, -1.0):
+            cand_x = px + sgn * nx * (hb + 0.02)
+            cand_y = py + sgn * ny * (hh + 0.02)
+            if has_bnd:
+                cand_x = min(max(cand_x, pmin_x + hb), pmax_x - hb)
+                cand_y = min(max(cand_y, pmin_y + hh), pmax_y - hh)
+            if not is_point_in_opening(cand_x, cand_y, op, include_edge=False, tol=0.04):
+                candidates.append((math.hypot(cand_x - cx, cand_y - cy), round(cand_x, 3), round(cand_y, 3)))
+
+    if candidates:
+        candidates.sort(key=lambda t: t[0])
+        return candidates[0][1], candidates[0][2]
+
+    # Bounding-box fallback
+    c_left = (float(op["min_x"]) - hb, cy)
+    c_right = (float(op["max_x"]) + hb, cy)
+    c_bot = (cx, float(op["min_y"]) - hh)
+    c_top = (cx, float(op["max_y"]) + hh)
+    best_c = min([c_left, c_right, c_bot, c_top], key=lambda pt: math.hypot(pt[0] - cx, pt[1] - cy))
+    nx_f, ny_f = best_c
+    if has_bnd:
+        nx_f = min(max(nx_f, pmin_x + hb), pmax_x - hb)
+        ny_f = min(max(ny_f, pmin_y + hh), pmax_y - hh)
+    return round(nx_f, 3), round(ny_f, 3)
+
+
+def create_opening_with_priority_resolution(
+    story_data: Dict[str, Any],
+    points_or_rect: Any,
+    is_polygon: bool = False,
+) -> Dict[str, Any]:
+    """
+    Creates a Rectangular or Polygonal Slab Opening (`OP#`) with **Opening Priority**:
+    1. Automatically merges adjacent touching/overlapping openings when no beam separates them.
+    2. If any existing beam cuts across the opening interior, attempts to shift it cleanly
+       to the nearest solid edge of the opening and converts it to a Drop Beam (`0.20 × 0.40 m`).
+    3. Enforces Opening-Adjacent Drop Beam + Recursive Carrier Cascade (`B7 -> B6`).
+    4. Removes any Slab object completely covered by the new opening.
+    5. Detects any existing Column inside the opening and returns interactive choices
+       (`suggested_edge` vs `Double-Height 2H`) in `conflicting_columns` for UI confirmation.
+    """
+    openings = story_data.setdefault("openings", [])
+    if is_polygon:
+        pts = [[round(float(p[0]), 3), round(float(p[1]), 3)] for p in points_or_rect]
+        if len(pts) < 3:
+            return {"ok": False, "error": "Polygon opening requires at least 3 points."}
+        new_op: Dict[str, Any] = {
+            "id": f"OP{len(openings) + 1}",
+            "shape": "polygon",
+            "polygon": pts,
+        }
+        # Also detect axis-aligned bounding rectangle sub_rect if pure rectangle
+        xs = {p[0] for p in pts}
+        ys = {p[1] for p in pts}
+        if len(pts) == 4 and len(xs) == 2 and len(ys) == 2:
+            new_op["sub_rects"] = [[min(xs), min(ys), max(xs), max(ys)]]
+    else:
+        p1, p2 = points_or_rect[0], points_or_rect[1]
+        x1, y1 = round(min(float(p1[0]), float(p2[0])), 3), round(min(float(p1[1]), float(p2[1])), 3)
+        x2, y2 = round(max(float(p1[0]), float(p2[0])), 3), round(max(float(p1[1]), float(p2[1])), 3)
+        if (x2 - x1) < 0.30 or (y2 - y1) < 0.30:
+            return {"ok": False, "error": "Opening width and height must be at least 0.30 m."}
+        new_op = {
+            "id": f"OP{len(openings) + 1}",
+            "shape": "rectangle",
+            "min_x": x1,
+            "max_x": x2,
+            "min_y": y1,
+            "max_y": y2,
+            "sub_rects": [[x1, y1, x2, y2]],
+            "polygon": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+        }
+
+    normalize_opening_dict(new_op)
+    openings.append(new_op)
+
+    merges, merge_msgs = coalesce_adjacent_openings(story_data)
+    alerts: List[str] = list(merge_msgs)
+
+    # Resolve any beam cutting straight across any opening by shifting to nearest solid opening edge + converting to Drop Beam
+    shifted_beams: List[str] = []
+    beams = story_data.get("beams", [])
+    has_bnd, pmin_x, pmin_y, pmax_x, pmax_y = get_slab_bounding_box(story_data.get("slab_edge_polygon", []))
+
+    for bm in beams:
+        bid = str(bm.get("id", ""))
+        for op in story_data.get("openings", []):
+            rel = beam_borders_or_crosses_opening(bm, op)
+            if rel != "crosses":
+                continue
+            sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+            ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+            is_h = abs(ex - sx) >= abs(ey - sy)
+            # First convert to Drop Beam (width 0.20, half_w 0.10)
+            bm["beam_kind"] = "drop"
+            bm["kind"] = "drop"
+            bm["width_m"] = 0.20
+            bm["depth_m"] = _snap_drop_depth_m(max(0.40, float(bm.get("depth_m", 0.40))), 0.40)
+            bm["initial_width_m"] = 0.20
+            bm["initial_depth_m"] = bm["depth_m"]
+
+            if is_h:
+                cand_ys = [round(float(op["min_y"]) - 0.10, 3), round(float(op["max_y"]) + 0.10, 3)]
+                if has_bnd:
+                    cand_ys = [min(max(cy_c, pmin_y + 0.10), pmax_y - 0.10) for cy_c in cand_ys]
+                best_y = min(cand_ys, key=lambda cy_c: abs(cy_c - sy))
+                bm["start_y"] = bm["end_y"] = best_y
+                shifted_beams.append(bid)
+                alerts.append(f"أولوية الفتحة: الكمرة {bid} كانت تقطع داخل الفتحة {op['id']} فتم إزاحتها إلى الحافة الصلبة (Y={best_y:.2f}م) وتحويلها لكمرة ساقطة.")
+            else:
+                cand_xs = [round(float(op["min_x"]) - 0.10, 3), round(float(op["max_x"]) + 0.10, 3)]
+                if has_bnd:
+                    cand_xs = [min(max(cx_c, pmin_x + 0.10), pmax_x - 0.10) for cx_c in cand_xs]
+                best_x = min(cand_xs, key=lambda cx_c: abs(cx_c - sx))
+                bm["start_x"] = bm["end_x"] = best_x
+                shifted_beams.append(bid)
+                alerts.append(f"أولوية الفتحة: الكمرة {bid} كانت تقطع داخل الفتحة {op['id']} فتم إزاحتها إلى الحافة الصلبة (X={best_x:.2f}م) وتحويلها لكمرة ساقطة.")
+
+    # Enforce Opening-Adjacent Drop Beam & Carrier Cascade
+    conv_ids, cascade_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story_data)
+    alerts.extend(cascade_alerts)
+
+    # Remove slabs whose centers lie inside any opening
+    rem_slabs: List[str] = []
+    kept_slabs: List[Dict[str, Any]] = []
+    for slb in story_data.get("slabs", []):
+        if "min_x" in slb:
+            scx = (float(slb["min_x"]) + float(slb["max_x"])) / 2.0
+            scy = (float(slb["min_y"]) + float(slb["max_y"])) / 2.0
+            if any(is_point_in_opening(scx, scy, op, include_edge=False, tol=0.05) for op in story_data.get("openings", [])):
+                rem_slabs.append(str(slb.get("id", "S")))
+                continue
+        kept_slabs.append(slb)
+    if rem_slabs:
+        story_data["slabs"] = kept_slabs
+        alerts.append(f"تمت إزالة البلاطات المتداخلة مع الفتحة: {', '.join(rem_slabs)}.")
+
+    # Detect any conflicting columns strictly inside any opening
+    conflicting_columns: List[Dict[str, Any]] = []
+    for col in story_data.get("columns", []):
+        if not col.get("active", True) or col.get("double_height", False):
+            continue
+        cx, cy = float(col["x"]), float(col["y"])
+        for op in story_data.get("openings", []):
+            if is_point_in_opening(cx, cy, op, include_edge=False, tol=0.05):
+                edge_x, edge_y = find_nearest_solid_edge_for_column(story_data, col, op)
+                conflicting_columns.append({
+                    "column_id": str(col["id"]),
+                    "opening_id": str(op["id"]),
+                    "current_pos": (cx, cy),
+                    "suggested_edge": (edge_x, edge_y),
+                })
+                break
+
+    final_op = story_data["openings"][-1] if story_data.get("openings") else new_op
+    _log_eng(
+        "OPENING_CREATED",
+        f"Opening {final_op.get('id')} created ({final_op.get('shape','rect')})",
+        {
+            "shifted_beams": shifted_beams,
+            "converted_drop_beams": conv_ids,
+            "conflicting_columns": conflicting_columns,
+            "alerts": alerts,
+        },
+    )
+    return {
+        "ok": True,
+        "opening": final_op,
+        "merged_count": merges,
+        "shifted_beams": shifted_beams,
+        "converted_drop_beams": conv_ids,
+        "conflicting_columns": conflicting_columns,
+        "alerts": alerts,
+    }
+
+
 def convert_beam_kind_and_section(
     story_data: Dict[str, Any],
     beam_id: str,
@@ -4489,11 +5348,12 @@ def convert_beam_kind_and_section(
     new_depth_m: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """
-    Converts a beam between Hidden Beam ('hidden', e.g., 0.40x0.30m) and Drop Beam ('drop', e.g., 0.20x0.50m)
+    Converts a beam between Hidden Beam ('hidden', e.g., 0.40x0.30m) and Drop Beam ('drop', e.g., 0.20x0.40m)
     or updates its cross-section, clamps it inside the building boundary, and reconciles adjacent slabs.
-    Enforces the Strict Structural Hierarchy Rule:
-    - A Carrier Beam (e.g. B6) CANNOT be converted to a Hidden Beam if any Secondary Drop Beam (e.g. B7) rests on it!
-    - A Secondary Beam (e.g. B7) CANNOT be converted to a Drop Beam if it rests on a Hidden Carrier Beam (e.g. B6)!
+    Enforces:
+    - Opening-Adjacent Rule: A beam bordering an opening CANNOT be converted to Hidden!
+    - Structural Hierarchy Rule: A Carrier Beam cannot be Hidden if a Drop Beam rests on it!
+    - If converting a Secondary Beam to Drop, automatically cascades Hidden Carrier Beam(s) -> Drop Beam!
     """
     reconcile_all_story_beams_supports_and_spans(story_data)
     beams = story_data.get("beams", [])
@@ -4506,6 +5366,20 @@ def convert_beam_kind_and_section(
     target_kind = new_kind if new_kind in ("hidden", "drop") else ("drop" if cur_kind == "hidden" else "hidden")
 
     beam_by_id = {str(b.get("id")): b for b in beams if b.get("id")}
+
+    # Rule 0: Prevent converting Opening-Adjacent Beam to Hidden
+    if target_kind == "hidden":
+        adj_ops = [
+            str(op.get("id", "OP"))
+            for op in story_data.get("openings", [])
+            if beam_borders_or_crosses_opening(bm, op) in ("borders", "crosses")
+        ]
+        if adj_ops:
+            return (
+                False,
+                f"Opening Boundary Rule (منع المدفونة بجانب الفتحات): لا يمكن تحويل الكمرة {beam_id} إلى كمرة مدفونة "
+                f"لأنها محاذية لفتحة السقف ({', '.join(adj_ops)}) — يجب أن تبقى كمرة ساقطة حتى لا تتمدد داخل الفتحة أو خارج السقف.",
+            )
 
     # Rule A: Prevent converting Carrier Beam `beam_id` to Hidden if any Secondary Drop Beam rests on it
     if target_kind == "hidden":
@@ -4526,7 +5400,8 @@ def convert_beam_kind_and_section(
                 f"because Drop Beam(s) {', '.join(supported_drop_beams)} rest on it! Convert {', '.join(supported_drop_beams)} to Hidden Beam(s) first.",
             )
 
-    # Rule B: Prevent converting Secondary Beam `beam_id` to Drop if it rests on any Hidden Carrier Beam
+    # Rule B: When converting Secondary Beam `beam_id` to Drop while resting on Hidden Carrier(s),
+    # check if any carrier is Hidden — reject only if explicit conflict, OR auto-cascade via enforce_opening_adjacent_drop_beams_and_cascade
     if target_kind == "drop":
         hidden_carriers: List[str] = []
         for sup in bm.get("supports", []):
@@ -4547,7 +5422,6 @@ def convert_beam_kind_and_section(
     bm["beam_kind"] = target_kind
     bm["kind"] = target_kind
 
-    # Check if any secondary beam rests on `beam_id` so carrier depth >= supported depth
     min_supported_depth = 0.25
     for other_b in beams:
         if other_b.get("id") == beam_id:
@@ -4560,10 +5434,10 @@ def convert_beam_kind_and_section(
         bm["width_m"] = round(max(0.12, float(new_width_m)), 3)
         bm["depth_m"] = round(max(min_supported_depth, float(new_depth_m)), 3)
     else:
-        slab_t_m = round(float(story_data.get("adopted_slab_thickness_cm", 25.0)) / 100.0, 3)
+        slab_t_m = round(float(story_data.get("adopted_slab_thickness_cm", 30.0)) / 100.0, 3)
         if target_kind == "drop":
             bm["width_m"] = 0.20
-            bm["depth_m"] = max(0.50, round(slab_t_m + 0.25, 2), min_supported_depth)
+            bm["depth_m"] = _snap_drop_depth_m(max(0.40, slab_t_m, min_supported_depth), 0.40)
         else:
             bm["width_m"] = 0.40
             bm["depth_m"] = max(0.25, slab_t_m, min_supported_depth)
@@ -4573,6 +5447,7 @@ def convert_beam_kind_and_section(
     bm.pop("manual_loads_override", None)
     move_beam_within_slab_boundary(story_data, beam_id, 0.0, 0.0)
     reconcile_and_split_slabs_after_beam_change(story_data)
+    _log_eng("BEAM_CONVERT", f"Converted Beam {beam_id} -> {target_kind.upper()} ({bm['width_m']:.2f} x {bm['depth_m']:.2f} m)")
     return (
         True,
         f"Converted Beam {beam_id} to {target_kind.upper()} ({bm['width_m']:.2f} × {bm['depth_m']:.2f} m).",

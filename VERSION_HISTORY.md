@@ -4,7 +4,35 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.2.1-structural-bim-pro` (2026-11-17)
+## Current Release: `v2.3.0-structural-bim-pro` (2026-11-17)
+**Release Title:** Independent Slab Openings CAD Engine, Opening-Over-Framing Priority, Double-Height Columns (2H), Recursive Carrier Beam Cascade, Standard 100mm Drop Beam Depth Snapping, Span-Isolated Shear Envelope, Non-Clipping Section A-A Scaling, and Real-Time Diagnostic Logging (`xpert_studio_session.log`).
+
+### Key Features & Advancements in `v2.3.0-structural-bim-pro`:
+1. **Independent Slab Opening Tool (`DRAW_OPENING`):**
+   - Dedicated 2D CAD drafting tool supporting both 2-Click Orthogonal Box mode and Multi-Vertex Closed Polygon mode (`Spacebar` to toggle modes, `Enter` or Right-Click to close).
+   - Smart topological coalescing (`coalesce_adjacent_openings`): adjacent or overlapping openings automatically merge into a single unified polygon when no beam separates them.
+   - Clean AutoCAD DXF export to layer `00-XD-OPEN` (Color 6, Magenta) as closed `LWPOLYLINE` with structural crossing diagonal lines.
+2. **Opening Priority over Framing & Double-Height Column Support (2H):**
+   - Opening Priority rule (`Opening Priority`): beams crossing inside slab openings are automatically shifted to the nearest solid slab edge and converted to drop beams.
+   - Column in opening conflict resolution: user can either displace the column with attached framing to the nearest solid edge or designate it as a **Double-Height Column (`(2H)`)**.
+   - Double-Height columns calculate effective unbraced length $L_u = 2 \times H_{\text{story}}$ for slenderness and column capacity, rendered with `(2H)` badge in Tab 4 and AutoCAD DXF tag `C# (2H)` on layer `00-XD-TAG-COL`.
+3. **Opening-Adjacent Beam Conversion & Recursive Carrier Cascade (`B7 -> B6`):**
+   - Prohibits hidden beams along opening perimeters or extending outside the slab boundary; automatically converts them to Drop Beams ($0.20 \times 0.40\text{ m}$) with user notification.
+   - Recursive Carrier Cascade (`enforce_opening_adjacent_drop_beams_and_cascade`): any hidden beam supporting a drop beam is automatically escalated into a drop beam.
+4. **Standard 100mm Drop Beam Depth Snapping & Shear Zone 5 Sizing:**
+   - Drop beam section depths strictly snapped to multiples of $100\text{ mm}$ via `_snap_drop_depth_m` ($0.40, 0.50, 0.60\text{ m}$), eliminating legacy non-standard $0.51\text{ m}$ ($510\text{ mm}$) heights.
+   - Shear Zone 5 (+100mm step): when shear stress exceeds ACI 318 limits, depth is stepped up in $+100\text{ mm}$ increments.
+   - Span-isolated shear envelope: strictly limits peak shear search to open span intervals `(s_st + 1e-4, s_en - 1e-4)`, preventing shear spikes from leaking between adjacent spans (`Span 1 -> Span 2`).
+5. **Enhanced UI Drafting, Tab 2/3 Section Scaling & Real-Time Diagnostics:**
+   - Tab 2 title dynamically shows initial and designed beam dimensions: `Init b×h → Designed b×h`.
+   - Tab 3 horizontal scaling covers full physical beam width `(ext_left + tot_l + ext_right)`, ensuring Section A-A detail never clips on the right viewport edge.
+   - Real-time diagnostic session logging system (`xpert_studio_session.log`) recording all events (`PROJECT_INIT`, `HORDI_CALC`, `ANALYSIS_START`, `BEAM_SOLVE_DESIGN`, `CASCADE`, `ANALYSIS_DONE`), viewable directly via `View -> Open Session Diagnostic Log (سجل الأحداث والأعطال)...`.
+6. **Comprehensive Automated Test Coverage:**
+   - 19 passing unit tests in `test_studio_engine.py` (19/19 OK in ~1.6s) including `test_v230_openings_priority_cascade_clean_drop_depth_shear_and_logging`.
+
+---
+
+## Previous Release: `v2.2.1-structural-bim-pro` (2026-11-17)
 **Release Title:** Crash-Proof Plan Drafting, Global Qt Exception Hook, Debounced Viewport Resizing (40ms), Single-Pass Analysis Philosophy, and Commercial Hollow-Block Standard Sizing
 
 ### Key Features & Advancements in `v2.2.1-structural-bim-pro`:

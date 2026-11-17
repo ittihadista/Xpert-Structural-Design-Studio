@@ -1244,13 +1244,13 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertEqual(pio.STUDIO_VERSION, "v2.2.1-structural-bim-pro")
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
 
-        self.assertIn("v2.2.1-structural-bim-pro", app_src)
+        self.assertIn(pio.STUDIO_VERSION, app_src)
         self.assertIn("_install_global_excepthook", app_src)
         self.assertIn("_report_studio_exception", app_src)
         self.assertNotIn("compute_hollow_block_parameters(hb_src,", app_src)
@@ -1318,6 +1318,219 @@ class TestXpertStudioEngine(unittest.TestCase):
             win.switch_workspace_mode(3)
         except ModuleNotFoundError:
             pass
+
+    def test_v230_openings_priority_cascade_clean_drop_depth_shear_and_logging(self) -> None:
+        """
+        Verifies all v2.3.0-structural-bim-pro engineering & UI requirements:
+        1. STUDIO_VERSION == 'v2.3.0-structural-bim-pro' + DRAW_OPENING / DiagnosticLogDialog present.
+        2. Span-by-span shear isolation (heavy Span 1 does NOT leak peak shear into lightly loaded Span 2).
+        3. Clean Drop Beam depths (40 -> 50 -> 60 cm, no 0.51 m artifact) + ACI Zone 5 shear +100 mm step.
+        4. Automatic adjacent opening merging when no beam separates them (keeps separate if a beam divides them).
+        5. Opening Priority + Opening-Adjacent Forced Drop Beam (B7 -> Drop 0.20x0.40, blocks Hidden)
+           + Recursive Carrier Cascade (B6 -> Drop) + Crossing Beam shifted to nearest solid edge.
+        6. Column inside opening: find_nearest_solid_edge_for_column + Double-Height Column (2H -> lu = 2*story_h).
+        7. Diagnostic session logger writes/reads xpert_studio_session.log cleanly.
+        """
+        import xpert_project_io as pio
+        import xpert_structural_engine as eng
+
+        # 1. Version & UI presence
+        self.assertEqual(pio.STUDIO_VERSION, "v2.3.0-structural-bim-pro")
+        app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
+        with open(app_path, "r", encoding="utf-8") as f:
+            app_src = f.read()
+        self.assertIn("v2.3.0-structural-bim-pro", app_src)
+        self.assertIn("DRAW_OPENING", app_src)
+        self.assertIn("DiagnosticLogDialog", app_src)
+
+        # 2. Span 1 vs Span 2 shear isolation
+        beam_2span = {
+            "id": "B_ISO",
+            "beam_kind": "drop",
+            "width_m": 0.20,
+            "depth_m": 0.40,
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "end_x": 9.0,
+            "end_y": 0.0,
+            "supports": [
+                {"kind": "column", "target_id": "C1", "pos_m": 0.0, "width_m": 0.20},
+                {"kind": "column", "target_id": "C2", "pos_m": 4.5, "width_m": 0.40},
+                {"kind": "column", "target_id": "C3", "pos_m": 9.0, "width_m": 0.20},
+            ],
+            "spans": [4.5, 4.5],
+            "loads": [
+                {"type": "dist", "x1": 0.0, "x2": 4.5, "val": 65.0, "label": "Span1 Heavy"},
+                {"type": "dist", "x1": 4.5, "x2": 9.0, "val": 4.0, "label": "Span2 Light"},
+            ],
+        }
+        solved = eng.solve_continuous_beam_analytical(beam_2span, fc_mpa=20.0, fy_mpa=350.0)
+        sp1 = solved["span_positive_moments"][0]
+        sp2 = solved["span_positive_moments"][1]
+        self.assertGreater(sp1["max_abs_vu_kn"], 100.0)
+        self.assertLess(sp2["max_abs_vu_kn"], 45.0, "Span 2 must NOT inherit Span 1's interior left shear peak!")
+
+        # 3. Clean Drop Beam depth (no 0.51m artifact) + ACI Zone 5 shear +100mm step
+        self.assertEqual(eng._snap_drop_depth_m(0.40), 0.40)
+        self.assertEqual(eng._snap_drop_depth_m(0.51), 0.50)
+        self.assertEqual(eng._snap_drop_depth_m(0.45), 0.50)
+        self.assertEqual(eng._snap_drop_depth_m(0.55), 0.60)
+        story_drop = {
+            "story_id": "02_Ground_Floor",
+            "adopted_slab_thickness_cm": 30.0,
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+            "columns": [
+                {"id": "C1", "x": 1.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 9.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {
+                    "id": "B1",
+                    "beam_kind": "hidden",
+                    "kind": "hidden",
+                    "width_m": 0.40,
+                    "depth_m": 0.30,
+                    "start_x": 1.0,
+                    "start_y": 5.0,
+                    "end_x": 9.0,
+                    "end_y": 5.0,
+                }
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+        ok_conv, _msg_conv = convert_beam_kind_and_section(story_drop, "B1", new_kind="drop")
+        self.assertTrue(ok_conv)
+        self.assertEqual(story_drop["beams"][0]["width_m"], 0.20)
+        self.assertEqual(story_drop["beams"][0]["depth_m"], 0.40)
+
+        # Zone 5 high shear triggers clean +100 mm Drop depth sizing (400 -> 500 or 600 mm, always multiple of 100 mm)
+        beam_z5 = {
+            "id": "B_Z5",
+            "beam_kind": "drop",
+            "width_m": 0.20,
+            "depth_m": 0.40,
+            "spans": [5.0],
+            "supports": [
+                {"kind": "column", "target_id": "C1", "pos_m": 0.0, "width_m": 0.20},
+                {"kind": "column", "target_id": "C2", "pos_m": 5.0, "width_m": 0.20},
+            ],
+            "loads": [{"type": "dist", "x1": 0.0, "x2": 5.0, "val": 92.0, "label": "Heavy Z5"}],
+        }
+        sol_z5 = eng.solve_continuous_beam_analytical(beam_z5, fc_mpa=20.0, fy_mpa=350.0)
+        des_z5 = design_beam_aci318(beam_z5, sol_z5, fc_mpa=20.0, fy_mpa=350.0, auto_size_section=True)
+        self.assertGreater(des_z5["h_mm"], 400.0)
+        self.assertEqual(des_z5["h_mm"] % 100.0, 0.0)
+
+        # 4. Auto-merging two adjacent openings when no beam divides them vs separate when divided
+        story_merge = {
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+            "beams": [],
+            "columns": [],
+            "slabs": [],
+            "openings": [],
+        }
+        res_o1 = eng.create_opening_with_priority_resolution(story_merge, [[2.0, 2.0], [4.0, 4.0]], is_polygon=False)
+        self.assertTrue(res_o1["ok"])
+        res_o2 = eng.create_opening_with_priority_resolution(story_merge, [[4.0, 2.0], [6.0, 5.0]], is_polygon=False)
+        self.assertTrue(res_o2["ok"])
+        self.assertEqual(len(story_merge["openings"]), 1, "Touching openings without dividing beam must auto-merge into OP1.")
+        self.assertGreaterEqual(len(story_merge["openings"][0]["polygon"]), 6)
+
+        story_sep = {
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+            "beams": [
+                {"id": "B_DIV", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.40, "start_x": 4.0, "start_y": 1.0, "end_x": 4.0, "end_y": 6.0},
+            ],
+            "columns": [
+                {"id": "C1", "x": 4.0, "y": 1.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 4.0, "y": 6.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+        eng.create_opening_with_priority_resolution(story_sep, [[2.0, 2.0], [3.9, 4.5]], is_polygon=False)
+        eng.create_opening_with_priority_resolution(story_sep, [[4.1, 2.0], [6.0, 4.5]], is_polygon=False)
+        self.assertEqual(len(story_sep["openings"]), 2, "Openings separated by dividing beam B_DIV must remain separate.")
+
+        # 5. Opening Priority + Forced Drop Beam (B7) + Recursive Carrier Cascade (B6) + Crossing Shift
+        story_cascade = {
+            "story_id": "02_Ground_Floor",
+            "story_height_m": 3.20,
+            "adopted_slab_thickness_cm": 30.0,
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]],
+            "columns": [
+                {"id": "C1", "x": 0.2, "y": 1.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 0.2, "y": 7.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 9.8, "y": 4.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                # Column inside opening at (3.5, 4.0)
+                {"id": "C4", "x": 3.5, "y": 4.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                # Carrier B6 along X=0.2 (Hidden initially)
+                {"id": "B6", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 0.2, "start_y": 1.0, "end_x": 0.2, "end_y": 7.0},
+                # Secondary B7 resting on B6 at (0.2, 4.0) -> (9.8, 4.0) (Hidden initially, borders opening below!)
+                {"id": "B7", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 0.2, "start_y": 4.0, "end_x": 9.8, "end_y": 4.0},
+                # Crossing beam B8 cutting across opening Y=3.0
+                {"id": "B8", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 1.5, "start_y": 3.0, "end_x": 6.5, "end_y": 3.0},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+        # Opening from X=2.0..6.0, Y=1.8..3.9 (borders B7 at Y=4.0, crosses B8 at Y=3.0, swallows C4? No C4 at (3.5,4.0) is outside, move C4 to (3.5, 3.0))
+        story_cascade["columns"][3]["y"] = 3.0
+        res_cas = eng.create_opening_with_priority_resolution(story_cascade, [[2.0, 1.8], [6.0, 3.9]], is_polygon=False)
+        self.assertTrue(res_cas["ok"])
+        b_map = {b["id"]: b for b in story_cascade["beams"]}
+        self.assertEqual(b_map["B7"]["beam_kind"], "drop")
+        self.assertEqual(b_map["B7"]["depth_m"], 0.40)
+        self.assertEqual(b_map["B6"]["beam_kind"], "drop", "Carrier B6 supporting B7 must cascade to Drop Beam!")
+        self.assertIn("B8", res_cas["shifted_beams"], "Crossing beam B8 must be shifted to opening solid edge!")
+        self.assertEqual(b_map["B8"]["beam_kind"], "drop")
+
+        # Converting opening-adjacent beam B7 back to Hidden must be blocked
+        ok_back, msg_back = convert_beam_kind_and_section(story_cascade, "B7", new_kind="hidden")
+        self.assertFalse(ok_back)
+        self.assertIn("OP1", msg_back)
+
+        # 6. Column inside opening -> conflicting_columns + solid edge + Double-Height (2H) effective length
+        self.assertEqual(len(res_cas["conflicting_columns"]), 1)
+        self.assertEqual(res_cas["conflicting_columns"][0]["column_id"], "C4")
+        edge_x, edge_y = eng.find_nearest_solid_edge_for_column(story_cascade, story_cascade["columns"][3], story_cascade["openings"][0])
+        self.assertFalse(eng.is_point_in_opening(edge_x, edge_y, story_cascade["openings"][0], include_edge=False, tol=0.02))
+
+        # Test Double-Height Column lu_m = 2 * story_h
+        story_2h = {
+            "story_id": "02_Ground_Floor",
+            "height_m": 3.20,
+            "adopted_slab_thickness_cm": 30.0,
+            "hollow_block": {"factored_wu_kpa": 11.71, "block_height_cm": 20.0, "top_flange_cm": 10.0},
+            "slab_edge_polygon": [[0.0, 0.0], [8.0, 0.0], [8.0, 6.0], [0.0, 6.0]],
+            "columns": [
+                {"id": "C1", "x": 0.2, "y": 0.2, "b_m": 0.20, "h_m": 0.40, "active": True, "double_height": False},
+                {"id": "C2", "x": 7.8, "y": 0.2, "b_m": 0.20, "h_m": 0.40, "active": True, "double_height": True},
+            ],
+            "beams": [
+                {"id": "B1", "beam_kind": "drop", "width_m": 0.20, "depth_m": 0.40, "start_x": 0.2, "start_y": 0.2, "end_x": 7.8, "end_y": 0.2},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+        bundle_2h = analyze_all_story_beams_and_columns(story_2h, fc_mpa=20.0, fy_mpa=350.0)
+        col_rec_map = {r["column_id"]: r for r in bundle_2h["column_records"]}
+        self.assertAlmostEqual(col_rec_map["C1"]["design"]["lu_m"], 3.20, places=2)
+        self.assertAlmostEqual(col_rec_map["C2"]["design"]["lu_m"], 6.40, places=2)
+        self.assertTrue(col_rec_map["C2"]["double_height"])
+        self.assertTrue(col_rec_map["C2"]["design"]["double_height"])
+
+        # 7. Diagnostic session logger write/read check
+        pio.set_active_project_log_dir(self.tmp_dir)
+        pio.clear_studio_log(self.tmp_dir)
+        pio.log_studio_event("TEST_V230", "Verified v2.3.0 session diagnostic log entry", {"ok": True})
+        tail_txt = pio.read_studio_log_tail(100, project_dir=self.tmp_dir)
+        self.assertIn("TEST_V230", tail_txt)
+        self.assertIn("Verified v2.3.0 session diagnostic log entry", tail_txt)
+        pio.set_active_project_log_dir(None)
 
 
 if __name__ == "__main__":

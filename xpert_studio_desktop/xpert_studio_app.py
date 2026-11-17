@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.2.1-structural-bim-pro)
+Xpert Structural Design Studio (v2.3.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -65,6 +66,11 @@ from xpert_project_io import (
     compute_hollow_block_parameters,
     compute_smart_beam_tag_position,
     import_arch_dxf_underlay,
+    set_active_project_log_dir,
+    get_studio_log_file_path,
+    log_studio_event,
+    read_studio_log_tail,
+    clear_studio_log,
 )
 from xpert_structural_engine import (
     STANDARD_WALL_THICKNESSES_CM,
@@ -100,6 +106,10 @@ from xpert_structural_engine import (
     set_beam_span_wall_thickness,
     design_hollow_block_slab_rib,
     convert_beam_kind_and_section,
+    is_point_in_opening,
+    enforce_opening_adjacent_drop_beams_and_cascade,
+    find_nearest_solid_edge_for_column,
+    create_opening_with_priority_resolution,
 )
 
 
@@ -823,6 +833,75 @@ class MoveNumericDeltaDialog(QDialog):
         vbox.addWidget(btns)
 
 
+class DiagnosticLogDialog(QDialog):
+    """
+    Live Engineering & Session Diagnostic Log Viewer (`xpert_studio_session.log`):
+    Allows Eng. Yousef to inspect, copy, refresh, or clear every calculation,
+    conflict resolution, Hordi load, beam design iteration, and runtime event.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None, project_dir: Optional[str] = None):
+        super().__init__(parent)
+        self.project_dir = project_dir
+        self.setWindowTitle(f"Session & Engineering Diagnostic Log ({STUDIO_VERSION})")
+        self.setMinimumSize(860, 560)
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self._build_ui()
+        self.refresh_log()
+
+    def _build_ui(self) -> None:
+        vbox = QVBoxLayout(self)
+        vbox.setSpacing(8)
+
+        log_path = get_studio_log_file_path(self.project_dir)
+        lbl_path = QLabel(f"Diagnostic Log File: {log_path}")
+        lbl_path.setStyleSheet("color: #0369A1; font-weight: bold;")
+        vbox.addWidget(lbl_path)
+
+        self.txt_log = QPlainTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setStyleSheet(
+            "QPlainTextEdit { background: #0F172A; color: #E2E8F0; font-family: Consolas, 'Courier New', monospace; "
+            "font-size: 11px; border: 1px solid #334155; border-radius: 4px; padding: 8px; }"
+        )
+        vbox.addWidget(self.txt_log, 1)
+
+        btn_row = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self.refresh_log)
+        btn_copy = QPushButton("Copy Full Log")
+        btn_copy.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold;")
+        btn_copy.clicked.connect(self._copy_log)
+        btn_clear = QPushButton("Clear Log")
+        btn_clear.setStyleSheet("background-color: #DC2626; color: white; font-weight: bold;")
+        btn_clear.clicked.connect(self._clear_log)
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+
+        btn_row.addWidget(btn_refresh)
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_clear)
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_close)
+        vbox.addLayout(btn_row)
+
+    def refresh_log(self) -> None:
+        content = read_studio_log_tail(max_lines=600, project_dir=self.project_dir)
+        self.txt_log.setPlainText(content)
+        sb = self.txt_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _copy_log(self) -> None:
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(self.txt_log.toPlainText())
+
+    def _clear_log(self) -> None:
+        clear_studio_log(self.project_dir)
+        log_studio_event("SESSION", "Diagnostic log cleared by user.")
+        self.refresh_log()
+
+
 class SlabRibDesignDialog(QDialog):
     """
     Hollow-Block (Hordi) Slab Rib Design & Cross-Section Window (v2.0.0-structural-bim-pro):
@@ -1413,6 +1492,8 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         # Drawing / Modify / Dimension tool states
         self._polyline_pts: List[Tuple[float, float]] = []
+        self._opening_poly_pts: List[Tuple[float, float]] = []
+        self._opening_poly_mode: bool = False  # False = Rectangle (2-click default), True = Polyline [Spacebar toggle]
         self._first_click_pt: Optional[Tuple[float, float]] = None
         self._second_click_pt: Optional[Tuple[float, float]] = None
         self._current_snap_info: Optional[Dict[str, Any]] = None
@@ -1535,6 +1616,17 @@ class StructuralCadCanvas2D(QGraphicsView):
                 )
                 event.accept()
                 return
+            if self.active_tool == "DRAW_OPENING":
+                self._opening_poly_mode = not self._opening_poly_mode
+                self._first_click_pt = None
+                self._opening_poly_pts.clear()
+                self.render_story(self.studio.current_story_data)
+                mode_lbl = "Polyline (Multi-Point Loop)" if self._opening_poly_mode else "Rectangle (2 Opposite Corners)"
+                self.studio.update_contextual_prompt(
+                    f"Draw Slab Opening [{mode_lbl}]: Press [Space] to switch mode, click corners to define opening."
+                )
+                event.accept()
+                return
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.studio.delete_selected_object()
             event.accept()
@@ -1563,6 +1655,10 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self._finalize_polyline_boundary()
                 event.accept()
                 return
+            if self.active_tool == "DRAW_OPENING" and self._opening_poly_mode and len(self._opening_poly_pts) >= 3:
+                self._finalize_polyline_opening()
+                event.accept()
+                return
             if self.active_tool in ("DIM_LINEAR", "DIM_ALIGNED") and self._first_click_pt is not None and self._second_click_pt is not None:
                 p1, p2 = self._first_click_pt, self._second_click_pt
                 self._first_click_pt = None
@@ -1576,6 +1672,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 return
         if key == Qt.Key.Key_Escape:
             self._polyline_pts.clear()
+            self._opening_poly_pts.clear()
             self._first_click_pt = None
             self._second_click_pt = None
             self._align_ref = None
@@ -1608,9 +1705,22 @@ class StructuralCadCanvas2D(QGraphicsView):
         self.update_cursor_for_active_tool()
         self.studio.save_and_sync_current_story()
         self.studio.refresh_story_ui()
+        log_studio_event("BOUNDARY_DRAWN", f"Outer boundary polyline closed ({n_verts} vertices)")
         self.studio.update_contextual_prompt(
             f"Building Boundary Polyline closed ({n_verts} vertices). Now place Columns (Step 2) & Beams (Step 3)."
         )
+
+    def _finalize_polyline_opening(self) -> None:
+        if len(self._opening_poly_pts) < 3:
+            QMessageBox.warning(
+                self,
+                "Opening Polyline Incomplete",
+                "At least 3 vertices are required to close a Polygonal Slab Opening.",
+            )
+            return
+        pts = list(self._opening_poly_pts)
+        self._opening_poly_pts.clear()
+        self._commit_new_opening(pts, is_polygon=True)
 
     def compute_osnap_point(
         self, raw_x: float, raw_y: float, story_data: Dict[str, Any]
@@ -1624,6 +1734,11 @@ class StructuralCadCanvas2D(QGraphicsView):
                 d0 = math.hypot(raw_x - p0x, raw_y - p0y)
                 if d0 <= snap_radius * 1.2:
                     candidates.append((d0 - 0.10, p0x, p0y, "POLY_CLOSE", f"OSNAP [End]: Close Polyline ({p0x:.2f}, {p0y:.2f})"))
+            if self.active_tool == "DRAW_OPENING" and self._opening_poly_mode and len(self._opening_poly_pts) >= 3:
+                p0x, p0y = self._opening_poly_pts[0]
+                d0 = math.hypot(raw_x - p0x, raw_y - p0y)
+                if d0 <= snap_radius * 1.2:
+                    candidates.append((d0 - 0.10, p0x, p0y, "OPEN_CLOSE", f"OSNAP [End]: Close Opening Loop ({p0x:.2f}, {p0y:.2f})"))
 
             if self.layer_show_cols:
                 for col in story_data.get("columns", []):
@@ -1725,8 +1840,13 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self._finalize_polyline_boundary()
                 event.accept()
                 return
+            if self.active_tool == "DRAW_OPENING" and self._opening_poly_mode and len(self._opening_poly_pts) >= 3:
+                self._finalize_polyline_opening()
+                event.accept()
+                return
             if self.active_tool != "SELECT":
                 self._polyline_pts.clear()
+                self._opening_poly_pts.clear()
                 self._first_click_pt = None
                 self._second_click_pt = None
                 self._align_ref = None
@@ -1773,10 +1893,12 @@ class StructuralCadCanvas2D(QGraphicsView):
             ref_pt = None
             if self.active_tool == "DRAW_SLAB_EDGE" and self._polyline_pts:
                 ref_pt = self._polyline_pts[-1]
+            elif self.active_tool == "DRAW_OPENING" and self._opening_poly_mode and self._opening_poly_pts:
+                ref_pt = self._opening_poly_pts[-1]
             elif self.active_tool in ("DRAW_BEAM_HID", "DRAW_BEAM_DROP", "MOVE_ELEMENT", "DIM_LINEAR") and self._first_click_pt is not None:
                 ref_pt = self._first_click_pt
 
-            if self.ortho_enabled and ref_pt is not None and snap["snap_type"] != "POLY_CLOSE":
+            if self.ortho_enabled and ref_pt is not None and snap["snap_type"] not in ("POLY_CLOSE", "OPEN_CLOSE"):
                 fx, fy = ref_pt
                 if abs(sx - fx) >= abs(sy - fy):
                     sy = fy
@@ -1954,10 +2076,12 @@ class StructuralCadCanvas2D(QGraphicsView):
         ref_pt = None
         if self.active_tool == "DRAW_SLAB_EDGE" and self._polyline_pts:
             ref_pt = self._polyline_pts[-1]
+        elif self.active_tool == "DRAW_OPENING" and self._opening_poly_mode and self._opening_poly_pts:
+            ref_pt = self._opening_poly_pts[-1]
         elif self.active_tool in ("DRAW_BEAM_HID", "DRAW_BEAM_DROP", "MOVE_ELEMENT", "DIM_LINEAR") and self._first_click_pt is not None:
             ref_pt = self._first_click_pt
 
-        if self.ortho_enabled and ref_pt is not None and snap["snap_type"] != "POLY_CLOSE":
+        if self.ortho_enabled and ref_pt is not None and snap["snap_type"] not in ("POLY_CLOSE", "OPEN_CLOSE"):
             fx, fy = ref_pt
             if abs(snap["x"] - fx) >= abs(snap["y"] - fy):
                 snap["y"] = fy
@@ -2055,7 +2179,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     return {"kind": "dimension", "id": str(dim["id"])}
         if self.layer_show_slabs:
             for op in story.get("openings", []):
-                if float(op.get("min_x", 0.0)) <= wx <= float(op.get("max_x", 0.0)) and float(op.get("min_y", 0.0)) <= wy <= float(op.get("max_y", 0.0)):
+                if is_point_in_opening(wx, wy, op, include_edge=True, tol=0.08):
                     return {"kind": "opening", "id": str(op["id"])}
             slab_hits: List[Tuple[int, float, float, str]] = []
             for slb in story.get("slabs", []):
@@ -2334,6 +2458,50 @@ class StructuralCadCanvas2D(QGraphicsView):
                 )
             else:
                 updated_col, updated_poly, msg = new_col, story.get("slab_edge_polygon", []), "Placed column on Tie-Beams / open layout."
+
+            # Check conflict with existing Slab Openings -> Alert user for Shift vs Double-Height (2H)
+            if not is_tie_story:
+                hit_op = next(
+                    (
+                        op for op in story.get("openings", [])
+                        if is_point_in_opening(updated_col["x"], updated_col["y"], op, include_edge=False, tol=0.05)
+                    ),
+                    None,
+                )
+                if hit_op is not None:
+                    edge_x, edge_y = find_nearest_solid_edge_for_column(story, updated_col, hit_op)
+                    if "--check" not in sys.argv:
+                        mb = QMessageBox(self)
+                        mb.setIcon(QMessageBox.Icon.Question)
+                        mb.setWindowTitle(f"تنبيه وجود عمود داخل فتحة السقف ({hit_op.get('id', 'OP')})")
+                        mb.setText(
+                            f"تحذير: العمود الجديد {next_id} يقع داخل فتحة السقف ({hit_op.get('id', 'OP')})!\n"
+                            f"Warning: Column {next_id} lies inside slab opening {hit_op.get('id', 'OP')}.\n\n"
+                            f"هل تريد إزاحة العمود إلى الحافة الصلبة للفتحة ({edge_x:.2f}, {edge_y:.2f})، أم الاستمرار واعتباره عموداً بارتفاع مزدوج (Double-Height 2H)؟"
+                        )
+                        btn_shift = mb.addButton("إزاحة العمود لحافة الفتحة", QMessageBox.ButtonRole.ActionRole)
+                        btn_2h = mb.addButton("الاستمرار (عمود بارتفاع مزدوج 2H)", QMessageBox.ButtonRole.AcceptRole)
+                        btn_cancel = mb.addButton("إلغاء", QMessageBox.ButtonRole.RejectRole)
+                        mb.setDefaultButton(btn_shift)
+                        mb.exec()
+                        clicked = mb.clickedButton()
+                        if clicked == btn_cancel:
+                            self.studio.update_contextual_prompt(f"Cancelled column placement inside opening {hit_op.get('id')}.")
+                            return
+                        if clicked == btn_shift:
+                            updated_col["x"] = edge_x
+                            updated_col["y"] = edge_y
+                            msg = f"Shifted Column {next_id} to solid opening edge ({edge_x:.2f}, {edge_y:.2f})."
+                        else:
+                            updated_col["double_height"] = True
+                            updated_col["in_slab_opening"] = True
+                            updated_col["opening_id"] = str(hit_op.get("id", "OP"))
+                            msg = f"Placed Double-Height Column (2H) {next_id} inside opening {hit_op.get('id')}."
+                    else:
+                        updated_col["double_height"] = True
+                        updated_col["in_slab_opening"] = True
+                        updated_col["opening_id"] = str(hit_op.get("id", "OP"))
+
             dup_id = check_duplicate_column(updated_col["x"], updated_col["y"], b_m, h_m, cols)
             if dup_id:
                 self.studio.update_contextual_prompt(
@@ -2344,12 +2512,17 @@ class StructuralCadCanvas2D(QGraphicsView):
             cols.append(updated_col)
             renumber_story_columns_sequentially(story)
             reconcile_all_story_beams_supports_and_spans(story)
+            log_studio_event(
+                "COLUMN_PLACED",
+                f"Column {updated_col['id']} placed at ({updated_col['x']:.2f}, {updated_col['y']:.2f})",
+                {"double_height": bool(updated_col.get("double_height", False))},
+            )
             self.studio.save_and_sync_current_story()
             self.studio.refresh_story_ui()
             self.studio.update_contextual_prompt(f"Placed Column {updated_col['id']} ({b_m:.2f}×{h_m:.2f} m): {msg}")
             return
 
-        # STEP 3: Draw Full-Width Hidden (0.40m) or Drop (0.20m) Beam
+        # STEP 3: Draw Full-Width Hidden (0.40m) or Drop (0.20x0.40m) Beam
         if tool in ("DRAW_BEAM_HID", "DRAW_BEAM_DROP"):
             if is_tie_story and tool == "DRAW_BEAM_HID":
                 QMessageBox.warning(
@@ -2377,7 +2550,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 next_bid = f"B{len(beams) + 1}"
                 b_kind = "hidden" if (tool == "DRAW_BEAM_HID" and not is_tie_story) else "drop"
                 w_m = 0.40 if b_kind == "hidden" else 0.20
-                d_m = round(self.studio.sp_adopted_thick.value() / 100.0, 2) if b_kind == "hidden" else 0.50
+                d_m = round(self.studio.sp_adopted_thick.value() / 100.0, 2) if b_kind == "hidden" else 0.40
                 ok, bm_obj, msg = validate_and_build_beam_with_cantilevers(
                     next_bid,
                     start_pt,
@@ -2389,6 +2562,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     beams,
                     story.get("slab_edge_polygon", []),
                     is_tie_beam_story=is_tie_story,
+                    openings=story.get("openings", []),
                 )
                 self._first_click_pt = None
                 if not ok or bm_obj is None:
@@ -2398,13 +2572,62 @@ class StructuralCadCanvas2D(QGraphicsView):
                     return
                 beams.append(bm_obj)
                 reconcile_all_story_beams_supports_and_spans(story)
+                cascade_alerts: List[str] = []
                 if not is_tie_story:
-                    split_n, split_msg = reconcile_and_split_slabs_after_beam_change(story)
+                    _, cascade_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story)
+                    _, split_msg = reconcile_and_split_slabs_after_beam_change(story)
                     if split_msg:
                         msg = f"{msg} | {split_msg}"
+                if cascade_alerts and "--check" not in sys.argv:
+                    QMessageBox.information(
+                        self,
+                        "تنبيه التحويل التلقائي للكمرات الساقطة (Opening / Carrier Cascade)",
+                        "\n\n".join(cascade_alerts),
+                    )
+                log_studio_event(
+                    "BEAM_DRAWN",
+                    f"Beam {bm_obj['id']} ({bm_obj['beam_kind']} {bm_obj['width_m']:.2f}x{bm_obj['depth_m']:.2f}m)",
+                    {"alerts": cascade_alerts},
+                )
                 self.studio.save_and_sync_current_story()
                 self.studio.refresh_story_ui()
                 self.studio.update_contextual_prompt(msg)
+            return
+
+        # STEP 4D: Draw Slab Opening (Rectangle default / Spacebar toggles Polyline) with Opening Priority
+        if tool == "DRAW_OPENING":
+            if is_tie_story:
+                QMessageBox.warning(
+                    self,
+                    "Tie-Beams Story Rule",
+                    "Slab openings are disabled on the Tie-Beams story (00_TieBeams).",
+                )
+                return
+            if self._opening_poly_mode:
+                if len(self._opening_poly_pts) >= 3 and (
+                    snap_type == "OPEN_CLOSE"
+                    or math.hypot(sx - self._opening_poly_pts[0][0], sy - self._opening_poly_pts[0][1]) <= 0.35
+                ):
+                    self._finalize_polyline_opening()
+                    return
+                self._opening_poly_pts.append((sx, sy))
+                n_pts = len(self._opening_poly_pts)
+                self.render_story(story)
+                self.studio.update_contextual_prompt(
+                    f"Opening Vertex V{n_pts} at ({sx:.2f}, {sy:.2f}). "
+                    f"{'Click V1 or Press Enter to Close Opening Loop.' if n_pts >= 3 else 'Click next corner (or press [Space] for Rectangle mode)...'}"
+                )
+            else:
+                if self._first_click_pt is None:
+                    self._first_click_pt = (sx, sy)
+                    self.render_story(story)
+                    self.studio.update_contextual_prompt(
+                        f"Draw Opening [Rect]: First corner at ({sx:.2f}, {sy:.2f}). Click opposite corner (or press [Space] for Polyline)..."
+                    )
+                else:
+                    p1 = self._first_click_pt
+                    self._first_click_pt = None
+                    self._commit_new_opening([p1, (sx, sy)], is_polygon=False)
             return
 
         # STEP 4: Pick Area (Slab / Opening Toggle)
@@ -2415,6 +2638,14 @@ class StructuralCadCanvas2D(QGraphicsView):
             )
             if not ok:
                 QMessageBox.warning(self, "Pick Area / Cantilever Rule", msg)
+            elif tool == "PICK_OPENING":
+                _, c_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story)
+                if c_alerts and "--check" not in sys.argv:
+                    QMessageBox.information(
+                        self,
+                        "تنبيه فتحات السقف وتسلسل الكمرات",
+                        "\n\n".join(c_alerts),
+                    )
             self.studio.save_and_sync_current_story()
             self.studio.refresh_story_ui()
             self.studio.update_contextual_prompt(msg)
@@ -2455,6 +2686,73 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self.studio.update_contextual_prompt(msg)
             return
 
+    def _commit_new_opening(self, pts_or_rect: Any, is_polygon: bool = False) -> None:
+        story = self.studio.current_story_data
+        res_op = create_opening_with_priority_resolution(story, pts_or_rect, is_polygon=is_polygon)
+        if not res_op.get("ok"):
+            if "--check" not in sys.argv:
+                QMessageBox.warning(self, "Invalid Slab Opening", str(res_op.get("error", "Could not create opening.")))
+            self.render_story(story)
+            return
+
+        alerts = list(res_op.get("alerts", []))
+        conflicts = list(res_op.get("conflicting_columns", []))
+        shifted_any_col = False
+        for c_info in conflicts:
+            cid = c_info["column_id"]
+            op_id = c_info["opening_id"]
+            cx, cy = c_info["current_pos"]
+            ex, ey = c_info["suggested_edge"]
+            col_obj = next((c for c in story.get("columns", []) if str(c.get("id")) == cid), None)
+            if col_obj is None:
+                continue
+            choose_2h = True
+            if "--check" not in sys.argv:
+                mb = QMessageBox(self)
+                mb.setIcon(QMessageBox.Icon.Question)
+                mb.setWindowTitle(f"تعارض عمود {cid} مع فتحة السقف ({op_id})")
+                mb.setText(
+                    f"العمود {cid} عند ({cx:.2f}, {cy:.2f}) أصبح واقعاً داخل فراغ الفتحة {op_id}!\n"
+                    f"Column {cid} lies inside slab opening {op_id}.\n\n"
+                    f"اختر التصرف الهندسي المطلوب:"
+                )
+                btn_shift = mb.addButton(f"إزاحة العمود + الكمرات للحافة ({ex:.2f}, {ey:.2f})", QMessageBox.ButtonRole.ActionRole)
+                btn_2h = mb.addButton("الاستمرار (عمود بارتفاع مزدوج 2H)", QMessageBox.ButtonRole.AcceptRole)
+                mb.setDefaultButton(btn_shift)
+                mb.exec()
+                choose_2h = (mb.clickedButton() != btn_shift)
+
+            if choose_2h:
+                col_obj["double_height"] = True
+                col_obj["in_slab_opening"] = True
+                col_obj["opening_id"] = op_id
+                alerts.append(f"تم اعتماد العمود {cid} كعمود بارتفاع مزدوج (Double-Height 2H) داخل الفتحة {op_id}.")
+            else:
+                move_column_and_sync_connected_beams(
+                    story, cid, round(ex - cx, 3), round(ey - cy, 3), boundary_mode="clamp"
+                )
+                shifted_any_col = True
+                alerts.append(f"تمت إزاحة العمود {cid} مع الكمرات المتصلة إلى حافة الفتحة ({ex:.2f}, {ey:.2f}).")
+
+        if shifted_any_col:
+            _, extra_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story)
+            alerts.extend(extra_alerts)
+
+        reconcile_and_split_slabs_after_beam_change(story)
+        if alerts and "--check" not in sys.argv:
+            QMessageBox.information(
+                self,
+                f"ملخص أولوية فتحة السقف ({res_op['opening']['id']})",
+                "\n\n".join(alerts),
+            )
+
+        self.studio.save_and_sync_current_story()
+        self.studio.refresh_story_ui()
+        op_id_lbl = res_op["opening"].get("id", "OP")
+        self.studio.update_contextual_prompt(
+            f"Opening {op_id_lbl} applied cleanly ({len(alerts)} automatic adjustment(s))."
+        )
+
     def render_story(self, story_data: Dict[str, Any]) -> None:
         self.scene_2d.clear()
         s = self.scale_px
@@ -2487,6 +2785,7 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         # 2. Picked Slabs (00-XD-SLAB clipped to Room-Bounding Clear Inner Bounds) & Openings (00-XD-OPEN)
         # STRICTLY PRESERVING ENG. YOUSEF'S APPROVED VISUAL STYLE
+        openings_list = story_data.get("openings", [])
         if self.layer_show_slabs:
             for slb in story_data.get("slabs", []):
                 if "min_x" not in slb:
@@ -2496,6 +2795,9 @@ class StructuralCadCanvas2D(QGraphicsView):
                 cmin_y = float(slb.get("clear_min_y", slb["min_y"]))
                 cmax_y = float(slb.get("clear_max_y", slb["max_y"]))
                 if cmax_x <= cmin_x or cmax_y <= cmin_y:
+                    continue
+                scx, scy = (cmin_x + cmax_x) / 2.0, (cmin_y + cmax_y) / 2.0
+                if any(is_point_in_opening(scx, scy, op, include_edge=False, tol=0.05) for op in openings_list):
                     continue
 
                 rect = QRectF(cmin_x * s, -cmax_y * s, (cmax_x - cmin_x) * s, (cmax_y - cmin_y) * s)
@@ -2534,15 +2836,23 @@ class StructuralCadCanvas2D(QGraphicsView):
                     stxt.setDefaultTextColor(QColor("#FDE047"))
                     stxt.setPos(cx * s - 44, -cy * s - 12)
 
-            for op in story_data.get("openings", []):
-                min_x, max_x = float(op["min_x"]), float(op["max_x"])
-                min_y, max_y = float(op["min_y"]), float(op["max_y"])
-                rect = QRectF(min_x * s, -max_y * s, (max_x - min_x) * s, (max_y - min_y) * s)
+            for op in openings_list:
+                min_x, max_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
+                min_y, max_y = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
+                poly_pts_op = op.get("polygon") or [[min_x, min_y], [max_x, min_y], [max_x, max_y], [min_x, max_y]]
                 is_sel_op = ("opening", str(op.get("id"))) in self.selected_items
-                open_pen = QPen(QColor("#F8FAFC" if is_sel_op else "#EC4899"), 2.5 if is_sel_op else 2)
-                self.scene_2d.addRect(rect, open_pen, QBrush(QColor(236, 72, 153, 35)))
-                self.scene_2d.addLine(min_x * s, -min_y * s, max_x * s, -max_y * s, open_pen)
-                self.scene_2d.addLine(min_x * s, -max_y * s, max_x * s, -min_y * s, open_pen)
+                open_pen = QPen(QColor("#F8FAFC" if is_sel_op else "#EC4899"), 2.6 if is_sel_op else 2.0)
+                qpoly_op = QPolygonF([QPointF(float(pt[0]) * s, -float(pt[1]) * s) for pt in poly_pts_op])
+                self.scene_2d.addPolygon(qpoly_op, open_pen, QBrush(QColor(236, 72, 153, 35)))
+                self.scene_2d.addLine(min_x * s, -min_y * s, max_x * s, -max_y * s, QPen(QColor("#EC4899"), 1.3, Qt.PenStyle.DashLine))
+                self.scene_2d.addLine(min_x * s, -max_y * s, max_x * s, -min_y * s, QPen(QColor("#EC4899"), 1.3, Qt.PenStyle.DashLine))
+                if self.layer_show_tags:
+                    ocx = (min_x + max_x) / 2.0
+                    ocy = (min_y + max_y) / 2.0
+                    otag_str = f"{op.get('id', 'OP')} (VOID)"
+                    otxt = self.scene_2d.addText(otag_str, QFont("Arial", 8, QFont.Weight.Bold))
+                    otxt.setDefaultTextColor(QColor("#F472B6"))
+                    otxt.setPos(ocx * s - 28.0, -ocy * s - 10.0)
 
         # 3. Full-Width Rectangular Beams (Hidden = 0.40m DiagCross, Drop = 0.20m BDiag)
         columns = story_data.get("columns", [])
@@ -2604,7 +2914,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                     txt.setDefaultTextColor(QColor("#FB923C"))
                     txt.setPos(tx * s - tag_w / 2.0 + 2.0, -ty * s - 12.0)
 
-        # 4. Columns (0.20 x 0.40 m Strictly Inside Boundary) & Bright Green Column Tags
+        # 4. Columns (0.20 x 0.40 m Strictly Inside Boundary) & Bright Green Column Tags (+ 2H Double-Height Badge)
         if self.layer_show_cols:
             for col in columns:
                 if not col.get("active", True):
@@ -2612,15 +2922,19 @@ class StructuralCadCanvas2D(QGraphicsView):
                 cx, cy = float(col["x"]), float(col["y"])
                 b, h = float(col.get("b_m", 0.20)), float(col.get("h_m", 0.40))
                 is_sel_col = ("column", str(col.get("id"))) in self.selected_items
+                is_2h = bool(col.get("double_height", False))
                 rect = QRectF((cx - b / 2.0) * s, -(cy + h / 2.0) * s, b * s, h * s)
-                col_pen = QPen(QColor("#38BDF8" if is_sel_col else "#EF4444"), 2.8 if is_sel_col else 2)
+                col_pen = QPen(QColor("#38BDF8" if is_sel_col else ("#F59E0B" if is_2h else "#EF4444")), 2.8 if is_sel_col else 2)
                 self.scene_2d.addRect(rect, col_pen, QBrush(QColor(56, 189, 248, 160) if is_sel_col else QColor(239, 68, 68, 125)))
+                if is_2h:
+                    self.scene_2d.addRect(rect.adjusted(-3, -3, 3, 3), QPen(QColor("#FACC15"), 1.5, Qt.PenStyle.DashLine))
 
                 if self.layer_show_tags:
                     tag_x = cx + b / 2.0 + 0.10
                     tag_y = cy + h / 2.0 + 0.10
-                    ctxt = self.scene_2d.addText(str(col["id"]), QFont("Arial", 9, QFont.Weight.Bold))
-                    ctxt.setDefaultTextColor(QColor("#4ADE80"))
+                    tag_label = f"{col['id']} (2H)" if is_2h else str(col["id"])
+                    ctxt = self.scene_2d.addText(tag_label, QFont("Arial", 9, QFont.Weight.Bold))
+                    ctxt.setDefaultTextColor(QColor("#FACC15" if is_2h else "#4ADE80"))
                     ctxt.setPos(tag_x * s, -tag_y * s - 10)
 
         # 5. Persistent Engineering Dimensions (`00-XD-DIM`) — Positioned Strictly Outside or at User Offset
@@ -2711,6 +3025,36 @@ class StructuralCadCanvas2D(QGraphicsView):
                 if len(self._polyline_pts) >= 2:
                     p0x, p0y = self._polyline_pts[0]
                     self.scene_2d.addLine(tx * s, -ty * s, p0x * s, -p0y * s, QPen(QColor("#0891B2"), 1.0, Qt.PenStyle.DotLine))
+
+        if self.active_tool == "DRAW_OPENING":
+            if self._opening_poly_mode and len(self._opening_poly_pts) >= 1:
+                open_pen = QPen(QColor("#EC4899"), 2.2)
+                for idx in range(len(self._opening_poly_pts) - 1):
+                    x1, y1 = self._opening_poly_pts[idx]
+                    x2, y2 = self._opening_poly_pts[idx + 1]
+                    self.scene_2d.addLine(x1 * s, -y1 * s, x2 * s, -y2 * s, open_pen)
+                for vx, vy in self._opening_poly_pts:
+                    self.scene_2d.addRect(QRectF(vx * s - 4, -vy * s - 4, 8, 8), QPen(QColor("#F472B6"), 2))
+                if self._current_snap_info is not None:
+                    lx, ly = self._opening_poly_pts[-1]
+                    tx, ty = self._current_snap_info["x"], self._current_snap_info["y"]
+                    self.scene_2d.addLine(lx * s, -ly * s, tx * s, -ty * s, QPen(QColor("#F472B6"), 1.6, Qt.PenStyle.DashLine))
+                    if len(self._opening_poly_pts) >= 2:
+                        p0x, p0y = self._opening_poly_pts[0]
+                        self.scene_2d.addLine(tx * s, -ty * s, p0x * s, -p0y * s, QPen(QColor("#BE185D"), 1.0, Qt.PenStyle.DotLine))
+            elif (not self._opening_poly_mode) and self._first_click_pt is not None and self._current_snap_info is not None:
+                fx, fy = self._first_click_pt
+                tx, ty = self._current_snap_info["x"], self._current_snap_info["y"]
+                bmin_x, bmax_x = min(fx, tx), max(fx, tx)
+                bmin_y, bmax_y = min(fy, ty), max(fy, ty)
+                orect = QRectF(bmin_x * s, -bmax_y * s, max(0.05, bmax_x - bmin_x) * s, max(0.05, bmax_y - bmin_y) * s)
+                self.scene_2d.addRect(orect, QPen(QColor("#EC4899"), 2.0, Qt.PenStyle.DashLine), QBrush(QColor(236, 72, 153, 45)))
+                olbl = self.scene_2d.addText(
+                    f"Opening {(bmax_x - bmin_x):.2f}×{(bmax_y - bmin_y):.2f}m [Space: Poly]",
+                    QFont("Consolas", 8, QFont.Weight.Bold),
+                )
+                olbl.setDefaultTextColor(QColor("#F472B6"))
+                olbl.setPos(bmin_x * s, -bmax_y * s - 18)
 
         if self._first_click_pt is not None and self._current_snap_info is not None and self.active_tool in ("DRAW_BEAM_HID", "DRAW_BEAM_DROP", "MOVE_ELEMENT", "DIM_LINEAR", "DIM_ALIGNED"):
             fx, fy = self._first_click_pt
@@ -3328,11 +3672,19 @@ class BeamDiagramsViewWidget(QWidget):
         y_bmd_title = y_bmd - amp_px - 42.0
         y_ruler = max(615.0, vp_h * 0.915)
 
-        # Title Header: "Analysis of B1"
+        # Title Header: "Analysis of B1" (showing Init -> Designed when section was enlarged by design step)
         kind_lbl = str(bm.get("beam_kind", "hidden")).upper()
+        w_cur = float(bm.get("width_m", 0.40))
+        d_cur = float(bm.get("depth_m", 0.30))
+        w_init = float(bm.get("initial_width_m", w_cur))
+        d_init = float(bm.get("initial_depth_m", d_cur))
         n_sp = int(res.get("num_spans_excluding_cantilevers", len(bm.get("spans", []))))
+        if abs(w_cur - w_init) > 0.005 or abs(d_cur - d_init) > 0.005:
+            sec_title_str = f"{kind_lbl} Init {w_init:.2f}×{d_init:.2f}m → Designed {w_cur:.2f}×{d_cur:.2f}m"
+        else:
+            sec_title_str = f"{kind_lbl} {w_cur:.2f}×{d_cur:.2f}m"
         title_item = sc.addText(
-            f"Analysis of {bid} ({kind_lbl} {bm.get('width_m', 0.4):.2f}×{bm.get('depth_m', 0.3):.2f}m — {n_sp} Span{'s' if n_sp != 1 else ''})",
+            f"Analysis of {bid} ({sec_title_str} — {n_sp} Span{'s' if n_sp != 1 else ''})",
             QFont("Arial", 13, QFont.Weight.Bold),
         )
         title_item.setDefaultTextColor(QColor("#0B3C5D"))
@@ -3922,12 +4274,28 @@ class BeamDesignDetailWidget(QWidget):
 
         b_m = float(bm.get("width_m", 0.40))
         h_m = float(bm.get("depth_m", 0.30))
-        sec_w = max(115.0, min(195.0, b_m * 260.0))
-        sec_h = max(110.0, min(210.0, h_m * 260.0))
+        sec_w = max(115.0, min(190.0, b_m * 240.0))
+        sec_h = max(110.0, min(210.0, h_m * 240.0))
 
-        x0 = 62.0
-        w_px = max(320.0, vp_w - sec_w - 205.0)
-        scale_x = w_px / tot_l
+        sup_table = res.get("support_critical_table", [])
+        c_left = float(bm.get("cantilever_left_m", 0.0))
+        c_right = float(bm.get("cantilever_right_m", 0.0))
+
+        ext_left_m = (float(sup_table[0].get("width_m", 0.20)) / 2.0) if (sup_table and c_left <= 1e-3) else 0.0
+        ext_right_m = (float(sup_table[-1].get("width_m", 0.20)) / 2.0) if (sup_table and c_right <= 1e-3) else 0.0
+
+        # Solve horizontal scale across FULL physical width (ext_left + tot_l + ext_right) so Section A-A NEVER clips!
+        left_margin_px = 58.0
+        gap_to_sec_px = 42.0
+        right_sec_pad_px = 46.0
+        avail_phys_px = max(300.0, vp_w - left_margin_px - gap_to_sec_px - sec_w - right_sec_pad_px)
+        tot_phys_m = max(0.5, ext_left_m + tot_l + ext_right_m)
+        scale_x = avail_phys_px / tot_phys_m
+        x_beam_left = left_margin_px
+        x0 = x_beam_left + ext_left_m * scale_x
+        x_beam_right = x0 + (tot_l + ext_right_m) * scale_x
+        w_beam_phys_px = x_beam_right - x_beam_left
+
         y_top = max(145.0, vp_h * 0.26)
         h_px = max(115.0, min(195.0, vp_h * 0.24))
         y_bot = y_top + h_px
@@ -3937,17 +4305,7 @@ class BeamDesignDetailWidget(QWidget):
             QFont("Arial", 11, QFont.Weight.Bold),
         )
         hdr.setDefaultTextColor(QColor("#0B3C5D"))
-        hdr.setPos(x0 - 16, 18)
-
-        sup_table = res.get("support_critical_table", [])
-        c_left = float(bm.get("cantilever_left_m", 0.0))
-        c_right = float(bm.get("cantilever_right_m", 0.0))
-
-        ext_left_m = (float(sup_table[0].get("width_m", 0.20)) / 2.0) if (sup_table and c_left <= 1e-3) else 0.0
-        ext_right_m = (float(sup_table[-1].get("width_m", 0.20)) / 2.0) if (sup_table and c_right <= 1e-3) else 0.0
-        x_beam_left = x0 - ext_left_m * scale_x
-        x_beam_right = x0 + (tot_l + ext_right_m) * scale_x
-        w_beam_phys_px = x_beam_right - x_beam_left
+        hdr.setPos(max(16.0, x_beam_left - 12.0), 18)
 
         beam_rect = QRectF(x_beam_left, y_top, w_beam_phys_px, h_px)
         sc.addRect(beam_rect, QPen(QColor("#1E293B"), 2.4), QBrush(QColor(241, 245, 249, 235)))
@@ -4240,7 +4598,10 @@ class SchedulesAndReportsWidget(QWidget):
             des = crec["design"]
             f4 = crec["framing_4way"]
             f4_str = " | ".join(f"{k[0]}:{v['beam_id']}" for k, v in f4.items() if v) or "Corner/Edge"
-            self.tbl_columns.setItem(c_i, 0, QTableWidgetItem(crec["column_id"]))
+            is_2h = bool(crec.get("double_height", False) or des.get("double_height", False))
+            eff_h_m = float(crec.get("eff_h_m", des.get("lu_m", 3.0)))
+            cid_lbl = f"{crec['column_id']} (2H={eff_h_m:.1f}m)" if is_2h else str(crec["column_id"])
+            self.tbl_columns.setItem(c_i, 0, QTableWidgetItem(cid_lbl))
             self.tbl_columns.setItem(c_i, 1, QTableWidgetItem(des["section_mm"]))
             self.tbl_columns.setItem(c_i, 2, QTableWidgetItem(f"{crec['story_pu_kn']:.1f}"))
             self.tbl_columns.setItem(c_i, 3, QTableWidgetItem(f"({crec['mux_knm']:.1f}, {crec['muy_knm']:.1f})"))
@@ -4249,7 +4610,7 @@ class SchedulesAndReportsWidget(QWidget):
             self.tbl_columns.setItem(c_i, 6, QTableWidgetItem(f"{des['phi_pn_max_kn']:.1f} ({des['status']})"))
 
             col_rows_html += (
-                f"<tr><td><b>{crec['column_id']}</b></td><td>{des['section_mm']}</td>"
+                f"<tr><td><b>{cid_lbl}</b></td><td>{des['section_mm']}</td>"
                 f"<td>{crec['story_pu_kn']:.1f} kN</td><td>({crec['mux_knm']:.1f}, {crec['muy_knm']:.1f}) kN.m</td>"
                 f"<td>{des['chosen_bars']} ({des['rho_pct']}%)</td>"
                 f"<td>{des['phi_pn_max_kn']:.1f} kN — <b>{des['status']}</b></td></tr>"
@@ -4329,6 +4690,8 @@ class XpertStudioMainWindow(QMainWindow):
         self._build_main_workspace()
 
         if self.master_project is not None:
+            set_active_project_log_dir(self.master_project.get("project_folder"))
+            log_studio_event("PROJECT_READY", f"Studio opened project '{self.master_project.get('project_name')}'")
             self._populate_story_selector()
             self.update_contextual_prompt(
                 f"Loaded Project: {self.master_project.get('project_name')} — Active Story: 02_Ground_Floor."
@@ -4336,6 +4699,11 @@ class XpertStudioMainWindow(QMainWindow):
 
     def is_tie_beams_story(self) -> bool:
         return str(self.current_story_data.get("story_id", "")) == "00_TieBeams"
+
+    def open_diagnostic_log_dialog(self) -> None:
+        proj_dir = self.master_project.get("project_folder") if self.master_project else None
+        dlg = DiagnosticLogDialog(self, project_dir=proj_dir)
+        dlg.exec()
 
     def open_startup_defaults_dialog(self) -> None:
         dlg = StartupDefaultsDialog(self)
@@ -4406,19 +4774,24 @@ class XpertStudioMainWindow(QMainWindow):
             act = QAction(lbl, self)
             act.triggered.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             m_view.addAction(act)
+        m_view.addSeparator()
+        act_diag_log = QAction("Open Session Diagnostic Log (سجل الأحداث والأعطال)...", self)
+        act_diag_log.triggered.connect(self.open_diagnostic_log_dialog)
+        m_view.addAction(act_diag_log)
 
         # 3. DRAW MENU
         m_draw = mbar.addMenu("&Draw")
-        slab_only_tids = {"DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "AUTO_FILL_SLABS"}
+        slab_only_tids = {"DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "DRAW_OPENING", "AUTO_FILL_SLABS"}
         for label, tool_id in [
             ("Select / Box-Select Elements", "SELECT"),
             ("Step 1: Draw Building Boundary Polyline (00-XD-EDGE)", "DRAW_SLAB_EDGE"),
             ("Step 2: Place Structural Column 0.20×0.40m (00-XD-COL)", "DRAW_COL"),
             ("Step 3A: Draw Hidden Beam 0.40m Width", "DRAW_BEAM_HID"),
-            ("Step 3B: Draw Drop Beam 0.20m Width", "DRAW_BEAM_DROP"),
+            ("Step 3B: Draw Drop Beam 0.20×0.40m Width", "DRAW_BEAM_DROP"),
             ("Step 4A: Pick Area -> Create Slab", "PICK_SLAB"),
             ("Step 4B: Flip Selected or Picked Slab Rib (0° ↔ 90°)", "FLIP_RIB"),
             ("Step 4C: Pick Area -> Toggle Void Opening", "PICK_OPENING"),
+            ("Step 4D: Draw Slab Opening [Rect / Space=Poly] (00-XD-OPEN)", "DRAW_OPENING"),
             ("Auto-Fill All Story Slabs (1-Click)", "AUTO_FILL_SLABS"),
             ("Convert Columns from Imported Arch .DXF", "CONVERT_ARCH_COLS"),
             ("Load Standard 2-Bay Structural Layout", "LOAD_TEMPLATE"),
@@ -4669,7 +5042,7 @@ class XpertStudioMainWindow(QMainWindow):
         lbl_draw_hdr.setStyleSheet("font-weight: bold; color: #0284C7; padding: 4px 2px;")
         self.draw_tb.addWidget(lbl_draw_hdr)
 
-        slab_only_draw_tids = {"DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "AUTO_FILL_SLABS"}
+        slab_only_draw_tids = {"DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "DRAW_OPENING", "AUTO_FILL_SLABS"}
         for label, tid in [
             ("1. Boundary Polyline", "DRAW_SLAB_EDGE"),
             ("2. Place Column", "DRAW_COL"),
@@ -4678,6 +5051,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("4A. Pick: Slab", "PICK_SLAB"),
             ("4B. Pick: Flip Rib", "FLIP_RIB"),
             ("4C. Pick: Opening", "PICK_OPENING"),
+            ("4D. Draw Opening [Rect/Poly]", "DRAW_OPENING"),
             ("Auto-Fill All Slabs", "AUTO_FILL_SLABS"),
             ("Convert Arch Cols", "CONVERT_ARCH_COLS"),
             ("Demo Layout", "LOAD_TEMPLATE"),
@@ -4687,6 +5061,8 @@ class XpertStudioMainWindow(QMainWindow):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             if tid == "AUTO_FILL_SLABS":
                 btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold;")
+            elif tid == "DRAW_OPENING":
+                btn.setStyleSheet("background-color: #FDF2F8; color: #BE185D; border: 1px solid #F472B6; font-weight: bold;")
             self.draw_tb.addWidget(btn)
             btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             if tid in slab_only_draw_tids:
@@ -5259,7 +5635,7 @@ class XpertStudioMainWindow(QMainWindow):
                 bm["kind"] = "drop"
                 bm["width_m"] = float(bm.get("width_m", 0.20)) if float(bm.get("width_m", 0.20)) <= 0.30 else 0.20
                 bm["depth_m"] = max(0.40, float(bm.get("depth_m", 0.50)))
-            if self.cad_canvas.active_tool in ("DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING"):
+            if self.cad_canvas.active_tool in ("DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "DRAW_OPENING"):
                 self.cad_canvas.active_tool = "SELECT"
                 self.cad_canvas.update_cursor_for_active_tool()
 
@@ -5627,6 +6003,7 @@ class XpertStudioMainWindow(QMainWindow):
 
         self.cad_canvas.active_tool = tool_id
         self.cad_canvas._polyline_pts.clear()
+        self.cad_canvas._opening_poly_pts.clear()
         self.cad_canvas._first_click_pt = None
         self.cad_canvas._align_ref = None
         self.cad_canvas._measure_pts.clear()
@@ -5647,10 +6024,11 @@ class XpertStudioMainWindow(QMainWindow):
             "DRAW_SLAB_EDGE": "Step 1 (Boundary Polyline): Click vertices around the building perimeter.",
             "DRAW_COL": "Step 2 (Place Column): Move cursor to preview column, press [Space] to flip orientation, click to place.",
             "DRAW_BEAM_HID": "Step 3A (Hidden Beam 0.40m): Click Start Column Center -> Click End Column Center.",
-            "DRAW_BEAM_DROP": "Step 3B (Drop Beam 0.20m): Click Start Column Center -> Click End Column Center.",
+            "DRAW_BEAM_DROP": "Step 3B (Drop Beam 0.20×0.40m): Click Start Column Center -> Click End Column Center.",
             "PICK_SLAB": "Step 4A (Pick Slab): Click inside any beam-bounded bay to create/update its Hollow-Block Slab.",
             "FLIP_RIB": "Step 4B (Flip Rib): Click inside any Slab or on its yellow tag to flip its rib orientation (0° <-> 90°).",
             "PICK_OPENING": "Step 4C (Pick Opening): Click inside any bay to toggle a Void Opening (X).",
+            "DRAW_OPENING": "Step 4D (Draw Slab Opening): Click 2 opposite corners (Rectangle) or press [Space] for Polyline Loop (auto-merges adjacent openings).",
         }
         self.update_contextual_prompt(prompts.get(tool_id, f"Activated Tool: {tool_id}"))
 
@@ -5705,10 +6083,22 @@ class XpertStudioMainWindow(QMainWindow):
 
         try:
             self._check_and_apply_slab_thickness(interactive=True)
+            # Enforce opening-adjacent Drop Beams & recursive carrier cascade before analysis
+            _, pre_alerts = enforce_opening_adjacent_drop_beams_and_cascade(self.current_story_data)
+            if pre_alerts and "--check" not in sys.argv:
+                QMessageBox.information(
+                    self,
+                    "تنبيه التسلسل الإنشائي قبل التحليل",
+                    "\n\n".join(pre_alerts),
+                )
             self.save_and_sync_current_story()
             self._solve_story_and_refresh_views(select_beam_id=select_beam_id)
             col_recs = self.last_analysis_bundle.get("column_records", []) if self.last_analysis_bundle else []
             slab_recs = self.last_analysis_bundle.get("slab_designs", {}) if self.last_analysis_bundle else {}
+            log_studio_event(
+                "RUN_ANALYSIS",
+                f"Solved {len(slab_recs)} slab(s), {len(beams)} beam(s), {len(col_recs)} column(s) on {self.current_story_data.get('story_id')}",
+            )
             self.switch_workspace_mode(switch_to_tab, auto_solve=False)
             self.update_contextual_prompt(
                 f"Analysis & Design Complete (ACI 318-19): Solved {len(slab_recs)} slab(s), {len(beams)} beam(s), and {len(col_recs)} column(s)."
@@ -5747,6 +6137,7 @@ class XpertStudioMainWindow(QMainWindow):
 
 def _report_studio_exception(parent: Optional[QWidget], title: str, exc: BaseException) -> None:
     tb_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    log_studio_event("ERROR", f"{title}: {type(exc).__name__}: {exc}", tb_str, level="ERROR")
     try:
         log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpert_studio_crash.log")
         with open(log_path, "a", encoding="utf-8") as lf:
@@ -5762,7 +6153,7 @@ def _report_studio_exception(parent: Optional[QWidget], title: str, exc: BaseExc
             title,
             f"An unexpected error was intercepted safely without closing the studio:\n\n"
             f"{type(exc).__name__}: {exc}\n\n"
-            f"Details logged to xpert_studio_crash.log.",
+            f"Details logged to xpert_studio_session.log & xpert_studio_crash.log.",
         )
 
 
@@ -5772,6 +6163,7 @@ def _install_global_excepthook() -> None:
             sys.__excepthook__(exc_type, exc_value, exc_tb)
             return
         tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        log_studio_event("UNHANDLED_QT_EXCEPTION", f"{exc_type.__name__}: {exc_value}", tb_str, level="CRITICAL")
         try:
             log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpert_studio_crash.log")
             with open(log_path, "a", encoding="utf-8") as lf:
