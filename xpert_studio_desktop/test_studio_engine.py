@@ -745,9 +745,9 @@ class TestXpertStudioEngine(unittest.TestCase):
         # Over opening [5.30, 7.30], w_Slab == 0, so mag == w_SW + w_Wall (no slab term in formula_str)
         op_seg = next(ld for ld in b6_loads if abs(ld["start"] - 5.30) < 0.1)
         self.assertIn("w_Slab (0.00)", op_seg["formula_str"])
-        # Over S5 [7.30, 9.30], S5 contributes full tributary load (reduced by ΔB/2 = 0.70m after B6 widens from 0.40m to 1.80m)
+        # Over S5 [7.30, 9.30], S5 contributes full tributary load with zero L_rib reduction (11.71*(2.00/2)=11.71)
         s5_seg = next(ld for ld in b6_loads if abs(ld["start"] - 7.30) < 0.1)
-        self.assertIn("S5: 11.71×", s5_seg["formula_str"])
+        self.assertIn("S5: 11.71×(2.00/2)m=11.71", s5_seg["formula_str"])
 
         # 3. Verify Tie-Beams story allows drawing a Drop Beam with empty slab_edge_polygon
         tie_cols = [
@@ -998,6 +998,16 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertIn("compute_hollow_block_parameters(", app_src)
         self.assertIn("STANDARD_WALL_THICKNESSES_CM", app_src)
         self.assertIn("thickness_warning_acknowledged_cm", app_src)
+        self.assertIn("QTimer", app_src)
+        self.assertIn("_resize_timer", app_src)
+        self.assertIn("_is_updating", app_src)
+        # Ensure setItemText is NEVER called inside BeamDesignDetailWidget._on_beam_selected (prevents Windows PyQt6 resize crash)
+        for cls_node in ast.walk(tree):
+            if isinstance(cls_node, ast.ClassDef) and cls_node.name == "BeamDesignDetailWidget":
+                for fn_node in cls_node.body:
+                    if isinstance(fn_node, ast.FunctionDef) and fn_node.name == "_on_beam_selected":
+                        fn_src = ast.get_source_segment(app_src, fn_node) or ""
+                        self.assertNotIn("setItemText", fn_src)
 
         try:
             os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1049,8 +1059,8 @@ class TestXpertStudioEngine(unittest.TestCase):
         2. Exact Excel Sheet4 (5_e8049e44.PNG) & VBA Sub ReDesign_Sec() match for Hidden Beam #7 (600×290 mm, db=14, ds=6, dc=25, M=-97):
            - d = 252 mm, Ku = 0.14143, ω = 0.15574, ρ = 0.0089, As = 1345.68 mm², As_1bar = 153.86 mm², Nbar = 9 Φ 14, As_total = 1384.7 mm²,
              nbs = 13, min_bars = 4, max_bars = 19, and station bars [4, 6, 9, 5, 4] Φ 14.
-        3. Automatic +100 mm iterative section sizing for Hidden Beam width B and Drop Beam depth h,
-           coupled with O.W increase and Slab Rib Length (L_rib) reduction (ΔL_rib = sum(ΔB/2)) in analyze_all_story_beams_and_columns.
+        3. Automatic +100 mm post-analysis VBA Sub ReDesign_Sec() section sizing for Hidden Beam width B and Drop Beam depth h
+           using Single-Pass Excel philosophy (NO O.W re-calculation and NO L_rib slab reduction after sizing).
         """
         # 1. Verify h = 280 mm (28 cm) matches Excel 4_17463a4e.PNG 100%
         hb_28 = compute_hollow_block_parameters(slab_thickness_cm=28.0)
@@ -1146,8 +1156,10 @@ class TestXpertStudioEngine(unittest.TestCase):
         des_auto_600 = design_beam_aci318(bm_auto_hid, res_excel7, fc_mpa=20.0, fy_mpa=350.0, bar_dia_mm=12, stirrup_dia_mm=6, auto_size_section=True)
         self.assertEqual(des_auto_600["b_mm"], 600)
 
-        # 4. Verify coupled 2-pass O.W increase + Slab Rib Length L_rib reduction in analyze_all_story_beams_and_columns
-        story_coupled = {
+        # 4. Verify Single-Pass Excel Philosophy in analyze_all_story_beams_and_columns:
+        #    O.W stays at baseline B_initial * h_initial * 24 * 1.4 and w_Slab uses full unreduced L_rib,
+        #    while design_beam_aci318 sizes B1 (+100 mm step) post-analysis and stays identical on repeated F5 runs!
+        story_single_pass = {
             "story_id": "02_Ground_Floor",
             "height_m": 3.0,
             "adopted_slab_thickness_cm": 29.0,
@@ -1201,16 +1213,111 @@ class TestXpertStudioEngine(unittest.TestCase):
             ],
             "openings": [],
         }
-        bundle = analyze_all_story_beams_and_columns(story_coupled, fc_mpa=20.0, fy_mpa=350.0)
+        bundle = analyze_all_story_beams_and_columns(story_single_pass, fc_mpa=20.0, fy_mpa=350.0)
         b1_des = bundle["beam_designs"]["B1"]
-        self.assertGreater(b1_des["b_mm"], 400)  # B1 widened from 400 mm in +100 mm steps!
+        self.assertGreater(b1_des["b_mm"], 400)  # B1 widened post-analysis from 400 mm in +100 mm steps!
         b1_loads = bundle["beam_results"]["B1"]["loads_applied"]
-        # Verify O.W uses the new widened B1 width and w_Slab is reduced because L_rib decreased by ΔB!
-        new_bw = b1_des["b_mm"] / 1000.0
-        expected_ow = round(new_bw * 0.29 * 24.0 * 1.4, 2)
-        self.assertAlmostEqual(b1_loads[0]["w_sw"], expected_ow, places=2)
-        unreduced_w_slab = round(11.38 * (5.0 / 2.0), 2)
-        self.assertLess(b1_loads[0]["w_slab"], unreduced_w_slab)
+        # Verify Single-Pass O.W stays at baseline 0.40 m and w_Slab stays at unreduced 5.0 m / 2 = 2.50 m
+        expected_baseline_ow = round(0.40 * 0.29 * 24.0 * 1.4, 2)
+        wu_m2_29 = float(story_single_pass["hollow_block"]["factored_wu_kpa"])
+        expected_unreduced_w_slab = round(wu_m2_29 * (5.0 / 2.0), 2)
+        self.assertAlmostEqual(b1_loads[0]["w_sw"], expected_baseline_ow, places=2)
+        self.assertAlmostEqual(b1_loads[0]["w_slab"], expected_unreduced_w_slab, places=2)
+
+        # Re-running analysis a second time (repeated F5) must produce identical loads & final dimensions (no compounding)
+        bundle_repeat = analyze_all_story_beams_and_columns(story_single_pass, fc_mpa=20.0, fy_mpa=350.0)
+        self.assertEqual(bundle_repeat["beam_designs"]["B1"]["b_mm"], b1_des["b_mm"])
+        self.assertAlmostEqual(bundle_repeat["beam_results"]["B1"]["loads_applied"][0]["w_sw"], expected_baseline_ow, places=2)
+        self.assertAlmostEqual(bundle_repeat["beam_results"]["B1"]["loads_applied"][0]["w_slab"], expected_unreduced_w_slab, places=2)
+
+    def test_v221_regression_no_slab_thickness_typeerror_and_ast_signatures(self) -> None:
+        """
+        Verifies v2.2.1 crash-fix & safety guards:
+        1. Version bumped to v2.2.1-structural-bim-pro across xpert_project_io & xpert_studio_app.
+        2. Every call from xpert_studio_app.py to xpert_structural_engine & xpert_project_io binds cleanly
+           with zero TypeError collisions (catches the v2.2.0 line 5368 bug permanently).
+        3. compute_hollow_block_parameters(hb_src) works cleanly with dict payload for h = 24, 28, 29, 30 cm.
+        4. Global exception hook (_install_global_excepthook) & safe slot guards (_report_studio_exception) are present.
+        """
+        import ast
+        import inspect
+        import xpert_structural_engine as eng
+        import xpert_project_io as pio
+
+        self.assertEqual(pio.STUDIO_VERSION, "v2.2.1-structural-bim-pro")
+
+        app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
+        with open(app_path, "r", encoding="utf-8") as f:
+            app_src = f.read()
+
+        self.assertIn("v2.2.1-structural-bim-pro", app_src)
+        self.assertIn("_install_global_excepthook", app_src)
+        self.assertIn("_report_studio_exception", app_src)
+        self.assertNotIn("compute_hollow_block_parameters(hb_src,", app_src)
+
+        sigs = {}
+        for mod in (eng, pio):
+            for name, obj in inspect.getmembers(mod):
+                if callable(obj) and getattr(obj, "__module__", "") == mod.__name__:
+                    sigs[name] = inspect.signature(obj)
+
+        tree = ast.parse(app_src, filename="xpert_studio_app.py")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn_name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else (node.func.attr if isinstance(node.func, ast.Attribute) else None)
+                )
+                if fn_name in sigs:
+                    if any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords):
+                        continue
+                    sigs[fn_name].bind(
+                        *(["POS"] * len(node.args)),
+                        **{k.arg: "KW" for k in node.keywords if k.arg is not None},
+                    )
+
+        for h_cm, exp_blk, exp_hs, exp_wu_m2 in [
+            (24.0, 16.0, 8.0, 10.67),
+            (28.0, 20.0, 8.0, 11.04),
+            (29.0, 20.0, 9.0, 11.37),
+            (30.0, 20.0, 10.0, 11.71),
+        ]:
+            hb_src = {
+                "slab_thickness_cm": h_cm,
+                "block_height_cm": exp_blk,
+                "top_flange_cm": exp_hs,
+            }
+            res = compute_hollow_block_parameters(hb_src)
+            self.assertAlmostEqual(res["block_height_cm"], exp_blk, places=2)
+            self.assertAlmostEqual(res["top_compression_slab_cm"], exp_hs, places=2)
+            self.assertAlmostEqual(res["area_factored_qu_kn_m2"], exp_wu_m2, places=2)
+
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            from xpert_studio_app import XpertStudioMainWindow
+
+            _app = QApplication.instance() or QApplication([])
+            cfg = {
+                "project_name": "Regression221",
+                "root_directory": self.tmp_dir,
+                "ground_floor_height_m": 3.00,
+                "include_basement": False,
+                "floors_above_ground": 1,
+                "include_penthouse": False,
+                "fc_mpa": 20.0,
+                "fy_mpa": 350.0,
+            }
+            master = initialize_studio_project(cfg)
+            win = XpertStudioMainWindow(initial_master_project=master)
+            win.activate_cad_tool("LOAD_TEMPLATE")
+            win.apply_story_thickness()
+            win.run_analyze_all_beams(switch_to_tab=1)
+            win.switch_workspace_mode(2)
+            win.switch_workspace_mode(3)
+        except ModuleNotFoundError:
+            pass
 
 
 if __name__ == "__main__":

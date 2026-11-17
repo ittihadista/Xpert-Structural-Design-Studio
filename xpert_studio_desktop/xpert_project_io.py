@@ -27,7 +27,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.2.0-structural-bim-pro"
+STUDIO_VERSION = "v2.2.1-structural-bim-pro"
 
 DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
     {"active": True, "enabled": True, "label": "Φ 6", "bar_name": "Φ6", "dia_mm": 6, "diameter_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Stirrups (كانات الأعصاب والكمرات)"},
@@ -135,7 +135,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
     rebar_table = _normalize_rebar_table(DEFAULT_REBAR_DIAMETERS_TABLE)
 
     defaults: Dict[str, Any] = {
-        "schema_version": "2.2.0",
+        "schema_version": "2.2.1",
         "default_projects_root_folder": default_root,
         "default_stirrup_bar_mm": 6,
         "default_main_bar_mm": 16,
@@ -207,7 +207,7 @@ def save_studio_global_settings(settings: Dict[str, Any]) -> str:
     """
     Saves global 'Startup Defaults' and 'Options' to `xpert_studio_defaults.json`.
     """
-    settings["schema_version"] = "2.2.0"
+    settings["schema_version"] = "2.2.1"
     if "rebar_diameters_table" in settings:
         settings["rebar_diameters_table"] = _normalize_rebar_table(settings["rebar_diameters_table"])
     fpath = _get_global_settings_file_path()

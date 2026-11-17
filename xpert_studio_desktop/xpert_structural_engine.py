@@ -901,23 +901,19 @@ def analyze_all_story_beams_and_columns(
     fy_mpa: float = 350.0,
 ) -> Dict[str, Any]:
     """
-    1-Click Story Analysis (v2.0.0-structural-bim-pro):
+    1-Click Story Analysis (v2.2.0-structural-bim-pro — Single-Pass Excel Philosophy):
     - First reconciles all beam supports and spans against the active columns and perpendicular carrier beams
       so deleted or moved columns are 100% reflected in beam spans and supports.
     - Synchronizes Hollow-Block (Hordi) slab weights from `adopted_slab_thickness_cm` (default 30.0 cm)
-      using Eng. Yousef's Excel formulas:
+      using fixed commercial block height (20 cm for h >= 25 cm, 16 cm for h < 25 cm) & hs = h - block_h:
         * Wu_rib (kN/m'/rib) -> used to design each slab rib S1..Sn (Mu = Wu_rib * L² / 8).
-        * Wu_m2 (kN/m²) = Wu_rib / (S + bw1) -> transferred to supporting beams (11.71 kN/m² for h=30 cm).
-    - Computes Beam Self-Weight on all beams without exception:
-        * O.W = b * h * 24 * 1.4  [kN/m]
-    - Computes Masonry Wall Load on enabled spans:
-        * W_wall = 2.5 * (t_wall_cm / 20.0) * H_story * 1.4  [kN/m]
-    - Dynamically computes piecewise distributed loads along each span (splitting spans at slab and void-opening
-      boundaries so an opening carries 0.00 kN/m slab load while an adjacent sub-slab like S5 applies its exact
-      tributary load only over its true physical extent).
-    - Topologically sorts beams so secondary supported beams are solved before their carrier beams.
-    - Transfers secondary beam reactions onto primary carrier beams at exact distances measured strictly
-      from Support Centerlines.
+        * Wu_m2 (kN/m²) = Wu_rib / (S + bw1) -> transferred to supporting beams (11.04 kN/m² for 28 cm, 11.71 kN/m² for 30 cm).
+    - Single-Pass Load Evaluation (NO O.W re-calculation and NO slab rib L_rib reduction after sizing):
+        * Computes Beam Self-Weight once from baseline dimensions: O.W = b_init * h_init * 24 * 1.4 [kN/m].
+        * Computes Masonry Wall Load on enabled spans: W_wall = 2.5 * (t_wall_cm / 20.0) * H_story * 1.4 [kN/m].
+        * Computes piecewise distributed slab loads along each span using full rib spans (splitting at slab/opening bounds).
+    - Topologically sorts beams so secondary supported beams are solved before their carrier beams,
+      transfers centerline point reactions (`type: "P"`), and applies VBA `Sub ReDesign_Sec()` (+100 mm step) post-analysis.
     """
     reconcile_all_story_beams_supports_and_spans(story_data)
     orig_beams = story_data.get("beams", [])
@@ -1079,126 +1075,7 @@ def analyze_all_story_beams_and_columns(
     for b in beams:
         visit_with_prereqs(b["id"])
 
-    # STRUCTURAL CARRIER HIERARCHY RULE (Eng. Yousef Rule #9 & Drop-on-Hidden Prevention):
-    # 1. A supporting (carrier) beam MUST have a section depth >= any supported (secondary) beam resting on it!
-    # 2. A Drop Beam CANNOT rest on a Hidden Beam; if legacy data has a Drop Beam on a Hidden Beam,
-    #    automatically upgrade the carrier beam to a Drop Beam so structural equilibrium is valid!
-    for sec_id in ordered_ids:
-        sec_bm = beam_map[sec_id]
-        sec_d = float(sec_bm.get("depth_m", 0.30))
-        sec_w = float(sec_bm.get("width_m", 0.20))
-        for sup in sec_bm.get("supports", []):
-            if sup.get("kind") == "beam":
-                car_id = sup.get("target_id")
-                if car_id in beam_map:
-                    car_bm = beam_map[car_id]
-                    car_d = float(car_bm.get("depth_m", 0.30))
-                    if sec_bm.get("beam_kind") == "drop" and car_bm.get("beam_kind") == "hidden":
-                        car_bm["beam_kind"] = "drop"
-                        car_bm["kind"] = "drop"
-                        car_bm["width_m"] = min(float(car_bm.get("width_m", 0.20)), 0.25)
-                    if car_d < sec_d:
-                        car_bm["depth_m"] = round(sec_d, 3)
-                    if car_bm.get("beam_kind") == "drop" and sec_bm.get("beam_kind") == "drop":
-                        if float(car_bm.get("width_m", 0.20)) < sec_w:
-                            car_bm["width_m"] = round(sec_w, 3)
-                    for orig_b in orig_beams:
-                        if orig_b.get("id") == car_id:
-                            orig_b["beam_kind"] = car_bm["beam_kind"]
-                            orig_b["kind"] = car_bm["kind"]
-                            orig_b["depth_m"] = car_bm["depth_m"]
-                            orig_b["width_m"] = car_bm["width_m"]
-                            break
-
-    # Populate accurate support dimensions (Column b_m/h_m or Carrier Beam width_m/depth_m) on all beam supports
-    col_obj_map = {c["id"]: c for c in columns if "id" in c}
-    for bid, b_copy in beam_map.items():
-        bsx, bsy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
-        bex, bey = float(b_copy.get("end_x", 0.0)), float(b_copy.get("end_y", 0.0))
-        b_horiz = abs(bex - bsx) >= abs(bey - bsy)
-        for sup in b_copy.get("supports", []):
-            tid = sup.get("target_id")
-            if sup.get("kind") == "beam" and tid in beam_map:
-                car_bm = beam_map[tid]
-                sup["width_m"] = round(float(car_bm.get("width_m", 0.20)), 3)
-                sup["depth_m"] = round(float(car_bm.get("depth_m", 0.50)), 3)
-            elif sup.get("kind") == "column" and tid in col_obj_map:
-                c_obj = col_obj_map[tid]
-                w_along = float(c_obj.get("b_m", 0.20)) if b_horiz else float(c_obj.get("h_m", 0.40))
-                d_perp = float(c_obj.get("h_m", 0.40)) if b_horiz else float(c_obj.get("b_m", 0.20))
-                sup["width_m"] = round(max(0.15, w_along), 3)
-                sup["depth_m"] = round(max(0.15, d_perp), 3)
-
-    # Helper to clip a 1D interval [a, b] against a list of void-opening intervals [(v1, v2), ...]
-    def subtract_void_intervals(a: float, b: float, voids: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        segs = [(a, b)]
-        for v1, v2 in voids:
-            next_segs: List[Tuple[float, float]] = []
-            for s1, s2 in segs:
-                if v2 <= s1 + 1e-4 or v1 >= s2 - 1e-4:
-                    next_segs.append((s1, s2))
-                else:
-                    if v1 - s1 >= 0.30:
-                        next_segs.append((s1, v1))
-                    if s2 - v2 >= 0.30:
-                        next_segs.append((v2, s2))
-            segs = next_segs
-        return segs
-
-    # Helper to find how much the slab rib length L_rib decreases due to beam width growth ΔB at both ends of the rib
-    def get_slab_rib_delta_b_reduction_m(slb_obj: Dict[str, Any], smin_x: float, smax_x: float, smin_y: float, smax_y: float, rib_dir: int) -> Tuple[float, List[str]]:
-        """
-        Computes ΔL_rib = sum(ΔB_support / 2) at the two ends of the slab along the rib direction.
-        When a supporting Hidden Beam widens by ΔB = B_sized - B_initial, half of ΔB intrudes into the slab panel,
-        reducing the clear/effective rib length L_rib and thus reducing the load transferred from the slab to the beam!
-        """
-        total_reduction_m = 0.0
-        notes: List[str] = []
-        if rib_dir == 90:
-            # Ribs run along Y from smin_y (South support) to smax_y (North support)
-            for edge_y, edge_lbl in ((smin_y, "S"), (smax_y, "N")):
-                best_db = 0.0
-                best_bid = ""
-                for bm_cand in beam_map.values():
-                    csx, csy = float(bm_cand.get("start_x", 0.0)), float(bm_cand.get("start_y", 0.0))
-                    cex, cey = float(bm_cand.get("end_x", 0.0)), float(bm_cand.get("end_y", 0.0))
-                    if abs(cex - csx) >= abs(cey - csy):  # horizontal beam
-                        if abs(csy - edge_y) <= 0.55:
-                            ov = min(smax_x, max(csx, cex)) - max(smin_x, min(csx, cex))
-                            if ov >= 0.40:
-                                b_init = float(bm_cand.get("initial_width_m", 0.40 if bm_cand.get("beam_kind") == "hidden" else 0.20))
-                                b_curr = float(bm_cand.get("width_m", b_init))
-                                db_val = max(0.0, b_curr - b_init)
-                                if db_val > best_db:
-                                    best_db = db_val
-                                    best_bid = bm_cand["id"]
-                if best_db > 1e-4:
-                    total_reduction_m += 0.5 * best_db
-                    notes.append(f"-{0.5 * best_db:.2f}m({best_bid})")
-        else:
-            # Ribs run along X from smin_x (West support) to smax_x (East support)
-            for edge_x, edge_lbl in ((smin_x, "W"), (smax_x, "E")):
-                best_db = 0.0
-                best_bid = ""
-                for bm_cand in beam_map.values():
-                    csx, csy = float(bm_cand.get("start_x", 0.0)), float(bm_cand.get("start_y", 0.0))
-                    cex, cey = float(bm_cand.get("end_x", 0.0)), float(bm_cand.get("end_y", 0.0))
-                    if abs(cey - csy) > abs(cex - csx):  # vertical beam
-                        if abs(csx - edge_x) <= 0.55:
-                            ov = min(smax_y, max(csy, cey)) - max(smin_y, min(csy, cey))
-                            if ov >= 0.40:
-                                b_init = float(bm_cand.get("initial_width_m", 0.40 if bm_cand.get("beam_kind") == "hidden" else 0.20))
-                                b_curr = float(bm_cand.get("width_m", b_init))
-                                db_val = max(0.0, b_curr - b_init)
-                                if db_val > best_db:
-                                    best_db = db_val
-                                    best_bid = bm_cand["id"]
-                if best_db > 1e-4:
-                    total_reduction_m += 0.5 * best_db
-                    notes.append(f"-{0.5 * best_db:.2f}m({best_bid})")
-        return round(total_reduction_m, 4), notes
-
-    # Record initial baseline beam dimensions before iterative sizing:
+    # Record initial baseline beam dimensions BEFORE single-pass load evaluation:
     # Hidden beam minimum width = 0.40m (or story hb_cfg min_b_hidden), depth = slab thickness
     # Drop beam width = wall thickness (0.20m), minimum depth = 0.40m
     hb_cfg = story_data.get("hollow_block", {})
@@ -1226,11 +1103,91 @@ def analyze_all_story_beams_and_columns(
             b_copy["initial_width_m"] = round(float(b_copy.get("width_m", 0.40)), 3)
             b_copy["initial_depth_m"] = round(float(b_copy.get("depth_m", 0.30)), 3)
 
+    col_obj_map = {c["id"]: c for c in columns if "id" in c}
+
+    def enforce_carrier_hierarchy_and_support_dims(sync_initial: bool = True) -> None:
+        """
+        STRUCTURAL CARRIER HIERARCHY RULE (Eng. Yousef Rule #9 & Drop-on-Hidden Prevention):
+        1. A supporting (carrier) beam MUST have a section depth >= any supported (secondary) beam resting on it.
+        2. A Drop Beam CANNOT rest on a Hidden Beam; upgrade carrier beam to Drop if needed.
+        3. Populate accurate support dimensions on all beam supports.
+        """
+        for sec_id in ordered_ids:
+            sec_bm = beam_map[sec_id]
+            sec_d = float(sec_bm.get("depth_m", 0.30))
+            sec_w = float(sec_bm.get("width_m", 0.20))
+            for sup in sec_bm.get("supports", []):
+                if sup.get("kind") == "beam":
+                    car_id = sup.get("target_id")
+                    if car_id in beam_map:
+                        car_bm = beam_map[car_id]
+                        car_d = float(car_bm.get("depth_m", 0.30))
+                        if sec_bm.get("beam_kind") == "drop" and car_bm.get("beam_kind") == "hidden":
+                            car_bm["beam_kind"] = "drop"
+                            car_bm["kind"] = "drop"
+                            car_bm["width_m"] = min(float(car_bm.get("width_m", 0.20)), 0.25)
+                            if sync_initial:
+                                car_bm["initial_width_m"] = car_bm["width_m"]
+                        if car_d < sec_d:
+                            car_bm["depth_m"] = round(sec_d, 3)
+                            if sync_initial:
+                                car_bm["initial_depth_m"] = max(float(car_bm.get("initial_depth_m", car_bm["depth_m"])), car_bm["depth_m"])
+                        if car_bm.get("beam_kind") == "drop" and sec_bm.get("beam_kind") == "drop":
+                            if float(car_bm.get("width_m", 0.20)) < sec_w:
+                                car_bm["width_m"] = round(sec_w, 3)
+                                if sync_initial:
+                                    car_bm["initial_width_m"] = max(float(car_bm.get("initial_width_m", car_bm["width_m"])), car_bm["width_m"])
+                        for orig_b in orig_beams:
+                            if orig_b.get("id") == car_id:
+                                orig_b["beam_kind"] = car_bm["beam_kind"]
+                                orig_b["kind"] = car_bm["kind"]
+                                orig_b["depth_m"] = car_bm["depth_m"]
+                                orig_b["width_m"] = car_bm["width_m"]
+                                if sync_initial:
+                                    orig_b["initial_depth_m"] = car_bm.get("initial_depth_m", car_bm["depth_m"])
+                                    orig_b["initial_width_m"] = car_bm.get("initial_width_m", car_bm["width_m"])
+                                break
+
+        for _bid, b_copy in beam_map.items():
+            bsx, bsy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
+            bex, bey = float(b_copy.get("end_x", 0.0)), float(b_copy.get("end_y", 0.0))
+            b_horiz = abs(bex - bsx) >= abs(bey - bsy)
+            for sup in b_copy.get("supports", []):
+                tid = sup.get("target_id")
+                if sup.get("kind") == "beam" and tid in beam_map:
+                    car_bm = beam_map[tid]
+                    sup["width_m"] = round(float(car_bm.get("width_m", 0.20)), 3)
+                    sup["depth_m"] = round(float(car_bm.get("depth_m", 0.50)), 3)
+                elif sup.get("kind") == "column" and tid in col_obj_map:
+                    c_obj = col_obj_map[tid]
+                    w_along = float(c_obj.get("b_m", 0.20)) if b_horiz else float(c_obj.get("h_m", 0.40))
+                    d_perp = float(c_obj.get("h_m", 0.40)) if b_horiz else float(c_obj.get("b_m", 0.20))
+                    sup["width_m"] = round(max(0.15, w_along), 3)
+                    sup["depth_m"] = round(max(0.15, d_perp), 3)
+
+    enforce_carrier_hierarchy_and_support_dims(sync_initial=True)
+
+    # Helper to clip a 1D interval [a, b] against a list of void-opening intervals [(v1, v2), ...]
+    def subtract_void_intervals(a: float, b: float, voids: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        segs = [(a, b)]
+        for v1, v2 in voids:
+            next_segs: List[Tuple[float, float]] = []
+            for s1, s2 in segs:
+                if v2 <= s1 + 1e-4 or v1 >= s2 - 1e-4:
+                    next_segs.append((s1, s2))
+                else:
+                    if v1 - s1 >= 0.30:
+                        next_segs.append((s1, v1))
+                    if s2 - v2 >= 0.30:
+                        next_segs.append((v2, s2))
+            segs = next_segs
+        return segs
+
     def populate_all_beam_distributed_loads() -> None:
         """
         Computes piecewise distributed loads (Beam O.W + Exact Sub-Interval Slab Loads + Wall Loads)
-        using current beam dimensions (`width_m`, `depth_m`) and accounting for any reduction in slab rib length
-        (`L_rib_eff = L_rib_0 - ΔL_rib`) caused by beam width increases ΔB at the slab supports!
+        using baseline beam dimensions (`initial_width_m`, `initial_depth_m`) and full slab rib lengths
+        (`lx_0` / `ly_0`) in a single pass per Eng. Yousef's Excel philosophy.
         """
         for idx_b, b in enumerate(beams):
             bid = b["id"]
@@ -1300,27 +1257,16 @@ def analyze_all_story_beams_and_columns(
                         is_cant_slb = bool(slb.get("is_cantilever", False))
                         sid_lbl = str(slb.get("id", "S"))
 
-                        # Reduce rib span L_rib by ΔB/2 for any supporting beam that widened during section sizing
-                        delta_rib_m, db_notes = get_slab_rib_delta_b_reduction_m(slb, smin_x, smax_x, smin_y, smax_y, rib_dir)
-                        lx_eff = max(0.30, round(lx_0 - (delta_rib_m if rib_dir == 0 else 0.0), 3))
-                        ly_eff = max(0.30, round(ly_0 - (delta_rib_m if rib_dir == 90 else 0.0), 3))
-
+                        # Full center-to-center / boundary rib span (no L_rib reduction per Excel philosophy)
                         if b_horiz and rib_dir == 90:
                             if abs(bsy - smin_y) <= 0.55 or abs(bsy - smax_y) <= 0.55:
                                 ov1, ov2 = max(w_min, smin_x), min(w_max, smax_x)
                                 if ov2 - ov1 >= 0.40:
                                     is_pos_side = ((smin_y + smax_y) / 2.0) >= bsy
                                     side_voids = voids_pos if is_pos_side else voids_neg
-                                    trib_m = ly_eff if is_cant_slb else (ly_eff * 0.50)
+                                    trib_m = ly_0 if is_cant_slb else (ly_0 * 0.50)
                                     add_w = round(slab_wu_kpa * trib_m, 2)
-                                    if delta_rib_m > 1e-4:
-                                        factor_txt = (
-                                            f"({ly_0:.2f}-{delta_rib_m:.2f})m[Cant]"
-                                            if is_cant_slb
-                                            else f"(({ly_0:.2f}-{delta_rib_m:.2f})/2)m"
-                                        )
-                                    else:
-                                        factor_txt = f"{ly_eff:.2f}m[Cant]" if is_cant_slb else f"({ly_eff:.2f}/2)m"
+                                    factor_txt = f"{ly_0:.2f}m[Cant]" if is_cant_slb else f"({ly_0:.2f}/2)m"
                                     eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
                                     for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
                                         slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
@@ -1330,16 +1276,9 @@ def analyze_all_story_beams_and_columns(
                                 if ov2 - ov1 >= 0.40:
                                     is_pos_side = ((smin_x + smax_x) / 2.0) >= bsx
                                     side_voids = voids_pos if is_pos_side else voids_neg
-                                    trib_m = lx_eff if is_cant_slb else (lx_eff * 0.50)
+                                    trib_m = lx_0 if is_cant_slb else (lx_0 * 0.50)
                                     add_w = round(slab_wu_kpa * trib_m, 2)
-                                    if delta_rib_m > 1e-4:
-                                        factor_txt = (
-                                            f"({lx_0:.2f}-{delta_rib_m:.2f})m[Cant]"
-                                            if is_cant_slb
-                                            else f"(({lx_0:.2f}-{delta_rib_m:.2f})/2)m"
-                                        )
-                                    else:
-                                        factor_txt = f"{lx_eff:.2f}m[Cant]" if is_cant_slb else f"({lx_eff:.2f}/2)m"
+                                    factor_txt = f"{lx_0:.2f}m[Cant]" if is_cant_slb else f"({lx_0:.2f}/2)m"
                                     eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
                                     for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
                                         slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
@@ -1476,114 +1415,95 @@ def analyze_all_story_beams_and_columns(
     story_main_db = int(story_data.get("default_main_bar_dia_mm", 16))
     story_stir_db = int(story_data.get("default_stirrup_dia_mm", 8))
 
-    # Coupled Iterative Analysis & Section Sizing Loop (up to 5 passes until convergence):
-    # Pass 1: Solve beams with baseline dimensions -> size sections per VBA Sub ReDesign_Sec (+100mm step).
-    # Pass 2..N: Whenever any beam widens/deepens, recompute O.W AND reduce slab rib length L_rib by ΔB/2 at widened supports,
-    #            then re-solve continuous beams and re-check section sizing until O.W, w_Slab, and B×h converge 100%!
-    for pass_idx in range(5):
-        populate_all_beam_distributed_loads()
-        any_section_enlarged = False
+    # Single-Pass Topological Analysis + Post-Analysis VBA Section Sizing (Eng. Yousef Excel Philosophy):
+    # - Loads (O.W + w_Slab + W_wall) are computed ONCE from baseline beam dimensions and full slab spans.
+    # - Secondary beams are solved first and transfer centerline point reactions onto carrier beams.
+    # - After solving each beam's Mu/Vu once, design_beam_aci318 runs VBA Sub ReDesign_Sec (+100 mm step)
+    #   purely during section design without feeding enlarged dimensions back into O.W or L_rib.
+    populate_all_beam_distributed_loads()
 
-        for bid in ordered_ids:
-            bm = beam_map[bid]
-            if "design_mode" not in bm:
-                bm["design_mode"] = story_design_mode
-            if "main_bar_dia_mm" not in bm:
-                bm["main_bar_dia_mm"] = story_main_db
-            if "stirrup_dia_mm" not in bm:
-                bm["stirrup_dia_mm"] = story_stir_db
+    for bid in ordered_ids:
+        bm = beam_map[bid]
+        if "design_mode" not in bm:
+            bm["design_mode"] = story_design_mode
+        if "main_bar_dia_mm" not in bm:
+            bm["main_bar_dia_mm"] = story_main_db
+        if "stirrup_dia_mm" not in bm:
+            bm["stirrup_dia_mm"] = story_stir_db
 
-            prev_w = float(bm.get("width_m", 0.40))
-            prev_h = float(bm.get("depth_m", 0.30))
+        prev_w = float(bm.get("width_m", 0.40))
+        prev_h = float(bm.get("depth_m", 0.30))
 
-            res = solve_continuous_beam_analytical(bm, fc_mpa, fy_mpa)
-            res["loads_applied"] = [dict(ld) for ld in bm.get("loads", [])]
-            beam_results[bid] = res
-            des = design_beam_aci318(
-                bm,
-                res,
-                fc_mpa,
-                fy_mpa,
-                design_mode=str(bm.get("design_mode", story_design_mode)),
-                bar_dia_mm=int(bm.get("main_bar_dia_mm", story_main_db)),
-                stirrup_dia_mm=int(bm.get("stirrup_dia_mm", story_stir_db)),
-                auto_size_section=(not bm.get("lock_section_dimensions", False)),
-            )
-            beam_designs[bid] = des
+        res = solve_continuous_beam_analytical(bm, fc_mpa, fy_mpa)
+        res["loads_applied"] = [dict(ld) for ld in bm.get("loads", [])]
+        beam_results[bid] = res
+        des = design_beam_aci318(
+            bm,
+            res,
+            fc_mpa,
+            fy_mpa,
+            design_mode=str(bm.get("design_mode", story_design_mode)),
+            bar_dia_mm=int(bm.get("main_bar_dia_mm", story_main_db)),
+            stirrup_dia_mm=int(bm.get("stirrup_dia_mm", story_stir_db)),
+            auto_size_section=(not bm.get("lock_section_dimensions", False)),
+        )
+        beam_designs[bid] = des
 
-            new_w = round(float(des.get("b_mm", prev_w * 1000.0)) / 1000.0, 3)
-            new_h = round(float(des.get("h_mm", prev_h * 1000.0)) / 1000.0, 3)
-            if abs(new_w - prev_w) > 1e-4 or abs(new_h - prev_h) > 1e-4:
-                bm["width_m"] = new_w
-                bm["depth_m"] = new_h
-                any_section_enlarged = True
+        new_w = round(float(des.get("b_mm", prev_w * 1000.0)) / 1000.0, 3)
+        new_h = round(float(des.get("h_mm", prev_h * 1000.0)) / 1000.0, 3)
+        bm["width_m"] = new_w
+        bm["depth_m"] = new_h
 
-            # Sync updated loads and sized dimensions back to story_data["beams"]
-            for orig_b in orig_beams:
-                if orig_b.get("id") == bid:
-                    orig_b["width_m"] = bm["width_m"]
-                    orig_b["depth_m"] = bm["depth_m"]
-                    orig_b["initial_width_m"] = bm.get("initial_width_m", bm["width_m"])
-                    orig_b["initial_depth_m"] = bm.get("initial_depth_m", bm["depth_m"])
-                    orig_b["loads"] = [dict(ld) for ld in bm.get("loads", [])]
-                    orig_b["design_mode"] = bm["design_mode"]
-                    orig_b["main_bar_dia_mm"] = bm["main_bar_dia_mm"]
-                    orig_b["stirrup_dia_mm"] = bm["stirrup_dia_mm"]
-                    break
+        # Sync updated loads and sized dimensions back to story_data["beams"]
+        for orig_b in orig_beams:
+            if orig_b.get("id") == bid:
+                orig_b["width_m"] = bm["width_m"]
+                orig_b["depth_m"] = bm["depth_m"]
+                orig_b["initial_width_m"] = bm.get("initial_width_m", bm["width_m"])
+                orig_b["initial_depth_m"] = bm.get("initial_depth_m", bm["depth_m"])
+                orig_b["loads"] = [dict(ld) for ld in bm.get("loads", [])]
+                orig_b["design_mode"] = bm["design_mode"]
+                orig_b["main_bar_dia_mm"] = bm["main_bar_dia_mm"]
+                orig_b["stirrup_dia_mm"] = bm["stirrup_dia_mm"]
+                break
 
-            # Transfer reactions from this secondary beam onto any carrier beam it rests on
-            # Measuring position strictly from the Carrier Beam's Support Centerlines!
-            bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
-            bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
-            bm_horiz = abs(bex - bsx) >= abs(bey - bsy)
-            sec_center_coord = bsy if bm_horiz else bsx
+        # Transfer reactions from this secondary beam onto any carrier beam it rests on
+        # Measuring position strictly from the Carrier Beam's Support Centerlines!
+        bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+        bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+        bm_horiz = abs(bex - bsx) >= abs(bey - bsy)
+        sec_center_coord = bsy if bm_horiz else bsx
 
-            for sup in bm.get("supports", []):
-                if sup.get("kind") == "beam" and sup.get("target_id") in beam_map:
-                    s_idx = int(sup.get("support_index", 1))
-                    r_kn = round(float(res["reactions"].get(s_idx, 0.0)), 2)
-                    carrier = beam_map[sup["target_id"]]
-                    c_left_car = max(0.0, float(carrier.get("cantilever_left_m", 0.0)))
-                    car_sup1_world = get_beam_first_support_world_coord(carrier)
-                    car_tot_len = c_left_car + sum(float(s) for s in carrier.get("spans", [4.0])) + max(0.0, float(carrier.get("cantilever_right_m", 0.0)))
+        for sup in bm.get("supports", []):
+            if sup.get("kind") == "beam" and sup.get("target_id") in beam_map:
+                s_idx = int(sup.get("support_index", 1))
+                r_kn = round(float(res["reactions"].get(s_idx, 0.0)), 2)
+                carrier = beam_map[sup["target_id"]]
+                c_left_car = max(0.0, float(carrier.get("cantilever_left_m", 0.0)))
+                car_sup1_world = get_beam_first_support_world_coord(carrier)
+                car_tot_len = c_left_car + sum(float(s) for s in carrier.get("spans", [4.0])) + max(0.0, float(carrier.get("cantilever_right_m", 0.0)))
 
-                    # Exact distance along carrier from Carrier Support 1 Centerline to Secondary Beam Centerline
-                    dist_from_sup1 = round(abs(sec_center_coord - car_sup1_world), 3)
-                    pos_x = round(min(max(0.0, c_left_car + dist_from_sup1), car_tot_len), 3)
-                    sup["pos_on_carrier_m"] = pos_x
+                # Exact distance along carrier from Carrier Support 1 Centerline to Secondary Beam Centerline
+                dist_from_sup1 = round(abs(sec_center_coord - car_sup1_world), 3)
+                pos_x = round(min(max(0.0, c_left_car + dist_from_sup1), car_tot_len), 3)
+                sup["pos_on_carrier_m"] = pos_x
 
-                    carrier["loads"] = list(carrier.get("loads", [])) + [{
-                        "type": "P",
-                        "x": pos_x,
-                        "pos": pos_x,
-                        "dist_from_sup1_m": dist_from_sup1,
-                        "val": r_kn,
-                        "mag": r_kn,
-                        "source_beam_id": bid,
-                        "source_beam": bid,
-                        "is_transferred_reaction": True,
-                        "label": f"P = {r_kn:.2f} kN (from {bid} @ {pos_x:.2f}m)",
-                        "formula_str": f"P({bid}) = {r_kn:.2f} kN transferred at x = {pos_x:.2f} m",
-                    }]
+                carrier["loads"] = list(carrier.get("loads", [])) + [{
+                    "type": "P",
+                    "x": pos_x,
+                    "pos": pos_x,
+                    "dist_from_sup1_m": dist_from_sup1,
+                    "val": r_kn,
+                    "mag": r_kn,
+                    "source_beam_id": bid,
+                    "source_beam": bid,
+                    "is_transferred_reaction": True,
+                    "label": f"P = {r_kn:.2f} kN (from {bid} @ {pos_x:.2f}m)",
+                    "formula_str": f"P({bid}) = {r_kn:.2f} kN transferred at x = {pos_x:.2f} m",
+                }]
 
-        if not any_section_enlarged:
-            break
-
-    # Also update slab_designs with effective rib span if any supporting beam widened
-    for slb in slabs:
-        if slb.get("is_void", False):
-            continue
-        sid = str(slb.get("id", f"S{len(slab_designs) + 1}"))
-        s_bounds = extract_slab_bounds(slb)
-        custom_l_eff = None
-        if s_bounds is not None:
-            smin_x, smax_x, smin_y, smax_y = s_bounds
-            r_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
-            d_rib_m, _ = get_slab_rib_delta_b_reduction_m(slb, smin_x, smax_x, smin_y, smax_y, r_dir)
-            if d_rib_m > 1e-4:
-                base_l = (smax_x - smin_x) if r_dir == 0 else (smax_y - smin_y)
-                custom_l_eff = max(0.5, round(base_l - d_rib_m, 3))
-        slab_designs[sid] = design_hollow_block_slab_rib(slb, story_data, fc_mpa=fc_mpa, fy_mpa=fy_mpa, custom_span_l_m=custom_l_eff)
+    # Ensure carrier beam final section depth remains >= any enlarged secondary beam without altering baseline initial_* dims
+    enforce_carrier_hierarchy_and_support_dims(sync_initial=False)
 
     column_records = []
     for col in columns:
@@ -1763,17 +1683,19 @@ def design_beam_aci318(
             # Hidden beam (bt = 0): depth h is fixed to slab thickness; width B increments by +100 mm
             d_mm = round(max(90.0, h_mm - dc_mm - dst_mm - (db_mm / 2.0)), 1)
             for _iter in range(25):
+                if b_mm >= 3000.0:
+                    break
                 nbs_cur = max(2, int(math.floor(((b_mm + db_mm) - (6.0 * dst_mm + 45.0)) / max(1.0, db_mm + 25.0))))
                 ku_cur = (m_max_gov * 1_000_000.0) / max(1.0, 0.90 * b_mm * fc_mpa * (d_mm ** 2))
                 if (1.0 - 2.36 * ku_cur) < 0.0:
                     sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": "1 - 2.36*Ku < 0 -> B + 100 mm"})
-                    b_mm += 100.0
+                    b_mm = min(3000.0, b_mm + 100.0)
                     continue
                 w_cur = (1.0 - math.sqrt(max(0.0, 1.0 - 2.36 * ku_cur))) / 1.18
                 p_cur = w_cur * (fc_mpa / fy_mpa)
                 if p_cur > pmax_excel:
                     sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"ρ ({p_cur:.5f}) > ρ_max ({pmax_excel:.5f}) -> B + 100 mm"})
-                    b_mm += 100.0
+                    b_mm = min(3000.0, b_mm + 100.0)
                     continue
                 ast_cur = p_cur * b_mm * d_mm
                 nbr_cur = int(math.floor(ast_cur / asb_excel)) + 1
@@ -1782,7 +1704,7 @@ def design_beam_aci318(
                     nbr_cur = min_b_cur
                 if nbr_cur > nbs_cur:
                     sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"nbr ({nbr_cur}) > nbs ({nbs_cur}) -> B + 100 mm"})
-                    b_mm += 100.0
+                    b_mm = min(3000.0, b_mm + 100.0)
                     continue
                 nrow_gov = 1
                 break
@@ -1792,16 +1714,18 @@ def design_beam_aci318(
             ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
             d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
             for _iter in range(25):
+                if h_mm >= 2000.0:
+                    break
                 if d_mm <= 60.0 or ddc_weighted_mm >= 0.45 * h_mm:
                     sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": "ddc >= 0.45*h -> h + 100 mm"})
-                    h_mm += 100.0
+                    h_mm = min(2000.0, h_mm + 100.0)
                     ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
                     d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
                     continue
                 ku_cur = (m_max_gov * 1_000_000.0) / max(1.0, 0.90 * b_mm * fc_mpa * (d_mm ** 2))
                 if (1.0 - 2.36 * ku_cur) < 0.0:
                     sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": "1 - 2.36*Ku < 0 -> h + 100 mm"})
-                    h_mm += 100.0
+                    h_mm = min(2000.0, h_mm + 100.0)
                     ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
                     d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
                     continue
@@ -1809,7 +1733,7 @@ def design_beam_aci318(
                 p_cur = w_cur * (fc_mpa / fy_mpa)
                 if p_cur > pmax_excel:
                     sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"ρ ({p_cur:.5f}) > ρ_max ({pmax_excel:.5f}) -> h + 100 mm"})
-                    h_mm += 100.0
+                    h_mm = min(2000.0, h_mm + 100.0)
                     ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
                     d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
                     continue
@@ -4644,6 +4568,8 @@ def convert_beam_kind_and_section(
             bm["width_m"] = 0.40
             bm["depth_m"] = max(0.25, slab_t_m, min_supported_depth)
 
+    bm["initial_width_m"] = bm["width_m"]
+    bm["initial_depth_m"] = bm["depth_m"]
     bm.pop("manual_loads_override", None)
     move_beam_within_slab_boundary(story_data, beam_id, 0.0, 0.0)
     reconcile_and_split_slabs_after_beam_change(story_data)

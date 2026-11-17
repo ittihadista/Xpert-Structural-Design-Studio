@@ -4,7 +4,28 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.2.0-structural-bim-pro` (2026-11-17)
+## Current Release: `v2.2.1-structural-bim-pro` (2026-11-17)
+**Release Title:** Crash-Proof Plan Drafting, Global Qt Exception Hook, Debounced Viewport Resizing (40ms), Single-Pass Analysis Philosophy, and Commercial Hollow-Block Standard Sizing
+
+### Key Features & Advancements in `v2.2.1-structural-bim-pro`:
+1. **Immediate Crash Fix After Plan Drafting (`TypeError` in `_check_and_apply_slab_thickness`):**
+   - Eliminated the critical call collision where `hb_src` dictionary was passed along with keyword argument `slab_thickness_cm` into `compute_hollow_block_parameters()`.
+   - Added automated static AST signature verification (`test_v221_regression_no_slab_thickness_typeerror_and_ast_signatures`) to inspect all function call sites between the UI and structural engines, preventing parameter mismatch regressions.
+2. **Global Qt Exception Hook & Safe Error Reporting:**
+   - Implemented `_install_global_excepthook` and `_report_studio_exception` to intercept unhandled exceptions and log them to `xpert_studio_crash.log` without abruptly crashing the application or losing unsaved CAD drafting data.
+3. **Debounced Viewport Resizing & Re-Entrancy Crash Shield (40ms QTimer):**
+   - Decoupled diagram canvas and calculation sheet resizing using single-shot `QTimer` (40ms debounce delay) with recursion guards, preventing PyQt6 layout deadlock or re-entrant crash loops when resizing or maximizing the window.
+4. **Single-Pass Structural Analysis & Section Sizing (Excel Philosophy Alignment):**
+   - Strictly decoupled the structural load distribution phase from the reinforced concrete section sizing phase per Eng. Yousef's Excel methodology:
+     - Distributed loads (Beam O.W, Wall loads, tributary slab loads) are calculated once using baseline beam sections and full slab rib spans.
+     - Section auto-sizing (+100 mm step per VBA `Sub ReDesign_Sec`) operates purely during section design without feeding back into O.W or reducing slab rib tributary length.
+5. **Standard Commercial Hollow-Block Sizes & Automatic Compression Topping:**
+   - Standard commercial block height strictly maintained at $200\text{ mm}$ ($20\text{ cm}$) for $h \ge 25\text{ cm}$ (or $160\text{ mm}$ for $h < 25\text{ cm}$).
+   - Compression topping layer dynamically computes $h_s = h - h_{\text{block}}$ ($8\text{ cm}$ for $h=28\text{ cm}$, $9\text{ cm}$ for $h=29\text{ cm}$, $10\text{ cm}$ for $h=30\text{ cm}$) matching Eng. Yousef's Excel sheet 100%.
+
+---
+
+## Previous Release: `v2.2.0-structural-bim-pro` (2026-11-17)
 **Release Title:** Standard Commercial Hordi Block Sizing, VBA-Compliant Section Auto-Sizing (+100 mm step), Coupled Equilibrium Load Convergence, Right-Edge Canvas Clipping Fix, and Excel Sheet4 Flexural Calculation Sheet
 
 ### Key Features & Advancements in `v2.2.0-structural-bim-pro`:

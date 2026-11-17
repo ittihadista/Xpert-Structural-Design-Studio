@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.2.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.2.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -10,9 +10,10 @@ import json
 import math
 import os
 import sys
+import traceback
 from typing import Dict, Any, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QPointF, QRectF
+from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPen, QBrush, QPolygonF
 from PyQt6.QtWidgets import (
     QApplication,
@@ -407,10 +408,22 @@ class StudioOptionsDialog(QDialog):
         self._updating_fields = True
         try:
             h_cm = self.sp_slab_t.value()
-            std_blk_h = 20.0 if h_cm >= 25.0 else 16.0
-            self.sp_block_h.setValue(std_blk_h)
+            sender = self.sender()
+            if sender is self.sp_block_h:
+                raw_blk = self.sp_block_h.value()
+                std_blk_h = 20.0 if raw_blk >= 18.0 else 16.0
+                if abs(raw_blk - std_blk_h) > 1e-3:
+                    self.sp_block_h.setValue(std_blk_h)
+            elif sender is self.sp_top_slab:
+                std_blk_h = self.sp_block_h.value()
+            else:
+                std_blk_h = 20.0 if h_cm >= 25.0 else 16.0
+                self.sp_block_h.setValue(std_blk_h)
             hs_cm = max(5.0, h_cm - std_blk_h)
-            self.sp_top_slab.setValue(hs_cm)
+            if sender is not self.sp_top_slab:
+                self.sp_top_slab.setValue(hs_cm)
+            else:
+                hs_cm = self.sp_top_slab.value()
             res = compute_hollow_block_parameters(
                 slab_thickness_cm=h_cm,
                 rib_width_cm=self.sp_rib_w.value(),
@@ -970,7 +983,8 @@ class SlabRibDesignDialog(QDialog):
         if self._updating_controls:
             return
         self._refresh_design_and_drawing()
-        self.studio.save_and_sync_current_story()
+        if self.studio is not None:
+            self.studio.save_and_sync_current_story()
 
     def _refresh_design_and_drawing(self) -> None:
         slb = self._get_current_slab_obj()
@@ -2767,6 +2781,10 @@ class XpertBeamDiagramCanvas(QGraphicsView):
         self._w_px: float = 820.0
         self._tot_l: float = 1.0
         self._crosshair_line = None
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(40)
+        self._resize_timer.timeout.connect(self.owner._redraw_current_beam_if_ready)
 
     def set_curve_data(
         self, xs: List[float], vs: List[float], ms: List[float], x0_px: float, w_px: float, tot_l: float
@@ -2798,7 +2816,8 @@ class XpertBeamDiagramCanvas(QGraphicsView):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self.owner._redraw_current_beam_if_ready()
+        if self.owner._last_drawn_args is not None and not self.owner._is_drawing:
+            self._resize_timer.start()
 
 
 class BeamDiagramsViewWidget(QWidget):
@@ -2813,6 +2832,7 @@ class BeamDiagramsViewWidget(QWidget):
         super().__init__()
         self.studio = parent_studio
         self._updating_table = False
+        self._is_drawing = False
         self._span_wall_checkboxes: List[Tuple[str, QCheckBox]] = []
         self._last_drawn_args: Optional[Tuple[str, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] = None
         self._build_ui()
@@ -3261,9 +3281,15 @@ class BeamDiagramsViewWidget(QWidget):
         self._draw_classic_xpert_beam_sheet(bid, bm, res, loads_applied)
 
     def _redraw_current_beam_if_ready(self) -> None:
+        if self._is_drawing:
+            return
         if self._last_drawn_args is not None:
             bid, bm, res, loads_applied = self._last_drawn_args
-            self._draw_classic_xpert_beam_sheet(bid, bm, res, loads_applied)
+            self._is_drawing = True
+            try:
+                self._draw_classic_xpert_beam_sheet(bid, bm, res, loads_applied)
+            finally:
+                self._is_drawing = False
 
     def _draw_classic_xpert_beam_sheet(
         self, bid: str, bm: Dict[str, Any], res: Dict[str, Any], loads_applied: List[Dict[str, Any]]
@@ -3554,6 +3580,12 @@ class BeamDesignDetailWidget(QWidget):
     def __init__(self, parent_studio: "XpertStudioMainWindow"):
         super().__init__()
         self.studio = parent_studio
+        self._is_updating = False
+        self._last_sheet4_html: Optional[str] = None
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(40)
+        self._resize_timer.timeout.connect(self._on_debounced_resize)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -3655,8 +3687,14 @@ class BeamDesignDetailWidget(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if not self._is_updating and self.studio.last_analysis_bundle and self.cb_beam_select.currentIndex() >= 0:
+            self._resize_timer.start()
+
+    def _on_debounced_resize(self) -> None:
+        if self._is_updating or not self.studio.last_analysis_bundle:
+            return
         idx = self.cb_beam_select.currentIndex()
-        if idx >= 0 and self.studio.last_analysis_bundle:
+        if idx >= 0:
             self._on_beam_selected(idx)
 
     def populate_results(
@@ -3822,48 +3860,56 @@ class BeamDesignDetailWidget(QWidget):
         """
 
     def _on_beam_selected(self, idx: int) -> None:
-        self.rc_scene.clear()
-        self.rc_view.resetTransform()
-        if idx < 0 or not self.studio.last_analysis_bundle:
+        if self._is_updating:
             return
-        bid = str(self.cb_beam_select.itemData(idx))
-        story = self.studio.current_story_data
-        bm = next((b for b in story.get("beams", []) if str(b["id"]) == bid), None)
-        res = self.studio.last_analysis_bundle.get("beam_results", {}).get(bid)
-        des = self.studio.last_analysis_bundle.get("beam_designs", {}).get(bid)
-        if not res or not des or bm is None:
-            return
+        self._is_updating = True
+        try:
+            self.rc_scene.clear()
+            self.rc_view.resetTransform()
+            if idx < 0 or not self.studio.last_analysis_bundle:
+                return
+            bid = str(self.cb_beam_select.itemData(idx))
+            story = self.studio.current_story_data
+            bm = next((b for b in story.get("beams", []) if str(b["id"]) == bid), None)
+            res = self.studio.last_analysis_bundle.get("beam_results", {}).get(bid)
+            des = self.studio.last_analysis_bundle.get("beam_designs", {}).get(bid)
+            if not res or not des or bm is None:
+                return
 
-        # Sync design mode & main bar Φ selectors without firing signals
-        cur_mode = str(bm.get("design_mode", des.get("design_mode", story.get("beam_design_mode", "double")))).lower()
-        cur_dia = int(bm.get("main_bar_dia_mm", des.get("main_bar_dia_mm", story.get("default_main_bar_dia_mm", 16))))
-        self.cb_design_mode.blockSignals(True)
-        self.cb_design_mode.setCurrentIndex(1 if cur_mode == "single" else 0)
-        self.cb_design_mode.blockSignals(False)
-        self.cb_bar_dia.blockSignals(True)
-        dia_idx = self.cb_bar_dia.findData(cur_dia)
-        if dia_idx >= 0:
-            self.cb_bar_dia.setCurrentIndex(dia_idx)
-        self.cb_bar_dia.blockSignals(False)
+            # Sync design mode & main bar Φ selectors without firing signals
+            cur_mode = str(bm.get("design_mode", des.get("design_mode", story.get("beam_design_mode", "double")))).lower()
+            cur_dia = int(bm.get("main_bar_dia_mm", des.get("main_bar_dia_mm", story.get("default_main_bar_dia_mm", 16))))
+            self.cb_design_mode.blockSignals(True)
+            self.cb_design_mode.setCurrentIndex(1 if cur_mode == "single" else 0)
+            self.cb_design_mode.blockSignals(False)
+            self.cb_bar_dia.blockSignals(True)
+            dia_idx = self.cb_bar_dia.findData(cur_dia)
+            if dia_idx >= 0:
+                self.cb_bar_dia.setCurrentIndex(dia_idx)
+            self.cb_bar_dia.blockSignals(False)
 
-        # Update dropdown item text in case iterative section sizing widened/deepened this beam
-        n_sp = int(des.get("num_spans", len(bm.get("spans", []))))
-        self.cb_beam_select.setItemText(
-            idx,
-            f"{bid} ({bm.get('beam_kind', 'hidden').upper()} {bm.get('width_m', 0.4):.2f}×{bm.get('depth_m', 0.3):.2f}m — {n_sp} Spans)",
-        )
+            # Render Excel Sheet4 Calculation Panel on the left (skip redundant HTML relayout on resize)
+            sheet4_html = self._render_excel_sheet4_html(bid, bm, des)
+            if sheet4_html != self._last_sheet4_html:
+                self._last_sheet4_html = sheet4_html
+                self.excel_calc_view.setHtml(sheet4_html)
 
-        # Render Excel Sheet4 Calculation Panel on the left
-        self.excel_calc_view.setHtml(self._render_excel_sheet4_html(bid, bm, des))
+            as_pos = des.get("as_pos_req_mm2", des.get("as_pos_req", 0.0))
+            as_neg = des.get("as_neg_req_mm2", des.get("as_neg_req", 0.0))
+            cont_bars = des.get("continuous_min_bars", "4 Φ 14")
+            self.lbl_rc_summary.setText(
+                f"Beam {bid} ({des.get('b_mm', 400)}×{des.get('h_mm', 300)} mm, d={des.get('d_mm', 252):g} mm, n_max/row={des.get('n_max_per_layer', 8)}): "
+                f"Min Bars = {cont_bars} | Bot = {des.get('bottom_bars')} ({as_pos:.1f} mm²) | "
+                f"Top = {des.get('top_bars')} ({as_neg:.1f} mm²) | Stirrups = {des.get('stirrups')}"
+            )
+            self._draw_beam_rc_canvas(bid, bm, res, des)
+        finally:
+            self._is_updating = False
 
-        as_pos = des.get("as_pos_req_mm2", des.get("as_pos_req", 0.0))
-        as_neg = des.get("as_neg_req_mm2", des.get("as_neg_req", 0.0))
+    def _draw_beam_rc_canvas(
+        self, bid: str, bm: Dict[str, Any], res: Dict[str, Any], des: Dict[str, Any]
+    ) -> None:
         cont_bars = des.get("continuous_min_bars", "4 Φ 14")
-        self.lbl_rc_summary.setText(
-            f"Beam {bid} ({des.get('b_mm', 400)}×{des.get('h_mm', 300)} mm, d={des.get('d_mm', 252):g} mm, n_max/row={des.get('n_max_per_layer', 8)}): "
-            f"Min Bars = {cont_bars} | Bot = {des.get('bottom_bars')} ({as_pos:.1f} mm²) | "
-            f"Top = {des.get('top_bars')} ({as_neg:.1f} mm²) | Stirrups = {des.get('stirrups')}"
-        )
 
         sc = self.rc_scene
         tot_l = max(0.5, float(res.get("total_len", 5.0)))
@@ -5333,7 +5379,7 @@ class XpertStudioMainWindow(QMainWindow):
         hb_src["topping_thickness_cm"] = std_hs_cm
         hb_src["top_flange_cm"] = std_hs_cm
         hb_src["hs_mm"] = std_hs_cm * 10.0
-        hb_res = compute_hollow_block_parameters(hb_src, slab_thickness_cm=entered, top_flange_cm=std_hs_cm, block_height_cm=std_blk_h)
+        hb_res = compute_hollow_block_parameters(hb_src)
         hb_src.update(hb_res)
         self.current_story_data["hollow_block_slab_options"] = dict(hb_src)
         self.current_story_data["hollow_block_params"] = dict(hb_res)
@@ -5355,52 +5401,58 @@ class XpertStudioMainWindow(QMainWindow):
         return entered
 
     def apply_story_thickness(self) -> None:
-        final_cm = self._check_and_apply_slab_thickness(interactive=True)
-        self.save_and_sync_current_story()
-        self.refresh_story_ui()
-        if self.current_story_data.get("beams"):
-            self._solve_story_and_refresh_views()
-        hb_opts = self.current_story_data.get("hollow_block_slab_options", {})
-        wu_m2 = float(hb_opts.get("area_factored_qu_kn_m2", 11.71))
-        wu_rib = float(hb_opts.get("rib_factored_wu_kn_m", 6.44))
-        self.update_contextual_prompt(
-            f"Applied Slab Thickness h = {final_cm:.1f} cm ({final_cm*10:.0f} mm) -> "
-            f"Wu(rib) = {wu_rib:.2f} kN/m'/rib | Area Load Wu(m×m) = {wu_m2:.2f} kN/m²."
-        )
+        try:
+            final_cm = self._check_and_apply_slab_thickness(interactive=True)
+            self.save_and_sync_current_story()
+            self.refresh_story_ui()
+            if self.current_story_data.get("beams"):
+                self._solve_story_and_refresh_views()
+            hb_opts = self.current_story_data.get("hollow_block_slab_options", {})
+            wu_m2 = float(hb_opts.get("area_factored_qu_kn_m2", 11.71))
+            wu_rib = float(hb_opts.get("rib_factored_wu_kn_m", 6.44))
+            self.update_contextual_prompt(
+                f"Applied Slab Thickness h = {final_cm:.1f} cm ({final_cm*10:.0f} mm) -> "
+                f"Wu(rib) = {wu_rib:.2f} kN/m'/rib | Area Load Wu(m×m) = {wu_m2:.2f} kN/m²."
+            )
+        except Exception as exc:
+            _report_studio_exception(self, "Apply Slab Thickness Error", exc)
 
     def open_slab_rib_design_dialog(self, initial_slab_id: Optional[str] = None) -> None:
-        if self.is_tie_beams_story():
-            QMessageBox.information(
+        try:
+            if self.is_tie_beams_story():
+                QMessageBox.information(
+                    self,
+                    "Tie-Beams Story (مسقط السملات)",
+                    "Tie-Beams story (00_TieBeams) does not contain hollow-block slabs.",
+                )
+                return
+            slabs = self.current_story_data.get("slabs", [])
+            if not slabs:
+                QMessageBox.information(
+                    self,
+                    "Hollow-Block Slab Rib Design (تصميم الأعصاب الهوردي)",
+                    "No slabs found on the active story. Click 'Auto-Fill All Slabs' or '4A. Pick: Slab' first.",
+                )
+                return
+            if not initial_slab_id:
+                sel_slabs = [eid for kind, eid in self.cad_canvas.selected_items if kind == "slab"]
+                if sel_slabs:
+                    initial_slab_id = str(sel_slabs[0])
+            self._check_and_apply_slab_thickness(interactive=False)
+            fc = float(self.master_project["materials_and_soil"]["fc_mpa"]) if self.master_project else 20.0
+            fy = float(self.master_project["materials_and_soil"]["fy_mpa"]) if self.master_project else 350.0
+            dlg = SlabRibDesignDialog(
                 self,
-                "Tie-Beams Story (مسقط السملات)",
-                "Tie-Beams story (00_TieBeams) does not contain hollow-block slabs.",
+                story_data=self.current_story_data,
+                fc_mpa=fc,
+                fy_mpa=fy,
+                initial_slab_id=initial_slab_id,
             )
-            return
-        slabs = self.current_story_data.get("slabs", [])
-        if not slabs:
-            QMessageBox.information(
-                self,
-                "Hollow-Block Slab Rib Design (تصميم الأعصاب الهوردي)",
-                "No slabs found on the active story. Click 'Auto-Fill All Slabs' or '4A. Pick: Slab' first.",
-            )
-            return
-        if not initial_slab_id:
-            sel_slabs = [eid for kind, eid in self.cad_canvas.selected_items if kind == "slab"]
-            if sel_slabs:
-                initial_slab_id = str(sel_slabs[0])
-        self._check_and_apply_slab_thickness(interactive=False)
-        fc = float(self.master_project["materials_and_soil"]["fc_mpa"]) if self.master_project else 20.0
-        fy = float(self.master_project["materials_and_soil"]["fy_mpa"]) if self.master_project else 350.0
-        dlg = SlabRibDesignDialog(
-            self,
-            story_data=self.current_story_data,
-            fc_mpa=fc,
-            fy_mpa=fy,
-            initial_slab_id=initial_slab_id,
-        )
-        dlg.exec()
-        self.save_and_sync_current_story()
-        self.refresh_story_ui()
+            dlg.exec()
+            self.save_and_sync_current_story()
+            self.refresh_story_ui()
+        except Exception as exc:
+            _report_studio_exception(self, "Hollow-Block Slab Rib Design Error", exc)
 
     def convert_critical_beam_to_drop(self) -> None:
         fy = float(self.master_project["materials_and_soil"]["fy_mpa"]) if self.master_project else 350.0
@@ -5651,40 +5703,91 @@ class XpertStudioMainWindow(QMainWindow):
             )
             return
 
-        self._check_and_apply_slab_thickness(interactive=True)
-        self.save_and_sync_current_story()
-        self._solve_story_and_refresh_views(select_beam_id=select_beam_id)
-        col_recs = self.last_analysis_bundle.get("column_records", []) if self.last_analysis_bundle else []
-        slab_recs = self.last_analysis_bundle.get("slab_designs", []) if self.last_analysis_bundle else []
-        self.switch_workspace_mode(switch_to_tab, auto_solve=False)
-        self.update_contextual_prompt(
-            f"Analysis & Design Complete (ACI 318-19): Solved {len(slab_recs)} slab(s), {len(beams)} beam(s), and {len(col_recs)} column(s)."
-        )
+        try:
+            self._check_and_apply_slab_thickness(interactive=True)
+            self.save_and_sync_current_story()
+            self._solve_story_and_refresh_views(select_beam_id=select_beam_id)
+            col_recs = self.last_analysis_bundle.get("column_records", []) if self.last_analysis_bundle else []
+            slab_recs = self.last_analysis_bundle.get("slab_designs", {}) if self.last_analysis_bundle else {}
+            self.switch_workspace_mode(switch_to_tab, auto_solve=False)
+            self.update_contextual_prompt(
+                f"Analysis & Design Complete (ACI 318-19): Solved {len(slab_recs)} slab(s), {len(beams)} beam(s), and {len(col_recs)} column(s)."
+            )
+        except Exception as exc:
+            _report_studio_exception(self, "Structural Analysis & Design Error", exc)
 
     def switch_workspace_mode(self, mode_idx: int, auto_solve: bool = True) -> None:
-        if auto_solve and mode_idx in (1, 2, 3) and self.current_story_data.get("beams"):
-            cur_bid = self.beam_diagrams_view.cb_beam_select.currentData()
-            self._solve_story_and_refresh_views(select_beam_id=str(cur_bid) if cur_bid else None)
+        try:
+            if auto_solve and mode_idx in (1, 2, 3) and self.current_story_data.get("beams"):
+                cur_bid = self.beam_diagrams_view.cb_beam_select.currentData()
+                self._solve_story_and_refresh_views(select_beam_id=str(cur_bid) if cur_bid else None)
 
-        self.stack.setCurrentIndex(mode_idx)
-        btn = self.view_btn_group.button(mode_idx)
-        if btn:
-            btn.setChecked(True)
+            self.stack.setCurrentIndex(mode_idx)
+            btn = self.view_btn_group.button(mode_idx)
+            if btn:
+                btn.setChecked(True)
 
-        # Context-Specific Toolbars: Show 2D CAD toolbars ONLY in Workspace 0 (2D Structural Drawing)!
-        is_cad = mode_idx == 0
-        for w in (self.zoom_tb, self.modify_tb, self.dim_tb, self.draw_tb, self.ctx_frame, self.thick_frame, self.bot_frame):
-            w.setVisible(is_cad)
+            # Context-Specific Toolbars: Show 2D CAD toolbars ONLY in Workspace 0 (2D Structural Drawing)!
+            is_cad = mode_idx == 0
+            for w in (self.zoom_tb, self.modify_tb, self.dim_tb, self.draw_tb, self.ctx_frame, self.thick_frame, self.bot_frame):
+                w.setVisible(is_cad)
 
-        # Redraw active diagram after stack switch & toolbar visibility change so viewport width is 100% accurate
-        if mode_idx == 1 and self.last_analysis_bundle:
-            idx_b = self.beam_diagrams_view.cb_beam_select.currentIndex()
-            if idx_b >= 0:
-                self.beam_diagrams_view._on_beam_selected(idx_b)
-        elif mode_idx == 2 and self.last_analysis_bundle:
-            idx_rc = self.beam_design_view.cb_beam_select.currentIndex()
-            if idx_rc >= 0:
-                self.beam_design_view._on_beam_selected(idx_rc)
+            # Redraw active diagram after stack switch & toolbar visibility change settles so viewport width is 100% accurate
+            if mode_idx == 1 and self.last_analysis_bundle:
+                idx_b = self.beam_diagrams_view.cb_beam_select.currentIndex()
+                if idx_b >= 0:
+                    QTimer.singleShot(0, lambda idx=idx_b: self.beam_diagrams_view._on_beam_selected(idx))
+            elif mode_idx == 2 and self.last_analysis_bundle:
+                idx_rc = self.beam_design_view.cb_beam_select.currentIndex()
+                if idx_rc >= 0:
+                    QTimer.singleShot(0, lambda idx=idx_rc: self.beam_design_view._on_beam_selected(idx))
+        except Exception as exc:
+            _report_studio_exception(self, "Workspace Switch Error", exc)
+
+
+def _report_studio_exception(parent: Optional[QWidget], title: str, exc: BaseException) -> None:
+    tb_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    try:
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpert_studio_crash.log")
+        with open(log_path, "a", encoding="utf-8") as lf:
+            lf.write(f"\n--- [{STUDIO_VERSION}] {title} ---\n{tb_str}\n")
+    except Exception:
+        pass
+    print(tb_str, file=sys.stderr)
+    if "--check" in sys.argv:
+        raise exc
+    if QApplication.instance() is not None:
+        QMessageBox.critical(
+            parent,
+            title,
+            f"An unexpected error was intercepted safely without closing the studio:\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            f"Details logged to xpert_studio_crash.log.",
+        )
+
+
+def _install_global_excepthook() -> None:
+    def _hook(exc_type, exc_value, exc_tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        try:
+            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xpert_studio_crash.log")
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"\n--- [{STUDIO_VERSION}] Unhandled Qt Exception ---\n{tb_str}\n")
+        except Exception:
+            pass
+        print(tb_str, file=sys.stderr)
+        if QApplication.instance() is not None and "--check" not in sys.argv:
+            QMessageBox.critical(
+                None,
+                f"Xpert Studio Exception Handler ({STUDIO_VERSION})",
+                f"An unexpected error occurred and was safely caught:\n\n"
+                f"{exc_type.__name__}: {exc_value}",
+            )
+
+    sys.excepthook = _hook
 
 
 def main() -> None:
@@ -5692,6 +5795,7 @@ def main() -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
     app = QApplication(sys.argv)
+    _install_global_excepthook()
 
     if "--check" in sys.argv:
         cfg = {
