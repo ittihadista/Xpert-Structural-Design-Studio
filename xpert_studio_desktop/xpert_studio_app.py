@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.1.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.2.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -312,17 +312,24 @@ class StudioOptionsDialog(QDialog):
         self.sp_slab_t.setSuffix(" cm")
         form_hb.addRow("Total Hollow-Block Slab Thickness (h):", self.sp_slab_t)
 
+        init_h_cm = self.sp_slab_t.value()
+        init_blk_h = float(hb_cfg.get("block_height_cm", 20.0 if init_h_cm >= 25.0 else 16.0))
+        if abs(init_blk_h - 16.0) >= 0.5 and abs(init_blk_h - 20.0) >= 0.5:
+            init_blk_h = 20.0 if init_h_cm >= 25.0 else 16.0
+        init_hs_cm = max(5.0, init_h_cm - init_blk_h)
+
         self.sp_top_slab = QDoubleSpinBox()
-        self.sp_top_slab.setRange(4.0, 15.0)
-        self.sp_top_slab.setValue(float(hb_cfg.get("top_compression_slab_cm", 10.0)))
+        self.sp_top_slab.setRange(4.0, 20.0)
+        self.sp_top_slab.setValue(init_hs_cm)
         self.sp_top_slab.setSuffix(" cm")
-        form_hb.addRow("Topping Slab Thickness (hs):", self.sp_top_slab)
+        form_hb.addRow("Topping Slab Thickness (hs = h - h_block):", self.sp_top_slab)
 
         self.sp_block_h = QDoubleSpinBox()
-        self.sp_block_h.setRange(10.0, 50.0)
-        self.sp_block_h.setValue(max(10.0, self.sp_slab_t.value() - self.sp_top_slab.value()))
-        self.sp_block_h.setSuffix(" cm")
-        form_hb.addRow("Hollow Block Height (h - hs):", self.sp_block_h)
+        self.sp_block_h.setRange(16.0, 20.0)
+        self.sp_block_h.setSingleStep(4.0)
+        self.sp_block_h.setValue(init_blk_h)
+        self.sp_block_h.setSuffix(" cm (Standard: 20 or 16 cm)")
+        form_hb.addRow("Hollow Block Height (سمك البلوك القياسي 20 أو 16 سم):", self.sp_block_h)
 
         blk_row = QHBoxLayout()
         self.sp_block_w = QDoubleSpinBox()
@@ -382,7 +389,7 @@ class StudioOptionsDialog(QDialog):
         form_hb.addRow("Default 20cm Masonry Wall Load (W_wall):", self.sp_wall_w)
         vbox.addWidget(grp_hb)
 
-        for sp_w in (self.sp_slab_t, self.sp_top_slab, self.sp_block_w, self.sp_block_l, self.sp_rib_w, self.sp_finish, self.sp_live, self.sp_gamma):
+        for sp_w in (self.sp_slab_t, self.sp_block_h, self.sp_top_slab, self.sp_block_w, self.sp_block_l, self.sp_rib_w, self.sp_finish, self.sp_live, self.sp_gamma):
             sp_w.valueChanged.connect(self._recompute_hordi_loads_live)
         self._recompute_hordi_loads_live()
 
@@ -400,8 +407,10 @@ class StudioOptionsDialog(QDialog):
         self._updating_fields = True
         try:
             h_cm = self.sp_slab_t.value()
-            hs_cm = self.sp_top_slab.value()
-            self.sp_block_h.setValue(max(5.0, h_cm - hs_cm))
+            std_blk_h = 20.0 if h_cm >= 25.0 else 16.0
+            self.sp_block_h.setValue(std_blk_h)
+            hs_cm = max(5.0, h_cm - std_blk_h)
+            self.sp_top_slab.setValue(hs_cm)
             res = compute_hollow_block_parameters(
                 slab_thickness_cm=h_cm,
                 rib_width_cm=self.sp_rib_w.value(),
@@ -410,6 +419,7 @@ class StudioOptionsDialog(QDialog):
                 finish_load_kn_m2=self.sp_finish.value(),
                 live_load_kn_m2=self.sp_live.value(),
                 top_flange_cm=hs_cm,
+                block_height_cm=std_blk_h,
                 gamma_c_kn_m3=self.sp_gamma.value(),
             )
             self.sp_slab_wu.setValue(float(res["total_factored_wu_kn_m2"]))
@@ -436,11 +446,13 @@ class StudioOptionsDialog(QDialog):
             finish_load_kn_m2=self.sp_finish.value(),
             live_load_kn_m2=self.sp_live.value(),
             top_flange_cm=self.sp_top_slab.value(),
+            block_height_cm=self.sp_block_h.value(),
             gamma_c_kn_m3=self.sp_gamma.value(),
         )
         hb_data = {
             "slab_thickness_cm": round(self.sp_slab_t.value(), 1),
             "top_compression_slab_cm": round(self.sp_top_slab.value(), 1),
+            "topping_thickness_cm": round(self.sp_top_slab.value(), 1),
             "block_height_cm": round(self.sp_block_h.value(), 1),
             "block_width_cm": round(self.sp_block_w.value(), 1),
             "block_length_cm": round(self.sp_block_l.value(), 1),
@@ -3258,6 +3270,7 @@ class BeamDiagramsViewWidget(QWidget):
     ) -> None:
         sc = self.diag_view.diag_scene
         sc.clear()
+        self.diag_view.resetTransform()
 
         xs = res.get("x_full", [])
         vs = res.get("v_full", [])
@@ -3265,32 +3278,36 @@ class BeamDiagramsViewWidget(QWidget):
         if not xs:
             return
 
-        # Full-Screen Dynamic Viewport Utilization (v1.8.0 Upgrade #3):
-        vp_w = max(980.0, float(self.diag_view.viewport().width()))
-        vp_h = max(680.0, float(self.diag_view.viewport().height()))
+        # True Viewport Width Utilization (v2.2.0 Right-Edge Clipping Fix):
+        raw_vp_w = float(self.diag_view.viewport().width())
+        raw_vp_h = float(self.diag_view.viewport().height())
+        vp_w = raw_vp_w if raw_vp_w >= 420.0 else 880.0
+        vp_h = raw_vp_h if raw_vp_h >= 380.0 else 640.0
 
         tot_l = max(0.5, float(xs[-1]))
-        x0 = 68.0
-        w_px = max(840.0, vp_w - 135.0)
+        x0 = 54.0
+        right_margin_px = 92.0
+        w_px = max(340.0, vp_w - x0 - right_margin_px)
         scale_x = w_px / tot_l
+        max_x_allowed = x0 + w_px + right_margin_px - 12.0
         self.diag_view.set_curve_data(xs, vs, ms, x0, w_px, tot_l)
 
-        # Proportional vertical layout across the full viewport height (v1.9.0 Upgrade #7: SFD/BMD Title strictly above peak shear/moment labels)
-        amp_px = max(62.0, vp_h * 0.10)
-        y_title = 16.0
-        y_beam = max(130.0, vp_h * 0.185)
-        y_sfd = max(335.0, vp_h * 0.49)
-        y_sfd_title = y_sfd - amp_px - 44.0
-        y_bmd = max(540.0, vp_h * 0.78)
-        y_bmd_title = y_bmd - amp_px - 44.0
-        y_ruler = max(645.0, vp_h * 0.92)
+        # Proportional vertical layout across the full viewport height
+        amp_px = max(54.0, vp_h * 0.095)
+        y_title = 14.0
+        y_beam = max(124.0, vp_h * 0.185)
+        y_sfd = max(320.0, vp_h * 0.485)
+        y_sfd_title = y_sfd - amp_px - 42.0
+        y_bmd = max(515.0, vp_h * 0.775)
+        y_bmd_title = y_bmd - amp_px - 42.0
+        y_ruler = max(615.0, vp_h * 0.915)
 
         # Title Header: "Analysis of B1"
         kind_lbl = str(bm.get("beam_kind", "hidden")).upper()
         n_sp = int(res.get("num_spans_excluding_cantilevers", len(bm.get("spans", []))))
         title_item = sc.addText(
             f"Analysis of {bid} ({kind_lbl} {bm.get('width_m', 0.4):.2f}×{bm.get('depth_m', 0.3):.2f}m — {n_sp} Span{'s' if n_sp != 1 else ''})",
-            QFont("Arial", 14, QFont.Weight.Bold),
+            QFont("Arial", 13, QFont.Weight.Bold),
         )
         title_item.setDefaultTextColor(QColor("#0B3C5D"))
         title_item.setPos(x0, y_title)
@@ -3310,7 +3327,7 @@ class BeamDiagramsViewWidget(QWidget):
             px = x0 + rx * scale_x
             sc.addLine(px, y_beam - 62, px, y_ruler, dash_pen)
 
-        # 1. Draw Distributed Load Blocks (Olive-Green with downward arrows like 9_f807cf3a.PNG)
+        # 1. Draw Distributed Load Blocks (Olive-Green with downward arrows)
         dist_loads = [ld for ld in loads_applied if str(ld.get("type", "D")).upper() == "D" and float(ld.get("mag", 0.0)) > 0.01]
         max_w = max([float(ld.get("mag", 1.0)) for ld in dist_loads] or [1.0])
         for ld in dist_loads:
@@ -3336,7 +3353,8 @@ class BeamDiagramsViewWidget(QWidget):
 
             w_lbl = sc.addText(f"w = {mag:.1f} kN/m", QFont("Arial", 9, QFont.Weight.Bold))
             w_lbl.setDefaultTextColor(QColor("#5C6B28"))
-            w_lbl.setPos((lx1 + lx2) / 2.0 - 42, y_beam - h_load - 22)
+            wx_pos = min(max(8.0, (lx1 + lx2) / 2.0 - 42.0), max_x_allowed - 85.0)
+            w_lbl.setPos(wx_pos, y_beam - h_load - 22)
 
         # 2. Draw Transferred Point Loads (Red downward arrow + P value + distance from left support)
         pt_loads = [ld for ld in loads_applied if str(ld.get("type", "")).upper() == "P" and float(ld.get("mag", 0.0)) > 0.01]
@@ -3355,7 +3373,7 @@ class BeamDiagramsViewWidget(QWidget):
                 QFont("Arial", 8, QFont.Weight.Bold),
             )
             plbl.setDefaultTextColor(QColor("#B91C1C"))
-            plbl.setPos(px - 38, y_beam - 96)
+            plbl.setPos(min(max(6.0, px - 38.0), max_x_allowed - 85.0), y_beam - 96)
 
         # 3. Draw Thick Solid Black Beam Line
         sc.addLine(x0, y_beam, x0 + w_px, y_beam, QPen(QColor("#111827"), 5.0))
@@ -3375,7 +3393,7 @@ class BeamDiagramsViewWidget(QWidget):
             )
             slbl = sc.addText(short_code, QFont("Arial", 9, QFont.Weight.Bold))
             slbl.setDefaultTextColor(QColor("#1E293B"))
-            slbl.setPos(mx_px - 32, y_beam + 6)
+            slbl.setPos(min(max(6.0, mx_px - 32.0), max_x_allowed - 72.0), y_beam + 6)
 
         # 5. Draw Supports (Hinge for Column vs Roller for Beam) + Support Name (C1, B2...) + Green Reaction Arrows
         reactions = res.get("reactions_kn", [])
@@ -3390,14 +3408,12 @@ class BeamDiagramsViewWidget(QWidget):
                 QPointF(sx_px + 9, y_beam + 16),
             ])
             if sup_kind == "beam":
-                # ROLLER SUPPORT SYMBOL (Beam resting on Carrier Beam): Triangle + 2 Roller Wheels + Ground Line
                 sc.addPolygon(tri, QPen(QColor("#0F172A"), 1.5), QBrush(QColor("#F59E0B")))
                 sc.addEllipse(QRectF(sx_px - 7, y_beam + 16.5, 5.0, 5.0), QPen(QColor("#0F172A"), 1.3), QBrush(QColor("#FFFFFF")))
                 sc.addEllipse(QRectF(sx_px + 2, y_beam + 16.5, 5.0, 5.0), QPen(QColor("#0F172A"), 1.3), QBrush(QColor("#FFFFFF")))
                 sc.addLine(sx_px - 11, y_beam + 22.5, sx_px + 11, y_beam + 22.5, QPen(QColor("#0F172A"), 1.6))
                 sym_tag = f"{sup_id} (Roller)"
             else:
-                # HINGE / PINNED SUPPORT SYMBOL (Beam resting on Column): Triangle + Hatched Ground Plate
                 sc.addPolygon(tri, QPen(QColor("#0F172A"), 1.5), QBrush(QColor("#0284C7")))
                 sc.addLine(sx_px - 11, y_beam + 16.5, sx_px + 11, y_beam + 16.5, QPen(QColor("#0F172A"), 1.8))
                 for hx_off in range(-9, 10, 4):
@@ -3416,7 +3432,8 @@ class BeamDiagramsViewWidget(QWidget):
 
             rlbl = sc.addText(f"{sym_tag}\nR{idx_s+1} = {r_val:.2f} kN", QFont("Arial", 8, QFont.Weight.Bold))
             rlbl.setDefaultTextColor(QColor("#15803D"))
-            rlbl.setPos(sx_px - 44, y_beam + 46)
+            rx_lbl = min(max(6.0, sx_px - 44.0), max_x_allowed - 92.0)
+            rlbl.setPos(rx_lbl, y_beam + 46)
 
         # Helper to interpolate curve value at any x_m for crisp vertical drop lines
         def interp_curve(target_x: float, vals: List[float]) -> float:
@@ -3428,7 +3445,7 @@ class BeamDiagramsViewWidget(QWidget):
             return vals[best_k]
 
         # ======================================================================
-        # 6. Shear Force Diagram - SFD (kN) (Classic Steel-Blue + Vertical Drop Lines, 90° Support Jumps)
+        # 6. Shear Force Diagram - SFD (kN)
         # ======================================================================
         sfd_hdr = sc.addText("Shear Force Diagram - SFD (kN)", QFont("Arial", 10, QFont.Weight.Bold))
         sfd_hdr.setDefaultTextColor(QColor("#0F172A"))
@@ -3441,7 +3458,6 @@ class BeamDiagramsViewWidget(QWidget):
         v_pts = [QPointF(x0, y_sfd)] + [QPointF(x0 + xs[i] * scale_x, y_sfd - vs[i] * scale_v) for i in range(len(xs))] + [QPointF(x0 + w_px, y_sfd)]
         sc.addPolygon(QPolygonF(v_pts), QPen(QColor("#1D70B8"), 2.3), QBrush(QColor(29, 112, 184, 38)))
 
-        # Crisp evenly-spaced vertical drop lines inside SFD (matching 9.PNG)
         hatch_v_pen = QPen(QColor(29, 112, 184, 95), 1.0)
         n_v_lines = 64
         for k_line in range(1, n_v_lines):
@@ -3451,7 +3467,6 @@ class BeamDiagramsViewWidget(QWidget):
             hy = y_sfd - vh * scale_v
             sc.addLine(hx, y_sfd, hx, hy, hatch_v_pen)
 
-        # Annotate Left/Right Shear peaks at each support (and draw explicit 90° vertical jump line)
         for sup in sup_table:
             sx_px = x0 + float(sup["x_m"]) * scale_x
             vl = float(sup.get("v_left_kn", 0.0))
@@ -3461,15 +3476,15 @@ class BeamDiagramsViewWidget(QWidget):
                 v_txt = sc.addText(f"{vl:.1f}", QFont("Arial", 8, QFont.Weight.Bold))
                 v_txt.setDefaultTextColor(QColor("#1D70B8"))
                 vy_pos = y_sfd - vl * scale_v + (-18 if vl > 0 else 2)
-                v_txt.setPos(sx_px - 36, vy_pos)
+                v_txt.setPos(max(4.0, sx_px - 38.0), vy_pos)
             if abs(vr) > 0.5:
                 v_txt2 = sc.addText(f"{vr:.1f}", QFont("Arial", 8, QFont.Weight.Bold))
                 v_txt2.setDefaultTextColor(QColor("#1D70B8"))
                 vy_pos2 = y_sfd - vr * scale_v + (-18 if vr > 0 else 2)
-                v_txt2.setPos(sx_px + 4, vy_pos2)
+                v_txt2.setPos(min(sx_px + 4.0, max_x_allowed - 46.0), vy_pos2)
 
         # ======================================================================
-        # 7. Bending Moment Diagram - BMD (kN.m) (Classic Crimson-Red + Vertical Drop Lines, +M Downward)
+        # 7. Bending Moment Diagram - BMD (kN.m)
         # ======================================================================
         bmd_hdr = sc.addText("Bending Moment Diagram - BMD (kN.m)", QFont("Arial", 10, QFont.Weight.Bold))
         bmd_hdr.setDefaultTextColor(QColor("#0F172A"))
@@ -3490,16 +3505,14 @@ class BeamDiagramsViewWidget(QWidget):
             hy = y_bmd + mh * scale_m
             sc.addLine(hx, y_bmd, hx, hy, hatch_m_pen)
 
-        # Annotate Negative Moments at Supports
         for sup in sup_table:
             sx_px = x0 + float(sup["x_m"]) * scale_x
             m_cl = float(sup.get("m_center_knm", 0.0))
             if abs(m_cl) >= 0.05 or float(sup["x_m"]) == 0.0:
                 mlbl = sc.addText(f"{m_cl:.2f}", QFont("Arial", 8, QFont.Weight.Bold))
                 mlbl.setDefaultTextColor(QColor("#C81E1E"))
-                mlbl.setPos(sx_px - 18, y_bmd + m_cl * scale_m - 20)
+                mlbl.setPos(min(max(4.0, sx_px - 18.0), max_x_allowed - 42.0), y_bmd + m_cl * scale_m - 20)
 
-        # Annotate Positive Span Moments + Orange Ruler Ticks
         for sp_row in res.get("span_critical_table", []):
             m_pos = float(sp_row.get("m_max_pos_knm", 0.0))
             x_pos = float(sp_row.get("x_at_m_max_m", 0.0))
@@ -3507,13 +3520,12 @@ class BeamDiagramsViewWidget(QWidget):
                 px = x0 + x_pos * scale_x
                 plbl = sc.addText(f"{m_pos:.2f}", QFont("Arial", 8, QFont.Weight.Bold))
                 plbl.setDefaultTextColor(QColor("#C81E1E"))
-                plbl.setPos(px - 18, y_bmd + m_pos * scale_m + 3)
+                plbl.setPos(min(max(4.0, px - 18.0), max_x_allowed - 42.0), y_bmd + m_pos * scale_m + 3)
 
-                # Orange tick on cumulative ruler
                 sc.addLine(px, y_ruler - 8, px, y_ruler + 4, QPen(QColor("#D97706"), 2.0))
                 olbl = sc.addText(f"{x_pos:.2f}", QFont("Arial", 8, QFont.Weight.Bold))
                 olbl.setDefaultTextColor(QColor("#D97706"))
-                olbl.setPos(px - 15, y_ruler + 2)
+                olbl.setPos(min(max(4.0, px - 15.0), max_x_allowed - 38.0), y_ruler + 2)
 
         # ======================================================================
         # 8. Bottom Cumulative Ruler Ticks at Supports & Ends
@@ -3524,18 +3536,19 @@ class BeamDiagramsViewWidget(QWidget):
             sc.addLine(px, y_ruler - 8, px, y_ruler + 5, QPen(QColor("#1E3A8A"), 2.0))
             rlbl = sc.addText(f"{rx:.2f}", QFont("Arial", 8, QFont.Weight.Bold))
             rlbl.setDefaultTextColor(QColor("#1E3A8A"))
-            rlbl.setPos(px - 14, y_ruler + 14)
+            rlbl.setPos(min(max(4.0, px - 14.0), max_x_allowed - 38.0), y_ruler + 14)
 
-        sc.setSceneRect(0, 0, x0 + w_px + 95, y_ruler + 48)
+        sc.setSceneRect(0, 0, x0 + w_px + right_margin_px, y_ruler + 44)
 
 
 class BeamDesignDetailWidget(QWidget):
     """
-    Workspace 2: '3. Beam R.C. Design & Longitudinal Section' (ACI 318-19) — v1.8.0 White Engineering Sheet:
-    - Clean Light Silver-Slate top bar + Crisp White Engineering Sheet (#FFFFFF) instead of black.
-    - Dynamically utilizes 92% of the full viewport width and height.
-    - Extends physical concrete beam outline and longitudinal steel bars (with 90° standard hooks)
-      all the way to the outer faces of the end supports!
+    Workspace 2: '3. Beam R.C. Design & Longitudinal Section' (ACI 318-19) — v2.2.0:
+    - Left Pane: Exact Excel `Sheet4` Flexural Design Calculation Sheet (`5_e8049e44.PNG`) showing
+      `h, b, d, dc, db, ds, β1, No. of bars per row, ρ_min, ρ_max, ρ_act, min bars, max bars,
+      Mu,Max, Ku, ω, ρ, As, As of one bar, Nbar, As total`, and the per-station rows (`For M = ... use n Φ db`).
+    - Right Pane: Crisp White Engineering Sheet (#FFFFFF) with Longitudinal Reinforcement Elevation + Section A-A,
+      scaled strictly to the actual visible viewport width so the right end never clips!
     """
 
     def __init__(self, parent_studio: "XpertStudioMainWindow"):
@@ -3572,8 +3585,8 @@ class BeamDesignDetailWidget(QWidget):
 
         top_lay.addWidget(QLabel("Flexural Method:"))
         self.cb_design_mode = QComboBox()
-        self.cb_design_mode.addItem("Double Reinf. (with Continuous As,min)", "double")
-        self.cb_design_mode.addItem("Single Reinforcement (Singly Reinf.)", "single")
+        self.cb_design_mode.addItem("VBA Iterative Sizing (+100mm) + Double Reinf.", "double")
+        self.cb_design_mode.addItem("VBA Iterative Sizing (+100mm) + Single Reinf.", "single")
         self.cb_design_mode.setStyleSheet(
             "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
             "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; }"
@@ -3585,7 +3598,7 @@ class BeamDesignDetailWidget(QWidget):
         self.cb_bar_dia = QComboBox()
         for d_mm in [12, 14, 16, 18, 20, 22, 25, 28, 32]:
             self.cb_bar_dia.addItem(f"Φ{d_mm} mm", d_mm)
-        self.cb_bar_dia.setCurrentIndex(2)  # Default Φ16
+        self.cb_bar_dia.setCurrentIndex(1)  # Default Φ14/Φ16
         self.cb_bar_dia.setStyleSheet(
             "QComboBox { background: #FFFFFF; color: #0F172A; border: 1px solid #94A3B8; border-radius: 3px; padding: 3px 8px; font-weight: bold; } "
             "QComboBox QAbstractItemView { background: #FFFFFF; color: #0F172A; selection-background-color: #0284C7; selection-color: #FFFFFF; border: 1px solid #94A3B8; }"
@@ -3593,17 +3606,34 @@ class BeamDesignDetailWidget(QWidget):
         self.cb_bar_dia.currentIndexChanged.connect(self._on_design_params_changed)
         top_lay.addWidget(self.cb_bar_dia)
 
-        self.lbl_rc_summary = QLabel("Select a beam to view its longitudinal reinforcement & section.")
+        self.lbl_rc_summary = QLabel("Select a beam to view its Excel Sheet4 flexural calculations & longitudinal R.C. elevation.")
         self.lbl_rc_summary.setStyleSheet("color: #15803D; font-weight: bold;")
         top_lay.addWidget(self.lbl_rc_summary, 1)
         vbox.addWidget(top_bar)
 
+        self.rc_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left Pane: Excel Sheet4 Flexural Design Sheet (matching 5_e8049e44.PNG)
+        self.excel_calc_view = QTextBrowser()
+        self.excel_calc_view.setMinimumWidth(360)
+        self.excel_calc_view.setMaximumWidth(480)
+        self.excel_calc_view.setStyleSheet(
+            "QTextBrowser { background: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 4px; padding: 6px; }"
+        )
+        self.rc_splitter.addWidget(self.excel_calc_view)
+
+        # Right Pane: Longitudinal Reinforcement & Section A-A
         self.rc_scene = QGraphicsScene(self)
         self.rc_view = QGraphicsView(self.rc_scene)
         self.rc_view.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.rc_view.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
         self.rc_view.setStyleSheet("border: 1px solid #CBD5E1; background: #FFFFFF;")
-        vbox.addWidget(self.rc_view, 1)
+        self.rc_splitter.addWidget(self.rc_view)
+        self.rc_splitter.setStretchFactor(0, 0)
+        self.rc_splitter.setStretchFactor(1, 1)
+        self.rc_splitter.setSizes([410, 920])
+
+        vbox.addWidget(self.rc_splitter, 1)
 
     def _on_design_params_changed(self, _idx: int = 0) -> None:
         idx = self.cb_beam_select.currentIndex()
@@ -3653,9 +3683,147 @@ class BeamDesignDetailWidget(QWidget):
             self._on_beam_selected(target_idx)
         else:
             self.rc_scene.clear()
+            self.excel_calc_view.clear()
+
+    def _render_excel_sheet4_html(self, bid: str, bm: Dict[str, Any], des: Dict[str, Any]) -> str:
+        fc_val = float(self.studio.master_project["materials_and_soil"]["fc_mpa"]) if self.studio.master_project else 20.0
+        fy_val = float(self.studio.master_project["materials_and_soil"]["fy_mpa"]) if self.studio.master_project else 350.0
+        b_mm = int(des.get("b_mm", round(float(bm.get("width_m", 0.4)) * 1000)))
+        h_mm = int(des.get("h_mm", round(float(bm.get("depth_m", 0.3)) * 1000)))
+        init_b_mm = int(des.get("initial_b_mm", b_mm))
+        init_h_mm = int(des.get("initial_h_mm", h_mm))
+        d_mm = float(des.get("d_mm", h_mm - 38.0))
+        dc_mm = float(des.get("dc_mm", 25.0))
+        db_mm = int(des.get("main_bar_dia_mm", 14))
+        ds_mm = int(des.get("stirrup_dia_mm", 6))
+        beta1 = float(des.get("beta1", 0.85))
+        nbs = int(des.get("n_max_per_layer", 8))
+        pmin = float(des.get("rho_min", 0.004))
+        pmax = float(des.get("rho_max_single", 0.01956))
+        pact = float(des.get("rho_act", 0.004))
+        min_bars = int(des.get("min_bars_excel", des.get("n_min_cont", 4)))
+        max_bars = int(des.get("max_bars_excel", 19))
+        gov_mu_signed = float(des.get("governing_mu_signed_knm", 0.0))
+        gov_f = des.get("governing_flexure_details", des.get("neg_flexure_details", {}))
+        ku_v = float(gov_f.get("ku", 0.0))
+        w_v = float(gov_f.get("omega", 0.0))
+        rho_v = float(gov_f.get("rho", 0.0))
+        as_calc = float(gov_f.get("as_single_calc_mm2", gov_f.get("as_calc_mm2", 0.0)))
+        as_one = float(des.get("as_one_bar_mm2", 153.86))
+        n_gov = int(gov_f.get("n_total", min_bars))
+        as_tot = float(gov_f.get("as_prov_mm2", n_gov * as_one))
+        b_kind_lbl = "hidden beam" if str(bm.get("beam_kind", "hidden")).lower() == "hidden" else "drop beam"
+
+        enlarged_badge = ""
+        if b_mm > init_b_mm or h_mm > init_h_mm:
+            enlarged_badge = (
+                f"<div style='background:#FEF3C7;border:1px solid #D97706;color:#92400E;padding:4px 8px;"
+                f"margin-bottom:6px;font-size:11px;font-weight:bold;border-radius:3px;'>"
+                f"Section Auto-Sized (+100 mm step): {init_b_mm}×{init_h_mm} mm &rarr; <b>{b_mm}×{h_mm} mm</b>"
+                f"</div>"
+            )
+
+        station_rows_html = ""
+        for st in des.get("station_design_table", []):
+            station_rows_html += (
+                f"<tr>"
+                f"<td style='padding:3px 6px;border-bottom:1px solid #E2E8F0;font-weight:bold;color:#0F172A;'>"
+                f"For M = {st['mu_signed_knm']:g} ({st['station_label']}) use</td>"
+                f"<td style='padding:3px 8px;border-bottom:1px solid #E2E8F0;font-weight:bold;color:#FFFFFF;"
+                f"background:#2563EB;text-align:center;'>{st['bars_str']}</td>"
+                f"</tr>"
+            )
+
+        return f"""
+        <div style='font-family:Segoe UI,Arial,sans-serif;font-size:11.5px;color:#0F172A;'>
+          <div style='background:#0F172A;color:#FFFFFF;padding:5px 8px;font-weight:bold;font-size:12px;border-radius:3px;margin-bottom:6px;'>
+            Design of Flexure — {bid} ({b_kind_lbl.upper()})
+          </div>
+          {enlarged_badge}
+          <table width='100%' cellspacing='0' cellpadding='2' style='border-collapse:collapse;border:1px solid #94A3B8;margin-bottom:8px;'>
+            <tr style='background:#EFF6FF;'>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>h =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#3B82F6;color:#FFF;font-weight:bold;text-align:center;'>{h_mm} mm</td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>dc =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#4D7C0F;color:#FFF;font-weight:bold;text-align:center;'>{dc_mm:g} mm</td>
+            </tr>
+            <tr>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>b =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#3B82F6;color:#FFF;font-weight:bold;text-align:center;'>{b_mm} mm</td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>&beta;<sub>1</sub> =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#2563EB;color:#FFF;font-weight:bold;text-align:center;'>{beta1:.2f}</td>
+            </tr>
+            <tr style='background:#EFF6FF;'>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>Fy =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#4D7C0F;color:#FFF;font-weight:bold;text-align:center;'>{fy_val:g} MPa</td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>d =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#2563EB;color:#FFF;font-weight:bold;text-align:center;'>{d_mm:g} mm</td>
+            </tr>
+            <tr>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>Fc' =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#4D7C0F;color:#FFF;font-weight:bold;text-align:center;'>{fc_val:g} MPa</td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>No. bars/row =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#2563EB;color:#FFF;font-weight:bold;text-align:center;'>{nbs} bars</td>
+            </tr>
+            <tr style='background:#EFF6FF;'>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>d<sub>b</sub> =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#2563EB;color:#FFF;font-weight:bold;text-align:center;'>{db_mm} mm</td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>&rho;<sub>min</sub> / &rho;<sub>max</sub> =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;font-weight:bold;text-align:center;'>{pmin:.3f} / {pmax:.5f}</td>
+            </tr>
+            <tr>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>d<sub>s</sub> =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;background:#4D7C0F;color:#FFF;font-weight:bold;text-align:center;'>{ds_mm} mm</td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;'><b>min / max bars =</b></td>
+              <td style='padding:3px 6px;border:1px solid #CBD5E1;font-weight:bold;text-align:center;'>{min_bars} / {max_bars}</td>
+            </tr>
+          </table>
+
+          <table width='100%' cellspacing='0' cellpadding='3' style='border-collapse:collapse;border:1px solid #94A3B8;margin-bottom:8px;'>
+            <tr style='background:#F0FDF4;'>
+              <td style='border:1px solid #CBD5E1;'><b>M<sub>u,Max</sub> =</b></td>
+              <td style='border:1px solid #CBD5E1;font-weight:bold;color:#15803D;'>{gov_mu_signed:g} kN.m</td>
+              <td style='border:1px solid #CBD5E1;'><b>&rho;<sub>act</sub> =</b></td>
+              <td style='border:1px solid #CBD5E1;font-weight:bold;'>{pact:.5f}</td>
+            </tr>
+            <tr>
+              <td colspan='3' style='border:1px solid #CBD5E1;'><b>K<sub>u</sub></b> = (M<sub>u</sub>&times;10<sup>6</sup>)/(0.9&times;b&times;F<sub>c</sub>'&times;d<sup>2</sup>) =</td>
+              <td style='border:1px solid #CBD5E1;font-weight:bold;'>{ku_v:.5f}</td>
+            </tr>
+            <tr style='background:#F8FAFC;'>
+              <td colspan='3' style='border:1px solid #CBD5E1;'><b>&omega;</b> = (1 &minus; &radic;(1 &minus; 2.36&times;K<sub>u</sub>)) / 1.18 =</td>
+              <td style='border:1px solid #CBD5E1;font-weight:bold;'>{w_v:.5f}</td>
+            </tr>
+            <tr>
+              <td colspan='3' style='border:1px solid #CBD5E1;'><b>&rho;</b> = &omega; &times; (F<sub>c</sub>' / F<sub>y</sub>) =</td>
+              <td style='border:1px solid #CBD5E1;font-weight:bold;'>{rho_v:.4f}</td>
+            </tr>
+            <tr style='background:#F8FAFC;'>
+              <td style='border:1px solid #CBD5E1;'><b>A<sub>s</sub> = &rho;(b&times;d)</b></td>
+              <td style='border:1px solid #CBD5E1;font-weight:bold;'>{as_calc:.2f} mm&sup2;</td>
+              <td style='border:1px solid #CBD5E1;'><b>A<sub>s,1bar</sub> =</b></td>
+              <td style='border:1px solid #CBD5E1;font-weight:bold;'>{as_one:.2f} mm&sup2;</td>
+            </tr>
+            <tr style='background:#EFF6FF;'>
+              <td style='border:1px solid #CBD5E1;'><b>N<sub>bar</sub> =</b></td>
+              <td style='border:1px solid #CBD5E1;background:#2563EB;color:#FFF;font-weight:bold;text-align:center;'>{n_gov} &Phi; {db_mm}</td>
+              <td style='border:1px solid #CBD5E1;'><b>A<sub>s,total</sub> =</b></td>
+              <td style='border:1px solid #CBD5E1;background:#2563EB;color:#FFF;font-weight:bold;text-align:center;'>{as_tot:.1f} mm&sup2;</td>
+            </tr>
+          </table>
+
+          <div style='background:#F1F5F9;padding:4px 6px;font-weight:bold;border:1px solid #CBD5E1;margin-bottom:2px;'>
+            Station-by-Station Reinforcement Schedule:
+          </div>
+          <table width='100%' cellspacing='0' cellpadding='2' style='border-collapse:collapse;border:1px solid #CBD5E1;'>
+            {station_rows_html}
+          </table>
+        </div>
+        """
 
     def _on_beam_selected(self, idx: int) -> None:
         self.rc_scene.clear()
+        self.rc_view.resetTransform()
         if idx < 0 or not self.studio.last_analysis_bundle:
             return
         bid = str(self.cb_beam_select.itemData(idx))
@@ -3678,68 +3846,74 @@ class BeamDesignDetailWidget(QWidget):
             self.cb_bar_dia.setCurrentIndex(dia_idx)
         self.cb_bar_dia.blockSignals(False)
 
+        # Update dropdown item text in case iterative section sizing widened/deepened this beam
+        n_sp = int(des.get("num_spans", len(bm.get("spans", []))))
+        self.cb_beam_select.setItemText(
+            idx,
+            f"{bid} ({bm.get('beam_kind', 'hidden').upper()} {bm.get('width_m', 0.4):.2f}×{bm.get('depth_m', 0.3):.2f}m — {n_sp} Spans)",
+        )
+
+        # Render Excel Sheet4 Calculation Panel on the left
+        self.excel_calc_view.setHtml(self._render_excel_sheet4_html(bid, bm, des))
+
         as_pos = des.get("as_pos_req_mm2", des.get("as_pos_req", 0.0))
         as_neg = des.get("as_neg_req_mm2", des.get("as_neg_req", 0.0))
-        cont_bars = des.get("continuous_min_bars", "2 Φ 16")
-        st_txt = des.get("status", "OK (ACI 318-19)")
+        cont_bars = des.get("continuous_min_bars", "4 Φ 14")
         self.lbl_rc_summary.setText(
-            f"Beam {bid} [{cur_mode.upper()}]: Cont. As,min = {cont_bars} ({des.get('as_min_mm2', 0.0):.0f} mm²) | "
-            f"Bot = {des.get('bottom_bars')} ({as_pos} mm²) | "
-            f"Top = {des.get('top_bars')} ({as_neg} mm²) | "
-            f"Stirrups = {des.get('stirrups')} [{st_txt}]"
+            f"Beam {bid} ({des.get('b_mm', 400)}×{des.get('h_mm', 300)} mm, d={des.get('d_mm', 252):g} mm, n_max/row={des.get('n_max_per_layer', 8)}): "
+            f"Min Bars = {cont_bars} | Bot = {des.get('bottom_bars')} ({as_pos:.1f} mm²) | "
+            f"Top = {des.get('top_bars')} ({as_neg:.1f} mm²) | Stirrups = {des.get('stirrups')}"
         )
 
         sc = self.rc_scene
         tot_l = max(0.5, float(res.get("total_len", 5.0)))
 
-        # Full-Viewport Dynamic Scaling (v1.8.0 Upgrade #4):
-        vp_w = max(1080.0, float(self.rc_view.viewport().width()))
-        vp_h = max(620.0, float(self.rc_view.viewport().height()))
+        # True Right-Pane Viewport Width Utilization (v2.2.0 Right-Edge Clipping Fix):
+        raw_vp_w = float(self.rc_view.viewport().width())
+        raw_vp_h = float(self.rc_view.viewport().height())
+        vp_w = raw_vp_w if raw_vp_w >= 420.0 else 860.0
+        vp_h = raw_vp_h if raw_vp_h >= 380.0 else 600.0
 
         b_m = float(bm.get("width_m", 0.40))
         h_m = float(bm.get("depth_m", 0.30))
-        sec_w = max(125.0, b_m * 310.0)
-        sec_h = max(115.0, h_m * 310.0)
+        sec_w = max(115.0, min(195.0, b_m * 260.0))
+        sec_h = max(110.0, min(210.0, h_m * 260.0))
 
-        x0 = 95.0
-        w_px = max(720.0, vp_w - sec_w - 250.0)
+        x0 = 62.0
+        w_px = max(320.0, vp_w - sec_w - 205.0)
         scale_x = w_px / tot_l
-        y_top = max(155.0, vp_h * 0.27)
-        h_px = max(125.0, min(210.0, vp_h * 0.25))
+        y_top = max(145.0, vp_h * 0.26)
+        h_px = max(115.0, min(195.0, vp_h * 0.24))
         y_bot = y_top + h_px
 
         hdr = sc.addText(
             f"Longitudinal Reinforcement & Stirrup Elevation — Beam {bid} ({bm.get('beam_kind', 'hidden').upper()} {b_m:.2f}×{h_m:.2f}m | Cont. As,min = {cont_bars} Top & Bot)",
-            QFont("Arial", 12, QFont.Weight.Bold),
+            QFont("Arial", 11, QFont.Weight.Bold),
         )
         hdr.setDefaultTextColor(QColor("#0B3C5D"))
-        hdr.setPos(x0 - 20, 22)
+        hdr.setPos(x0 - 16, 18)
 
         sup_table = res.get("support_critical_table", [])
         c_left = float(bm.get("cantilever_left_m", 0.0))
         c_right = float(bm.get("cantilever_right_m", 0.0))
 
-        # Upgrade #8: Extend Physical Beam Outline & Reinforcement to Outer Support Faces!
         ext_left_m = (float(sup_table[0].get("width_m", 0.20)) / 2.0) if (sup_table and c_left <= 1e-3) else 0.0
         ext_right_m = (float(sup_table[-1].get("width_m", 0.20)) / 2.0) if (sup_table and c_right <= 1e-3) else 0.0
         x_beam_left = x0 - ext_left_m * scale_x
         x_beam_right = x0 + (tot_l + ext_right_m) * scale_x
         w_beam_phys_px = x_beam_right - x_beam_left
 
-        # Draw Concrete Beam Body Outline (Extending from Outer Left Support Face to Outer Right Support Face)
         beam_rect = QRectF(x_beam_left, y_top, w_beam_phys_px, h_px)
         sc.addRect(beam_rect, QPen(QColor("#1E293B"), 2.4), QBrush(QColor(241, 245, 249, 235)))
 
-        # Draw Supports with True Cross-Section Dimensions (Column Shaft vs Carrier Beam Cross-Section)
         for sup in sup_table:
             sx_px = x0 + float(sup["x_m"]) * scale_x
             sup_w_m = float(sup.get("width_m", 0.30))
             sup_d_m = float(sup.get("depth_m", 0.30))
             sup_kind = str(sup.get("support_kind", "column")).lower()
             sup_id = str(sup.get("target_id", "Sup"))
-            col_w_px = max(22.0, sup_w_m * scale_x)
+            col_w_px = max(20.0, sup_w_m * scale_x)
             if sup_kind == "beam":
-                # Supporting Carrier Beam cross-section block (h_carrier >= h_supported enforced!)
                 bm_h_px = max(h_px, (sup_d_m / max(0.20, h_m)) * h_px)
                 crect_bm = QRectF(sx_px - col_w_px / 2.0, y_top, col_w_px, bm_h_px)
                 sc.addRect(crect_bm, QPen(QColor("#D97706"), 2.2, Qt.PenStyle.DashLine), QBrush(QColor(245, 158, 11, 55)))
@@ -3750,27 +3924,24 @@ class BeamDesignDetailWidget(QWidget):
                     QFont("Arial", 8, QFont.Weight.Bold),
                 )
                 clbl.setDefaultTextColor(QColor("#B45309"))
-                clbl.setPos(sx_px - 52, y_top + bm_h_px + 52)
+                clbl.setPos(sx_px - 48, y_top + bm_h_px + 48)
             else:
-                # Column Support shaft below the beam (aligned flush with outer beam face)
-                crect_bot = QRectF(sx_px - col_w_px / 2.0, y_bot, col_w_px, 85.0)
+                crect_bot = QRectF(sx_px - col_w_px / 2.0, y_bot, col_w_px, 80.0)
                 sc.addRect(crect_bot, QPen(QColor("#DC2626"), 2.0), QBrush(QColor(239, 68, 68, 40)))
                 clbl = sc.addText(
                     f"Col {sup_id} [Hinge]\n(w={sup_w_m:.2f}m @ {sup['x_m']:.2f}m)",
                     QFont("Arial", 8, QFont.Weight.Bold),
                 )
                 clbl.setDefaultTextColor(QColor("#991B1B"))
-                clbl.setPos(sx_px - 44, y_bot + 90)
-            sc.addLine(sx_px, y_top - 48, sx_px, y_bot + 95, QPen(QColor("#94A3B8"), 1.1, Qt.PenStyle.DashDotLine))
+                clbl.setPos(sx_px - 42, y_bot + 84)
+            sc.addLine(sx_px, y_top - 44, sx_px, y_bot + 90, QPen(QColor("#94A3B8"), 1.1, Qt.PenStyle.DashDotLine))
 
-        # Draw Stirrup Vertical Lines inside Physical Beam
         stir_pen = QPen(QColor("#059669"), 1.2)
-        n_stirs = 56
+        n_stirs = 48
         for i_s in range(1, n_stirs):
             sx = x_beam_left + (w_beam_phys_px * i_s / n_stirs)
             sc.addLine(sx, y_top + 12, sx, y_bot - 12, stir_pen)
 
-        # Draw Continuous Bottom & Top As,min Steel Bars (Full Length from Start to End with 90° End Hooks)
         cover_px = 10.0
         bar_x1 = x_beam_left + cover_px
         bar_x2 = x_beam_right - cover_px
@@ -3779,23 +3950,20 @@ class BeamDesignDetailWidget(QWidget):
 
         bot_pen = QPen(QColor("#0284C7"), 3.4)
         sc.addLine(bar_x1, bot_bar_y, bar_x2, bot_bar_y, bot_pen)
-        # 90° standard upward anchorage hooks at ends of bottom bars
         sc.addLine(bar_x1, bot_bar_y, bar_x1, bot_bar_y - h_px * 0.48, bot_pen)
         sc.addLine(bar_x2, bot_bar_y, bar_x2, bot_bar_y - h_px * 0.48, bot_pen)
 
         top_pen = QPen(QColor("#D97706"), 2.8, Qt.PenStyle.DashLine)
         sc.addLine(bar_x1, top_bar_y, bar_x2, top_bar_y, top_pen)
-        # 90° standard downward anchorage hooks at ends of top bars
         sc.addLine(bar_x1, top_bar_y, bar_x1, top_bar_y + h_px * 0.48, QPen(QColor("#EA580C"), 3.0))
         sc.addLine(bar_x2, top_bar_y, bar_x2, top_bar_y + h_px * 0.48, QPen(QColor("#EA580C"), 3.0))
 
-        # Per-Span Bottom Reinforcement (Continuous As,min + Additional Bars) & Stirrup Callouts
         span_designs = des.get("span_designs", [])
         segs = get_beam_span_segments(bm)
         for i_sp, seg in enumerate(segs):
             mx_px = x0 + ((seg["start_m"] + seg["end_m"]) / 2.0) * scale_x
             sp_des = span_designs[min(i_sp, len(span_designs) - 1)] if span_designs else {}
-            bot_txt = sp_des.get("bottom_bars", des.get("bottom_bars", "4 Φ 16"))
+            bot_txt = sp_des.get("bottom_bars", des.get("bottom_bars", "4 Φ 14"))
             bot_add = sp_des.get("bottom_additional_bars", "None")
             stir_txt = sp_des.get("stirrups", des.get("stirrups", "Φ8 @ 150 mm"))
             add_line = f" (Cont. {cont_bars} + Add. {bot_add})" if bot_add != "None" else f" (Cont. {cont_bars})"
@@ -3805,20 +3973,19 @@ class BeamDesignDetailWidget(QWidget):
                 QFont("Arial", 8, QFont.Weight.Bold),
             )
             blbl.setDefaultTextColor(QColor("#0369A1"))
-            blbl.setPos(mx_px - 74, y_bot + 8)
+            blbl.setPos(mx_px - 68, y_bot + 6)
 
-        # Per-Support Top Reinforcement Callouts (Continuous As,min + Additional Top Bars)
         sup_designs = des.get("support_designs", [])
         for i_s, sup in enumerate(sup_table):
             sx_px = x0 + float(sup["x_m"]) * scale_x
             s_des = sup_designs[i_s] if i_s < len(sup_designs) else {}
-            top_txt = s_des.get("top_bars", des.get("top_bars", "4 Φ 16"))
+            top_txt = s_des.get("top_bars", des.get("top_bars", "4 Φ 14"))
             top_add = s_des.get("top_additional_bars", "None")
             top_add_str = f" [+{top_add} Add.]" if top_add != "None" else ""
             sc.addLine(
-                max(bar_x1, sx_px - 65),
+                max(bar_x1, sx_px - 55),
                 top_bar_y + 4,
-                min(bar_x2, sx_px + 65),
+                min(bar_x2, sx_px + 55),
                 top_bar_y + 4,
                 QPen(QColor("#DC2626"), 3.8),
             )
@@ -3827,47 +3994,56 @@ class BeamDesignDetailWidget(QWidget):
                 QFont("Arial", 8, QFont.Weight.Bold),
             )
             tlbl.setDefaultTextColor(QColor("#B91C1C"))
-            tlbl.setPos(sx_px - 54, y_top - 68)
+            tlbl.setPos(sx_px - 50, y_top - 64)
 
         # Draw Cross-Section A-A on the Right Side
-        sec_x = x_beam_right + 55.0
+        sec_x = x_beam_right + 38.0
         sec_y = y_top
 
         sec_hdr = sc.addText(f"Section A-A ({b_m:.2f} × {h_m:.2f} m)", QFont("Arial", 10, QFont.Weight.Bold))
         sec_hdr.setDefaultTextColor(QColor("#0F172A"))
-        sec_hdr.setPos(sec_x, sec_y - 32)
+        sec_hdr.setPos(sec_x, sec_y - 30)
 
         sc.addRect(QRectF(sec_x, sec_y, sec_w, sec_h), QPen(QColor("#0F172A"), 2.4), QBrush(QColor("#F1F5F9")))
         sc.addRect(
-            QRectF(sec_x + 14, sec_y + 14, sec_w - 28, sec_h - 28),
+            QRectF(sec_x + 12, sec_y + 12, sec_w - 24, sec_h - 24),
             QPen(QColor("#059669"), 2.0),
             QBrush(Qt.BrushStyle.NoBrush),
         )
-        # Draw top and bottom rebar circles inside Section A-A
-        n_top_draw = max(2, min(6, int(des.get("n_bars_neg_total", 4))))
-        n_bot_draw = max(2, min(6, int(des.get("n_bars_pos_total", 4))))
-        for i_bar in range(n_top_draw):
-            bx = sec_x + 22 + (sec_w - 44) * (i_bar / max(1.0, float(n_top_draw - 1)))
-            sc.addEllipse(QRectF(bx - 5, sec_y + 17, 10, 10), QPen(QColor("#991B1B"), 1.2), QBrush(QColor("#DC2626")))
-        for i_bar in range(n_bot_draw):
-            bx = sec_x + 22 + (sec_w - 44) * (i_bar / max(1.0, float(n_bot_draw - 1)))
-            sc.addEllipse(QRectF(bx - 5, sec_y + sec_h - 27, 10, 10), QPen(QColor("#0369A1"), 1.2), QBrush(QColor("#0284C7")))
+        # Draw top and bottom rebar circles inside Section A-A (supporting multi-layer rows for Drop Beams)
+        nbs_max = max(2, int(des.get("n_max_per_layer", 6)))
+        n_top_tot = max(2, int(des.get("n_bars_neg_total", 4)))
+        n_bot_tot = max(2, int(des.get("n_bars_pos_total", 4)))
 
-        pos_f = des.get("pos_flexure_details", {})
+        def draw_rebar_rows(n_tot: int, is_top: bool) -> None:
+            rem = n_tot
+            r_idx = 0
+            while rem > 0 and r_idx < 3:
+                n_row = min(rem, nbs_max)
+                ry = (sec_y + 16 + r_idx * 14) if is_top else (sec_y + sec_h - 24 - r_idx * 14)
+                for i_b in range(n_row):
+                    bx = sec_x + 18 + (sec_w - 36) * (i_b / max(1.0, float(n_row - 1))) if n_row > 1 else (sec_x + sec_w / 2.0)
+                    pen_c = QColor("#991B1B") if is_top else QColor("#0369A1")
+                    br_c = QColor("#DC2626") if is_top else QColor("#0284C7")
+                    sc.addEllipse(QRectF(bx - 4.5, ry, 9.0, 9.0), QPen(pen_c, 1.1), QBrush(br_c))
+                rem -= n_row
+                r_idx += 1
+
+        draw_rebar_rows(n_top_tot, is_top=True)
+        draw_rebar_rows(n_bot_tot, is_top=False)
+
         sec_info = sc.addText(
-            f"Top: {des.get('top_bars')}\n"
-            f"  (Cont. {cont_bars} + Add. {des.get('top_additional_bars', 'None')})\n"
-            f"Bot: {des.get('bottom_bars')}\n"
-            f"  (Cont. {cont_bars} + Add. {des.get('bottom_additional_bars', 'None')})\n"
-            f"Max Bars/Layer (n_max): {des.get('n_max_per_layer', 4)}\n"
-            f"Stir: {des.get('stirrups')} ({des.get('shear_zone', '')})\n"
-            f"C = {pos_f.get('C_mm', 0.0):.1f} mm | fs' = {pos_f.get('fs_prime_mpa', 0.0):.1f} MPa",
+            f"b = {des.get('b_mm', 400)} mm | h = {des.get('h_mm', 300)} mm\n"
+            f"d = {des.get('d_mm', 252):g} mm | dc = {des.get('dc_mm', 25):g} mm\n"
+            f"Top: {des.get('top_bars')} (Max {nbs_max}/row)\n"
+            f"Bot: {des.get('bottom_bars')} (Min {cont_bars})\n"
+            f"Stir: {des.get('stirrups')}",
             QFont("Arial", 8, QFont.Weight.Bold),
         )
         sec_info.setDefaultTextColor(QColor("#0F172A"))
-        sec_info.setPos(sec_x, sec_y + sec_h + 10)
+        sec_info.setPos(sec_x, sec_y + sec_h + 8)
 
-        sc.setSceneRect(0, 0, sec_x + sec_w + 65, max(vp_h - 20.0, y_bot + 165.0))
+        sc.setSceneRect(0, 0, sec_x + sec_w + 36, max(vp_h - 16.0, y_bot + 145.0))
 
 
 class SchedulesAndReportsWidget(QWidget):
@@ -5147,9 +5323,17 @@ class XpertStudioMainWindow(QMainWindow):
             hb_src.update(self.current_story_data["hollow_block"])
         if isinstance(self.current_story_data.get("hollow_block_slab_options"), dict):
             hb_src.update(self.current_story_data["hollow_block_slab_options"])
+        std_blk_h = 20.0 if entered >= 25.0 else 16.0
+        std_hs_cm = max(5.0, entered - std_blk_h)
         hb_src["total_slab_thickness_cm"] = entered
+        hb_src["slab_thickness_cm"] = entered
         hb_src["h_mm"] = entered * 10.0
-        hb_res = compute_hollow_block_parameters(hb_src)
+        hb_src["block_height_cm"] = std_blk_h
+        hb_src["top_compression_slab_cm"] = std_hs_cm
+        hb_src["topping_thickness_cm"] = std_hs_cm
+        hb_src["top_flange_cm"] = std_hs_cm
+        hb_src["hs_mm"] = std_hs_cm * 10.0
+        hb_res = compute_hollow_block_parameters(hb_src, slab_thickness_cm=entered, top_flange_cm=std_hs_cm, block_height_cm=std_blk_h)
         hb_src.update(hb_res)
         self.current_story_data["hollow_block_slab_options"] = dict(hb_src)
         self.current_story_data["hollow_block_params"] = dict(hb_res)
@@ -5159,6 +5343,8 @@ class XpertStudioMainWindow(QMainWindow):
             ld_def = self.master_project.setdefault("loads_and_defaults", {})
             ld_def["slab_factored_wu_kpa"] = float(hb_res["area_factored_qu_kn_m2"])
             ld_def["wu_rib_kn_m"] = float(hb_res["rib_factored_wu_kn_m"])
+            ld_def["block_height_cm"] = std_blk_h
+            ld_def["top_compression_slab_cm"] = std_hs_cm
         assump = self.current_story_data.setdefault("beam_load_assumptions", {})
         assump["slab_qu_kn_m2"] = float(hb_res["area_factored_qu_kn_m2"])
         self.current_story_data["slab_factored_wu_kpa"] = float(hb_res["area_factored_qu_kn_m2"])
@@ -5489,6 +5675,16 @@ class XpertStudioMainWindow(QMainWindow):
         is_cad = mode_idx == 0
         for w in (self.zoom_tb, self.modify_tb, self.dim_tb, self.draw_tb, self.ctx_frame, self.thick_frame, self.bot_frame):
             w.setVisible(is_cad)
+
+        # Redraw active diagram after stack switch & toolbar visibility change so viewport width is 100% accurate
+        if mode_idx == 1 and self.last_analysis_bundle:
+            idx_b = self.beam_diagrams_view.cb_beam_select.currentIndex()
+            if idx_b >= 0:
+                self.beam_diagrams_view._on_beam_selected(idx_b)
+        elif mode_idx == 2 and self.last_analysis_bundle:
+            idx_rc = self.beam_design_view.cb_beam_select.currentIndex()
+            if idx_rc >= 0:
+                self.beam_design_view._on_beam_selected(idx_rc)
 
 
 def main() -> None:

@@ -706,9 +706,20 @@ def design_hollow_block_slab_rib(
     """
     hb_cfg = story_data.get("hollow_block", {})
     h_cm = float(story_data.get("adopted_slab_thickness_cm", hb_cfg.get("total_thickness_cm", 30.0)))
-    hs_cm = float(hb_cfg.get("topping_thickness_cm", 10.0))
-    if h_cm < hs_cm + 5.0:
-        h_cm = max(15.0, hs_cm + 5.0)
+    raw_block_h_cm = hb_cfg.get("block_height_cm", None)
+    if raw_block_h_cm is not None and abs(float(raw_block_h_cm) - 16.0) < 0.5:
+        block_h_cm = 16.0
+    elif raw_block_h_cm is not None and abs(float(raw_block_h_cm) - 20.0) < 0.5:
+        block_h_cm = 20.0
+    else:
+        block_h_cm = 20.0 if h_cm >= 25.0 else 16.0
+
+    if h_cm < block_h_cm + 5.0:
+        if h_cm >= 21.0:
+            block_h_cm = 16.0
+        else:
+            h_cm = block_h_cm + 5.0
+    hs_cm = round(max(5.0, h_cm - block_h_cm), 2)
 
     h_mm = round(h_cm * 10.0, 1)
     hs_mm = round(hs_cm * 10.0, 1)
@@ -801,7 +812,7 @@ def design_hollow_block_slab_rib(
     as_req_mm2 = round(max(as_calc_mm2, as_min_mm2), 2)
     governs_min = (as_calc_mm2 < as_min_mm2)
 
-    # Bar Area per Excel: 3.14 * db² / 4
+    # Bar Area per Excel: pi * db² / 4 (gives Nbar = 1.76 for As=199.58, db=12)
     area_one_bar_mm2 = round(math.pi * (db_mm ** 2) / 4.0, 2)
     n_bar_exact = round(as_req_mm2 / max(1.0, area_one_bar_mm2), 2)
     n_bars_adopted = max(2, int(math.ceil(n_bar_exact - 1e-6)))
@@ -917,9 +928,22 @@ def analyze_all_story_beams_and_columns(
     story_h = float(story_data.get("height_m", 3.0))
 
     # Synchronize Hollow-Block (Hordi) parameters from story's adopted_slab_thickness_cm (default 30.0 cm)
+    # using fixed commercial block height (20 cm for h >= 25 cm, 16 cm for h < 25 cm) and hs = h - block_h
     adopted_t_cm = float(story_data.get("adopted_slab_thickness_cm", 30.0))
     hb_prev = story_data.get("hollow_block", {})
-    hs_cm = float(hb_prev.get("topping_thickness_cm", 10.0))
+    raw_blk_h = hb_prev.get("block_height_cm", None)
+    if raw_blk_h is not None and abs(float(raw_blk_h) - 16.0) < 0.5:
+        block_h_cm = 16.0
+    elif raw_blk_h is not None and abs(float(raw_blk_h) - 20.0) < 0.5:
+        block_h_cm = 20.0
+    else:
+        block_h_cm = 20.0 if adopted_t_cm >= 25.0 else 16.0
+    if adopted_t_cm < block_h_cm + 5.0:
+        if adopted_t_cm >= 21.0:
+            block_h_cm = 16.0
+        else:
+            adopted_t_cm = block_h_cm + 5.0
+    hs_cm = round(max(5.0, adopted_t_cm - block_h_cm), 2)
     bw_cm = float(hb_prev.get("rib_width_cm", 15.0))
     bw_top_cm = float(hb_prev.get("rib_width_top_cm", bw_cm))
     s_cm = float(hb_prev.get("block_width_cm", 40.0))
@@ -930,7 +954,6 @@ def analyze_all_story_beams_and_columns(
     n_blk = int(hb_prev.get("blocks_per_m", 4))
 
     b_m_pitch = (s_cm + bw_top_cm) / 100.0
-    block_h_cm = max(5.0, adopted_t_cm - hs_cm)
     dl_rib = (
         (hs_cm / 100.0) * b_m_pitch * gamma_c
         + ((bw_cm + bw_top_cm) / 200.0) * (block_h_cm / 100.0) * gamma_c
@@ -1122,228 +1145,330 @@ def analyze_all_story_beams_and_columns(
             segs = next_segs
         return segs
 
-    # Now compute piecewise distributed loads (Beam O.W + Exact Sub-Interval Slab Loads + Wall Loads)
+    # Helper to find how much the slab rib length L_rib decreases due to beam width growth ΔB at both ends of the rib
+    def get_slab_rib_delta_b_reduction_m(slb_obj: Dict[str, Any], smin_x: float, smax_x: float, smin_y: float, smax_y: float, rib_dir: int) -> Tuple[float, List[str]]:
+        """
+        Computes ΔL_rib = sum(ΔB_support / 2) at the two ends of the slab along the rib direction.
+        When a supporting Hidden Beam widens by ΔB = B_sized - B_initial, half of ΔB intrudes into the slab panel,
+        reducing the clear/effective rib length L_rib and thus reducing the load transferred from the slab to the beam!
+        """
+        total_reduction_m = 0.0
+        notes: List[str] = []
+        if rib_dir == 90:
+            # Ribs run along Y from smin_y (South support) to smax_y (North support)
+            for edge_y, edge_lbl in ((smin_y, "S"), (smax_y, "N")):
+                best_db = 0.0
+                best_bid = ""
+                for bm_cand in beam_map.values():
+                    csx, csy = float(bm_cand.get("start_x", 0.0)), float(bm_cand.get("start_y", 0.0))
+                    cex, cey = float(bm_cand.get("end_x", 0.0)), float(bm_cand.get("end_y", 0.0))
+                    if abs(cex - csx) >= abs(cey - csy):  # horizontal beam
+                        if abs(csy - edge_y) <= 0.55:
+                            ov = min(smax_x, max(csx, cex)) - max(smin_x, min(csx, cex))
+                            if ov >= 0.40:
+                                b_init = float(bm_cand.get("initial_width_m", 0.40 if bm_cand.get("beam_kind") == "hidden" else 0.20))
+                                b_curr = float(bm_cand.get("width_m", b_init))
+                                db_val = max(0.0, b_curr - b_init)
+                                if db_val > best_db:
+                                    best_db = db_val
+                                    best_bid = bm_cand["id"]
+                if best_db > 1e-4:
+                    total_reduction_m += 0.5 * best_db
+                    notes.append(f"-{0.5 * best_db:.2f}m({best_bid})")
+        else:
+            # Ribs run along X from smin_x (West support) to smax_x (East support)
+            for edge_x, edge_lbl in ((smin_x, "W"), (smax_x, "E")):
+                best_db = 0.0
+                best_bid = ""
+                for bm_cand in beam_map.values():
+                    csx, csy = float(bm_cand.get("start_x", 0.0)), float(bm_cand.get("start_y", 0.0))
+                    cex, cey = float(bm_cand.get("end_x", 0.0)), float(bm_cand.get("end_y", 0.0))
+                    if abs(cey - csy) > abs(cex - csx):  # vertical beam
+                        if abs(csx - edge_x) <= 0.55:
+                            ov = min(smax_y, max(csy, cey)) - max(smin_y, min(csy, cey))
+                            if ov >= 0.40:
+                                b_init = float(bm_cand.get("initial_width_m", 0.40 if bm_cand.get("beam_kind") == "hidden" else 0.20))
+                                b_curr = float(bm_cand.get("width_m", b_init))
+                                db_val = max(0.0, b_curr - b_init)
+                                if db_val > best_db:
+                                    best_db = db_val
+                                    best_bid = bm_cand["id"]
+                if best_db > 1e-4:
+                    total_reduction_m += 0.5 * best_db
+                    notes.append(f"-{0.5 * best_db:.2f}m({best_bid})")
+        return round(total_reduction_m, 4), notes
+
+    # Record initial baseline beam dimensions before iterative sizing:
+    # Hidden beam minimum width = 0.40m (or story hb_cfg min_b_hidden), depth = slab thickness
+    # Drop beam width = wall thickness (0.20m), minimum depth = 0.40m
+    hb_cfg = story_data.get("hollow_block", {})
+    min_b_hidden_m = max(0.30, float(hb_cfg.get("min_b_hidden_mm", 400.0)) / 1000.0)
+    min_h_drop_m = max(0.30, float(hb_cfg.get("min_h_drop_mm", 400.0)) / 1000.0)
+    slab_h_m = max(0.15, float(story_data.get("adopted_slab_thickness_cm", 30.0)) / 100.0)
+    wall_b_m = max(0.15, default_t_wall_cm / 100.0)
+
     for idx_b, b in enumerate(beams):
         bid = b["id"]
         b_copy = beam_map[bid]
-        raw_spans = b_copy["spans"]
-        c_left = max(0.0, float(b_copy.get("cantilever_left_m", 0.0)))
-        c_right = max(0.0, float(b_copy.get("cantilever_right_m", 0.0)))
-
-        bsx, bsy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
-        bex, bey = float(b_copy.get("end_x", 0.0)), float(b_copy.get("end_y", 0.0))
-        b_horiz = abs(bex - bsx) >= abs(bey - bsy)
-        b_w = float(b_copy.get("width_m", 0.40))
-        b_h = float(b_copy.get("depth_m", 0.30))
-
-        # Beam Self-Weight (always applied on all beams): O.W = b * h * 24.0 * 1.4
-        w_sw = round(b_w * b_h * 24.0 * 1.4, 2)
-        sw_eq_str = f"O.W = {b_w:.2f} × {b_h:.2f} × 24 × 1.4 = {w_sw:.2f} kN/m"
-        sup1_world = get_beam_first_support_world_coord(b_copy)
-
-        if b_copy.get("manual_loads_override") and b_copy.get("loads"):
-            b_copy["loads"] = [dict(ld) for ld in b_copy["loads"] if not ld.get("is_transferred_reaction")]
+        b_kind = str(b_copy.get("beam_kind", "hidden")).lower()
+        if not b_copy.get("lock_section_dimensions", False):
+            if b_kind == "hidden":
+                init_w = float(b_copy.get("initial_width_m", min_b_hidden_m))
+                init_h = slab_h_m
+            else:
+                init_w = float(b_copy.get("initial_width_m", b_copy.get("width_m", wall_b_m)))
+                init_h = max(min_h_drop_m, slab_h_m, float(b_copy.get("initial_depth_m", b_copy.get("depth_m", min_h_drop_m))))
+            b_copy["initial_width_m"] = round(init_w, 3)
+            b_copy["initial_depth_m"] = round(init_h, 3)
+            b_copy["width_m"] = round(init_w, 3)
+            b_copy["depth_m"] = round(init_h, 3)
         else:
-            flags = ensure_beam_wall_flags(story_data, b_copy)
-            thick_map = b_copy.setdefault("span_wall_thickness_cm", {})
-            segments = get_beam_span_segments(b_copy)
-            computed_loads: List[Dict[str, Any]] = []
-            breakdown_list: List[Dict[str, Any]] = []
+            b_copy["initial_width_m"] = round(float(b_copy.get("width_m", 0.40)), 3)
+            b_copy["initial_depth_m"] = round(float(b_copy.get("depth_m", 0.30)), 3)
 
-            for seg in segments:
-                skey = seg["key"]
-                sx1, sx2 = float(seg["x1"]), float(seg["x2"])
-                w_coord1 = sup1_world + (sx1 - c_left)
-                w_coord2 = sup1_world + (sx2 - c_left)
-                w_min, w_max = min(w_coord1, w_coord2), max(w_coord1, w_coord2)
-                seg_len = max(0.20, w_max - w_min)
+    def populate_all_beam_distributed_loads() -> None:
+        """
+        Computes piecewise distributed loads (Beam O.W + Exact Sub-Interval Slab Loads + Wall Loads)
+        using current beam dimensions (`width_m`, `depth_m`) and accounting for any reduction in slab rib length
+        (`L_rib_eff = L_rib_0 - ΔL_rib`) caused by beam width increases ΔB at the slab supports!
+        """
+        for idx_b, b in enumerate(beams):
+            bid = b["id"]
+            b_copy = beam_map[bid]
+            c_left = max(0.0, float(b_copy.get("cantilever_left_m", 0.0)))
 
-                # Identify void openings bordering this beam on Pos (+Y or +X) and Neg (-Y or -X) sides
-                voids_pos: List[Tuple[float, float]] = []
-                voids_neg: List[Tuple[float, float]] = []
-                for op in openings:
-                    omin_x, omax_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
-                    omin_y, omax_y = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
-                    if b_horiz:
-                        ov1, ov2 = max(w_min, omin_x), min(w_max, omax_x)
-                        if ov2 - ov1 >= 0.30:
-                            if abs(bsy - omin_y) <= 0.55 and (omin_y + omax_y) / 2.0 >= bsy:
-                                voids_pos.append((ov1, ov2))
-                            elif abs(bsy - omax_y) <= 0.55 and (omin_y + omax_y) / 2.0 < bsy:
-                                voids_neg.append((ov1, ov2))
-                    else:
-                        ov1, ov2 = max(w_min, omin_y), min(w_max, omax_y)
-                        if ov2 - ov1 >= 0.30:
-                            if abs(bsx - omin_x) <= 0.55 and (omin_x + omax_x) / 2.0 >= bsx:
-                                voids_pos.append((ov1, ov2))
-                            elif abs(bsx - omax_x) <= 0.55 and (omin_x + omax_x) / 2.0 < bsx:
-                                voids_neg.append((ov1, ov2))
+            bsx, bsy = float(b_copy.get("start_x", 0.0)), float(b_copy.get("start_y", 0.0))
+            bex, bey = float(b_copy.get("end_x", 0.0)), float(b_copy.get("end_y", 0.0))
+            b_horiz = abs(bex - bsx) >= abs(bey - bsy)
+            b_w = float(b_copy.get("width_m", 0.40))
+            b_h = float(b_copy.get("depth_m", 0.30))
 
-                # Collect exact slab load intervals [(ov1, ov2, add_w, tag_str, eq_str)] along [w_min, w_max]
-                slab_intervals: List[Tuple[float, float, float, str, str]] = []
-                for slb in slabs:
-                    if slb.get("is_void", False):
-                        continue
-                    s_bounds = extract_slab_bounds(slb)
-                    if s_bounds is None:
-                        continue
-                    smin_x, smax_x, smin_y, smax_y = s_bounds
-                    lx = max(0.5, smax_x - smin_x)
-                    ly = max(0.5, smax_y - smin_y)
-                    rib_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
-                    is_cant_slb = bool(slb.get("is_cantilever", False))
-                    sid_lbl = str(slb.get("id", "S"))
+            # Beam Self-Weight (always applied on all beams): O.W = b * h * 24.0 * 1.4
+            w_sw = round(b_w * b_h * 24.0 * 1.4, 2)
+            sw_eq_str = f"O.W = {b_w:.2f} × {b_h:.2f} × 24 × 1.4 = {w_sw:.2f} kN/m"
+            sup1_world = get_beam_first_support_world_coord(b_copy)
 
-                    if b_horiz and rib_dir == 90:
-                        if abs(bsy - smin_y) <= 0.55 or abs(bsy - smax_y) <= 0.55:
-                            ov1, ov2 = max(w_min, smin_x), min(w_max, smax_x)
-                            if ov2 - ov1 >= 0.40:
-                                is_pos_side = ((smin_y + smax_y) / 2.0) >= bsy
-                                side_voids = voids_pos if is_pos_side else voids_neg
-                                trib_m = ly if is_cant_slb else (ly * 0.50)
-                                add_w = round(slab_wu_kpa * trib_m, 2)
-                                factor_txt = f"{ly:.2f}m[Cant]" if is_cant_slb else f"({ly:.2f}/2)m"
-                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
-                                for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
-                                    slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
-                    elif (not b_horiz) and rib_dir == 0:
-                        if abs(bsx - smin_x) <= 0.55 or abs(bsx - smax_x) <= 0.55:
-                            ov1, ov2 = max(w_min, smin_y), min(w_max, smax_y)
-                            if ov2 - ov1 >= 0.40:
-                                is_pos_side = ((smin_x + smax_x) / 2.0) >= bsx
-                                side_voids = voids_pos if is_pos_side else voids_neg
-                                trib_m = lx if is_cant_slb else (lx * 0.50)
-                                add_w = round(slab_wu_kpa * trib_m, 2)
-                                factor_txt = f"{lx:.2f}m[Cant]" if is_cant_slb else f"({lx:.2f}/2)m"
-                                eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
-                                for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
-                                    slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
+            if b_copy.get("manual_loads_override") and b_copy.get("loads"):
+                b_copy["loads"] = [dict(ld) for ld in b_copy["loads"] if not ld.get("is_transferred_reaction")]
+            else:
+                flags = ensure_beam_wall_flags(story_data, b_copy)
+                thick_map = b_copy.setdefault("span_wall_thickness_cm", {})
+                segments = get_beam_span_segments(b_copy)
+                computed_loads: List[Dict[str, Any]] = []
+                breakdown_list: List[Dict[str, Any]] = []
 
-                # Build clean breakpoints along [w_min, w_max], snapping within 0.25m of span ends/joints
-                raw_cuts = [w_min, w_max]
-                for c1, c2, _, _, _ in slab_intervals:
-                    raw_cuts.extend([c1, c2])
-                for v1, v2 in (voids_pos + voids_neg):
-                    raw_cuts.extend([max(w_min, v1), min(w_max, v2)])
-                raw_cuts.sort()
+                for seg in segments:
+                    skey = seg["key"]
+                    sx1, sx2 = float(seg["x1"]), float(seg["x2"])
+                    w_coord1 = sup1_world + (sx1 - c_left)
+                    w_coord2 = sup1_world + (sx2 - c_left)
+                    w_min, w_max = min(w_coord1, w_coord2), max(w_coord1, w_coord2)
 
-                clean_cuts = [w_min]
-                for pt in raw_cuts:
-                    if pt <= w_min + 0.25:
-                        continue
-                    if pt >= w_max - 0.25:
-                        continue
-                    if pt - clean_cuts[-1] >= 0.30:
-                        clean_cuts.append(round(pt, 3))
-                clean_cuts.append(w_max)
-
-                wall_on = bool(flags.get(skey, True))
-                t_wall_span_cm = float(thick_map.get(skey, default_t_wall_cm))
-                if not wall_on:
-                    w_wall_seg = 0.0
-                    wall_eq_str = "0.00 (No Wall)"
-                else:
-                    if story_data.get("custom_wall_load_override", False) and abs(t_wall_span_cm - default_t_wall_cm) < 0.1:
-                        w_wall_seg = round(default_wall_w, 2)
-                        wall_eq_str = f"{w_wall_seg:.2f} kN/m"
-                    else:
-                        w_wall_seg = round(2.5 * (t_wall_span_cm / 20.0) * story_h * 1.4, 2)
-                        if abs(t_wall_span_cm - 20.0) < 0.1:
-                            wall_eq_str = f"2.5×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
+                    # Identify void openings bordering this beam on Pos (+Y or +X) and Neg (-Y or -X) sides
+                    voids_pos: List[Tuple[float, float]] = []
+                    voids_neg: List[Tuple[float, float]] = []
+                    for op in openings:
+                        omin_x, omax_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
+                        omin_y, omax_y = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
+                        if b_horiz:
+                            ov1, ov2 = max(w_min, omin_x), min(w_max, omax_x)
+                            if ov2 - ov1 >= 0.30:
+                                if abs(bsy - omin_y) <= 0.55 and (omin_y + omax_y) / 2.0 >= bsy:
+                                    voids_pos.append((ov1, ov2))
+                                elif abs(bsy - omax_y) <= 0.55 and (omin_y + omax_y) / 2.0 < bsy:
+                                    voids_neg.append((ov1, ov2))
                         else:
-                            wall_eq_str = f"2.5×({t_wall_span_cm:.0f}/20)×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
+                            ov1, ov2 = max(w_min, omin_y), min(w_max, omax_y)
+                            if ov2 - ov1 >= 0.30:
+                                if abs(bsx - omin_x) <= 0.55 and (omin_x + omax_x) / 2.0 >= bsx:
+                                    voids_pos.append((ov1, ov2))
+                                elif abs(bsx - omax_x) <= 0.55 and (omin_x + omax_x) / 2.0 < bsx:
+                                    voids_neg.append((ov1, ov2))
 
-                sub_records: List[Dict[str, Any]] = []
-                for k_sub in range(len(clean_cuts) - 1):
-                    sw1, sw2 = clean_cuts[k_sub], clean_cuts[k_sub + 1]
-                    mid_w = (sw1 + sw2) / 2.0
-                    w_slab_sub = 0.0
-                    slab_tags: List[str] = []
-                    slab_eq_parts: List[str] = []
-                    for c1, c2, add_w, tag_s, eq_s in slab_intervals:
-                        if c1 - 0.05 <= mid_w <= c2 + 0.05:
-                            w_slab_sub = round(w_slab_sub + add_w, 2)
-                            slab_tags.append(tag_s)
-                            slab_eq_parts.append(eq_s)
+                    # Collect exact slab load intervals [(ov1, ov2, add_w, tag_str, eq_str)] along [w_min, w_max]
+                    slab_intervals: List[Tuple[float, float, float, str, str]] = []
+                    for slb in slabs:
+                        if slb.get("is_void", False):
+                            continue
+                        s_bounds = extract_slab_bounds(slb)
+                        if s_bounds is None:
+                            continue
+                        smin_x, smax_x, smin_y, smax_y = s_bounds
+                        lx_0 = max(0.5, smax_x - smin_x)
+                        ly_0 = max(0.5, smax_y - smin_y)
+                        rib_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
+                        is_cant_slb = bool(slb.get("is_cantilever", False))
+                        sid_lbl = str(slb.get("id", "S"))
 
-                    sub_x1 = round(sx1 + (sw1 - w_min), 3)
-                    sub_x2 = round(sx1 + (sw2 - w_min), 3)
-                    if sub_Records_can_merge := (
-                        sub_records
-                        and abs(sub_records[-1]["w_slab"] - w_slab_sub) < 0.01
-                        and sub_records[-1]["slab_tags"] == slab_tags
-                    ):
-                        sub_records[-1]["x2"] = sub_x2
-                        sub_records[-1]["end"] = sub_x2
+                        # Reduce rib span L_rib by ΔB/2 for any supporting beam that widened during section sizing
+                        delta_rib_m, db_notes = get_slab_rib_delta_b_reduction_m(slb, smin_x, smax_x, smin_y, smax_y, rib_dir)
+                        lx_eff = max(0.30, round(lx_0 - (delta_rib_m if rib_dir == 0 else 0.0), 3))
+                        ly_eff = max(0.30, round(ly_0 - (delta_rib_m if rib_dir == 90 else 0.0), 3))
+
+                        if b_horiz and rib_dir == 90:
+                            if abs(bsy - smin_y) <= 0.55 or abs(bsy - smax_y) <= 0.55:
+                                ov1, ov2 = max(w_min, smin_x), min(w_max, smax_x)
+                                if ov2 - ov1 >= 0.40:
+                                    is_pos_side = ((smin_y + smax_y) / 2.0) >= bsy
+                                    side_voids = voids_pos if is_pos_side else voids_neg
+                                    trib_m = ly_eff if is_cant_slb else (ly_eff * 0.50)
+                                    add_w = round(slab_wu_kpa * trib_m, 2)
+                                    if delta_rib_m > 1e-4:
+                                        factor_txt = (
+                                            f"({ly_0:.2f}-{delta_rib_m:.2f})m[Cant]"
+                                            if is_cant_slb
+                                            else f"(({ly_0:.2f}-{delta_rib_m:.2f})/2)m"
+                                        )
+                                    else:
+                                        factor_txt = f"{ly_eff:.2f}m[Cant]" if is_cant_slb else f"({ly_eff:.2f}/2)m"
+                                    eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
+                                    for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
+                                        slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
+                        elif (not b_horiz) and rib_dir == 0:
+                            if abs(bsx - smin_x) <= 0.55 or abs(bsx - smax_x) <= 0.55:
+                                ov1, ov2 = max(w_min, smin_y), min(w_max, smax_y)
+                                if ov2 - ov1 >= 0.40:
+                                    is_pos_side = ((smin_x + smax_x) / 2.0) >= bsx
+                                    side_voids = voids_pos if is_pos_side else voids_neg
+                                    trib_m = lx_eff if is_cant_slb else (lx_eff * 0.50)
+                                    add_w = round(slab_wu_kpa * trib_m, 2)
+                                    if delta_rib_m > 1e-4:
+                                        factor_txt = (
+                                            f"({lx_0:.2f}-{delta_rib_m:.2f})m[Cant]"
+                                            if is_cant_slb
+                                            else f"(({lx_0:.2f}-{delta_rib_m:.2f})/2)m"
+                                        )
+                                    else:
+                                        factor_txt = f"{lx_eff:.2f}m[Cant]" if is_cant_slb else f"({lx_eff:.2f}/2)m"
+                                    eq_str = f"{sid_lbl}: {slab_wu_kpa:.2f}×{factor_txt}={add_w:.2f}"
+                                    for c1, c2 in subtract_void_intervals(ov1, ov2, side_voids):
+                                        slab_intervals.append((c1, c2, add_w, f"{sid_lbl}({add_w:.2f})", eq_str))
+
+                    # Build clean breakpoints along [w_min, w_max], snapping within 0.25m of span ends/joints
+                    raw_cuts = [w_min, w_max]
+                    for c1, c2, _, _, _ in slab_intervals:
+                        raw_cuts.extend([c1, c2])
+                    for v1, v2 in (voids_pos + voids_neg):
+                        raw_cuts.extend([max(w_min, v1), min(w_max, v2)])
+                    raw_cuts.sort()
+
+                    clean_cuts = [w_min]
+                    for pt in raw_cuts:
+                        if pt <= w_min + 0.25:
+                            continue
+                        if pt >= w_max - 0.25:
+                            continue
+                        if pt - clean_cuts[-1] >= 0.30:
+                            clean_cuts.append(round(pt, 3))
+                    clean_cuts.append(w_max)
+
+                    wall_on = bool(flags.get(skey, True))
+                    t_wall_span_cm = float(thick_map.get(skey, default_t_wall_cm))
+                    if not wall_on:
+                        w_wall_seg = 0.0
+                        wall_eq_str = "0.00 (No Wall)"
                     else:
-                        sub_records.append({
-                            "x1": sub_x1,
-                            "x2": sub_x2,
-                            "start": sub_x1,
-                            "end": sub_x2,
-                            "w_slab": w_slab_sub,
-                            "slab_tags": slab_tags,
+                        if story_data.get("custom_wall_load_override", False) and abs(t_wall_span_cm - default_t_wall_cm) < 0.1:
+                            w_wall_seg = round(default_wall_w, 2)
+                            wall_eq_str = f"{w_wall_seg:.2f} kN/m"
+                        else:
+                            w_wall_seg = round(2.5 * (t_wall_span_cm / 20.0) * story_h * 1.4, 2)
+                            if abs(t_wall_span_cm - 20.0) < 0.1:
+                                wall_eq_str = f"2.5×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
+                            else:
+                                wall_eq_str = f"2.5×({t_wall_span_cm:.0f}/20)×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
+
+                    sub_records: List[Dict[str, Any]] = []
+                    for k_sub in range(len(clean_cuts) - 1):
+                        sw1, sw2 = clean_cuts[k_sub], clean_cuts[k_sub + 1]
+                        mid_w = (sw1 + sw2) / 2.0
+                        w_slab_sub = 0.0
+                        slab_tags: List[str] = []
+                        slab_eq_parts: List[str] = []
+                        for c1, c2, add_w, tag_s, eq_s in slab_intervals:
+                            if c1 - 0.05 <= mid_w <= c2 + 0.05:
+                                w_slab_sub = round(w_slab_sub + add_w, 2)
+                                slab_tags.append(tag_s)
+                                slab_eq_parts.append(eq_s)
+
+                        sub_x1 = round(sx1 + (sw1 - w_min), 3)
+                        sub_x2 = round(sx1 + (sw2 - w_min), 3)
+                        if (
+                            sub_records
+                            and abs(sub_records[-1]["w_slab"] - w_slab_sub) < 0.01
+                            and sub_records[-1]["slab_tags"] == slab_tags
+                        ):
+                            sub_records[-1]["x2"] = sub_x2
+                            sub_records[-1]["end"] = sub_x2
+                        else:
+                            sub_records.append({
+                                "x1": sub_x1,
+                                "x2": sub_x2,
+                                "start": sub_x1,
+                                "end": sub_x2,
+                                "w_slab": w_slab_sub,
+                                "slab_tags": slab_tags,
+                                "slab_eq_parts": slab_eq_parts,
+                            })
+
+                    for idx_sub, sr in enumerate(sub_records):
+                        w_slab_seg = sr["w_slab"]
+                        slab_tags = sr["slab_tags"]
+                        slab_eq_parts = sr["slab_eq_parts"]
+                        w_total_seg = round(w_sw + w_slab_seg + w_wall_seg, 2)
+
+                        parts = [f"O.W={w_sw:.2f}"]
+                        if w_slab_seg > 0.01:
+                            parts.append(f"Slabs[{'+'.join(slab_tags)}]={w_slab_seg:.2f}")
+                        else:
+                            parts.append("Slabs=0.00")
+                        if w_wall_seg > 0.01:
+                            parts.append(f"Wall({t_wall_span_cm:.0f}cm)={w_wall_seg:.2f}")
+                        else:
+                            parts.append("Wall=0.00")
+
+                        lbl_prefix = seg["label"] if len(sub_records) == 1 else f"{seg['label']} [{sr['x1']:.2f}->{sr['x2']:.2f}m]"
+                        desc_label = f"{lbl_prefix}: {' + '.join(parts)} = {w_total_seg:.2f} kN/m"
+                        formula_detail = (
+                            f"w_total = O.W ({w_sw:.2f} [{b_w:.2f}×{b_h:.2f}×24×1.4]) + w_Slab ({w_slab_seg:.2f}"
+                            f"{' [' + '; '.join(slab_eq_parts) + ']' if slab_eq_parts else ''}) + W_wall ({w_wall_seg:.2f} [{wall_eq_str}]) = {w_total_seg:.2f} kN/m"
+                        )
+
+                        computed_loads.append({
+                            "type": "D",
+                            "span_key": skey,
+                            "span_label": lbl_prefix,
+                            "x1": sr["x1"],
+                            "x2": sr["x2"],
+                            "start": sr["start"],
+                            "end": sr["end"],
+                            "val": w_total_seg,
+                            "mag": w_total_seg,
+                            "w_sw": w_sw,
+                            "sw_eq": sw_eq_str,
+                            "w_slab": w_slab_seg,
                             "slab_eq_parts": slab_eq_parts,
+                            "w_wall": w_wall_seg,
+                            "wall_thickness_cm": t_wall_span_cm,
+                            "wall_eq": wall_eq_str,
+                            "wall_enabled": wall_on,
+                            "label": desc_label,
+                            "formula_str": formula_detail,
+                            "source_note": f"[{' + '.join(parts)}]",
                         })
+                        breakdown_list.append(computed_loads[-1])
 
-                for idx_sub, sr in enumerate(sub_records):
-                    w_slab_seg = sr["w_slab"]
-                    slab_tags = sr["slab_tags"]
-                    slab_eq_parts = sr["slab_eq_parts"]
-                    w_total_seg = round(w_sw + w_slab_seg + w_wall_seg, 2)
+                for cld in b_copy.get("custom_loads", []):
+                    computed_loads.append(dict(cld))
 
-                    parts = [f"O.W={w_sw:.2f}"]
-                    if w_slab_seg > 0.01:
-                        parts.append(f"Slabs[{'+'.join(slab_tags)}]={w_slab_seg:.2f}")
-                    else:
-                        parts.append("Slabs=0.00")
-                    if w_wall_seg > 0.01:
-                        parts.append(f"Wall({t_wall_span_cm:.0f}cm)={w_wall_seg:.2f}")
-                    else:
-                        parts.append("Wall=0.00")
-
-                    lbl_prefix = seg["label"] if len(sub_records) == 1 else f"{seg['label']} [{sr['x1']:.2f}->{sr['x2']:.2f}m]"
-                    desc_label = f"{lbl_prefix}: {' + '.join(parts)} = {w_total_seg:.2f} kN/m"
-                    formula_detail = (
-                        f"w_total = O.W ({w_sw:.2f} [{b_w:.2f}×{b_h:.2f}×24×1.4]) + w_Slab ({w_slab_seg:.2f}"
-                        f"{' [' + '; '.join(slab_eq_parts) + ']' if slab_eq_parts else ''}) + W_wall ({w_wall_seg:.2f} [{wall_eq_str}]) = {w_total_seg:.2f} kN/m"
-                    )
-
-                    computed_loads.append({
-                        "type": "D",
-                        "span_key": skey,
-                        "span_label": lbl_prefix,
-                        "x1": sr["x1"],
-                        "x2": sr["x2"],
-                        "start": sr["start"],
-                        "end": sr["end"],
-                        "val": w_total_seg,
-                        "mag": w_total_seg,
-                        "w_sw": w_sw,
-                        "sw_eq": sw_eq_str,
-                        "w_slab": w_slab_seg,
-                        "slab_eq_parts": slab_eq_parts,
-                        "w_wall": w_wall_seg,
-                        "wall_thickness_cm": t_wall_span_cm,
-                        "wall_eq": wall_eq_str,
-                        "wall_enabled": wall_on,
-                        "label": desc_label,
-                        "formula_str": formula_detail,
-                        "source_note": f"[{' + '.join(parts)}]",
-                    })
-                    breakdown_list.append(computed_loads[-1])
-
-            for cld in b_copy.get("custom_loads", []):
-                computed_loads.append(dict(cld))
-
-            b_copy["loads"] = computed_loads
-            b_copy["load_breakdown"] = breakdown_list
-            if idx_b < len(orig_beams):
-                orig_beams[idx_b]["span_wall_flags"] = dict(flags)
-                orig_beams[idx_b]["span_wall_thickness_cm"] = dict(thick_map)
-                orig_beams[idx_b]["loads"] = [dict(x) for x in computed_loads]
-                orig_beams[idx_b]["load_breakdown"] = [dict(x) for x in breakdown_list]
-                orig_beams[idx_b]["supports"] = [dict(s) for s in b_copy.get("supports", [])]
+                b_copy["loads"] = computed_loads
+                b_copy["load_breakdown"] = breakdown_list
+                if idx_b < len(orig_beams):
+                    orig_beams[idx_b]["span_wall_flags"] = dict(flags)
+                    orig_beams[idx_b]["span_wall_thickness_cm"] = dict(thick_map)
+                    orig_beams[idx_b]["loads"] = [dict(x) for x in computed_loads]
+                    orig_beams[idx_b]["load_breakdown"] = [dict(x) for x in breakdown_list]
+                    orig_beams[idx_b]["supports"] = [dict(s) for s in b_copy.get("supports", [])]
 
     beam_results: Dict[str, Dict[str, Any]] = {}
     beam_designs: Dict[str, Dict[str, Any]] = {}
@@ -1351,70 +1476,114 @@ def analyze_all_story_beams_and_columns(
     story_main_db = int(story_data.get("default_main_bar_dia_mm", 16))
     story_stir_db = int(story_data.get("default_stirrup_dia_mm", 8))
 
-    for bid in ordered_ids:
-        bm = beam_map[bid]
-        if "design_mode" not in bm:
-            bm["design_mode"] = story_design_mode
-        if "main_bar_dia_mm" not in bm:
-            bm["main_bar_dia_mm"] = story_main_db
-        if "stirrup_dia_mm" not in bm:
-            bm["stirrup_dia_mm"] = story_stir_db
-        res = solve_continuous_beam_analytical(bm, fc_mpa, fy_mpa)
-        res["loads_applied"] = [dict(ld) for ld in bm.get("loads", [])]
-        beam_results[bid] = res
-        beam_designs[bid] = design_beam_aci318(
-            bm,
-            res,
-            fc_mpa,
-            fy_mpa,
-            design_mode=str(bm.get("design_mode", story_design_mode)),
-            bar_dia_mm=int(bm.get("main_bar_dia_mm", story_main_db)),
-            stirrup_dia_mm=int(bm.get("stirrup_dia_mm", story_stir_db)),
-        )
+    # Coupled Iterative Analysis & Section Sizing Loop (up to 5 passes until convergence):
+    # Pass 1: Solve beams with baseline dimensions -> size sections per VBA Sub ReDesign_Sec (+100mm step).
+    # Pass 2..N: Whenever any beam widens/deepens, recompute O.W AND reduce slab rib length L_rib by ΔB/2 at widened supports,
+    #            then re-solve continuous beams and re-check section sizing until O.W, w_Slab, and B×h converge 100%!
+    for pass_idx in range(5):
+        populate_all_beam_distributed_loads()
+        any_section_enlarged = False
 
-        # Sync updated loads (including transferred point loads) back to story_data["beams"]
-        for orig_b in orig_beams:
-            if orig_b.get("id") == bid:
-                orig_b["loads"] = [dict(ld) for ld in bm.get("loads", [])]
-                orig_b["design_mode"] = bm["design_mode"]
-                orig_b["main_bar_dia_mm"] = bm["main_bar_dia_mm"]
-                orig_b["stirrup_dia_mm"] = bm["stirrup_dia_mm"]
-                break
+        for bid in ordered_ids:
+            bm = beam_map[bid]
+            if "design_mode" not in bm:
+                bm["design_mode"] = story_design_mode
+            if "main_bar_dia_mm" not in bm:
+                bm["main_bar_dia_mm"] = story_main_db
+            if "stirrup_dia_mm" not in bm:
+                bm["stirrup_dia_mm"] = story_stir_db
 
-        # Transfer reactions from this secondary beam onto any carrier beam it rests on
-        # Measuring position strictly from the Carrier Beam's Support Centerlines!
-        bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
-        bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
-        bm_horiz = abs(bex - bsx) >= abs(bey - bsy)
-        sec_center_coord = bsy if bm_horiz else bsx
+            prev_w = float(bm.get("width_m", 0.40))
+            prev_h = float(bm.get("depth_m", 0.30))
 
-        for sup in bm.get("supports", []):
-            if sup.get("kind") == "beam" and sup.get("target_id") in beam_map:
-                s_idx = int(sup.get("support_index", 1))
-                r_kn = round(float(res["reactions"].get(s_idx, 0.0)), 2)
-                carrier = beam_map[sup["target_id"]]
-                c_left_car = max(0.0, float(carrier.get("cantilever_left_m", 0.0)))
-                car_sup1_world = get_beam_first_support_world_coord(carrier)
-                car_tot_len = c_left_car + sum(float(s) for s in carrier.get("spans", [4.0])) + max(0.0, float(carrier.get("cantilever_right_m", 0.0)))
+            res = solve_continuous_beam_analytical(bm, fc_mpa, fy_mpa)
+            res["loads_applied"] = [dict(ld) for ld in bm.get("loads", [])]
+            beam_results[bid] = res
+            des = design_beam_aci318(
+                bm,
+                res,
+                fc_mpa,
+                fy_mpa,
+                design_mode=str(bm.get("design_mode", story_design_mode)),
+                bar_dia_mm=int(bm.get("main_bar_dia_mm", story_main_db)),
+                stirrup_dia_mm=int(bm.get("stirrup_dia_mm", story_stir_db)),
+                auto_size_section=(not bm.get("lock_section_dimensions", False)),
+            )
+            beam_designs[bid] = des
 
-                # Exact distance along carrier from Carrier Support 1 Centerline to Secondary Beam Centerline
-                dist_from_sup1 = round(abs(sec_center_coord - car_sup1_world), 3)
-                pos_x = round(min(max(0.0, c_left_car + dist_from_sup1), car_tot_len), 3)
-                sup["pos_on_carrier_m"] = pos_x
+            new_w = round(float(des.get("b_mm", prev_w * 1000.0)) / 1000.0, 3)
+            new_h = round(float(des.get("h_mm", prev_h * 1000.0)) / 1000.0, 3)
+            if abs(new_w - prev_w) > 1e-4 or abs(new_h - prev_h) > 1e-4:
+                bm["width_m"] = new_w
+                bm["depth_m"] = new_h
+                any_section_enlarged = True
 
-                carrier["loads"] = list(carrier.get("loads", [])) + [{
-                    "type": "P",
-                    "x": pos_x,
-                    "pos": pos_x,
-                    "dist_from_sup1_m": dist_from_sup1,
-                    "val": r_kn,
-                    "mag": r_kn,
-                    "source_beam_id": bid,
-                    "source_beam": bid,
-                    "is_transferred_reaction": True,
-                    "label": f"P = {r_kn:.2f} kN (from {bid} @ {pos_x:.2f}m)",
-                    "formula_str": f"P({bid}) = {r_kn:.2f} kN transferred at x = {pos_x:.2f} m",
-                }]
+            # Sync updated loads and sized dimensions back to story_data["beams"]
+            for orig_b in orig_beams:
+                if orig_b.get("id") == bid:
+                    orig_b["width_m"] = bm["width_m"]
+                    orig_b["depth_m"] = bm["depth_m"]
+                    orig_b["initial_width_m"] = bm.get("initial_width_m", bm["width_m"])
+                    orig_b["initial_depth_m"] = bm.get("initial_depth_m", bm["depth_m"])
+                    orig_b["loads"] = [dict(ld) for ld in bm.get("loads", [])]
+                    orig_b["design_mode"] = bm["design_mode"]
+                    orig_b["main_bar_dia_mm"] = bm["main_bar_dia_mm"]
+                    orig_b["stirrup_dia_mm"] = bm["stirrup_dia_mm"]
+                    break
+
+            # Transfer reactions from this secondary beam onto any carrier beam it rests on
+            # Measuring position strictly from the Carrier Beam's Support Centerlines!
+            bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+            bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+            bm_horiz = abs(bex - bsx) >= abs(bey - bsy)
+            sec_center_coord = bsy if bm_horiz else bsx
+
+            for sup in bm.get("supports", []):
+                if sup.get("kind") == "beam" and sup.get("target_id") in beam_map:
+                    s_idx = int(sup.get("support_index", 1))
+                    r_kn = round(float(res["reactions"].get(s_idx, 0.0)), 2)
+                    carrier = beam_map[sup["target_id"]]
+                    c_left_car = max(0.0, float(carrier.get("cantilever_left_m", 0.0)))
+                    car_sup1_world = get_beam_first_support_world_coord(carrier)
+                    car_tot_len = c_left_car + sum(float(s) for s in carrier.get("spans", [4.0])) + max(0.0, float(carrier.get("cantilever_right_m", 0.0)))
+
+                    # Exact distance along carrier from Carrier Support 1 Centerline to Secondary Beam Centerline
+                    dist_from_sup1 = round(abs(sec_center_coord - car_sup1_world), 3)
+                    pos_x = round(min(max(0.0, c_left_car + dist_from_sup1), car_tot_len), 3)
+                    sup["pos_on_carrier_m"] = pos_x
+
+                    carrier["loads"] = list(carrier.get("loads", [])) + [{
+                        "type": "P",
+                        "x": pos_x,
+                        "pos": pos_x,
+                        "dist_from_sup1_m": dist_from_sup1,
+                        "val": r_kn,
+                        "mag": r_kn,
+                        "source_beam_id": bid,
+                        "source_beam": bid,
+                        "is_transferred_reaction": True,
+                        "label": f"P = {r_kn:.2f} kN (from {bid} @ {pos_x:.2f}m)",
+                        "formula_str": f"P({bid}) = {r_kn:.2f} kN transferred at x = {pos_x:.2f} m",
+                    }]
+
+        if not any_section_enlarged:
+            break
+
+    # Also update slab_designs with effective rib span if any supporting beam widened
+    for slb in slabs:
+        if slb.get("is_void", False):
+            continue
+        sid = str(slb.get("id", f"S{len(slab_designs) + 1}"))
+        s_bounds = extract_slab_bounds(slb)
+        custom_l_eff = None
+        if s_bounds is not None:
+            smin_x, smax_x, smin_y, smax_y = s_bounds
+            r_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
+            d_rib_m, _ = get_slab_rib_delta_b_reduction_m(slb, smin_x, smax_x, smin_y, smax_y, r_dir)
+            if d_rib_m > 1e-4:
+                base_l = (smax_x - smin_x) if r_dir == 0 else (smax_y - smin_y)
+                custom_l_eff = max(0.5, round(base_l - d_rib_m, 3))
+        slab_designs[sid] = design_hollow_block_slab_rib(slb, story_data, fc_mpa=fc_mpa, fy_mpa=fy_mpa, custom_span_l_m=custom_l_eff)
 
     column_records = []
     for col in columns:
@@ -1508,63 +1677,201 @@ def design_beam_aci318(
     bar_dia_mm: Optional[int] = None,
     main_bar_dia_mm: Optional[int] = None,
     stirrup_dia_mm: Optional[int] = None,
+    auto_size_section: bool = True,
 ) -> Dict[str, Any]:
     """
-    Designs a reinforced concrete Hidden or Drop beam per ACI 318 & Eng. Yousef's Code PDFs
-    (Pages 1–2, 8, 11, 13, 15, 45–58):
-    1. Minimum Reinforcement (As,min) Running Continuously from Start to End of Beam:
-       - ρ_min = max(1.4 / fy, sqrt(fc') / (4 * fy))
-       - As,min = ρ_min * b * d
-       - Continuous Bars = n_min * Φ db (providing As' = n_min * Ab1), running top & bottom along the entire beam.
-    2. User-Selectable Flexural Design Mode (`design_mode`):
-       - 'double_as_min' / 'double' (Default — Pages 1 & 2 of PDF):
-         Uses the continuous opposite-face minimum reinforcement (As' = n_min * Ab1 at depth d') as compression steel:
-           x1 = (As * fy - 600 * As') / (0.85 * fc' * b * β1)
-           x2 = (600 * As' * d') / (0.85 * fc' * b * β1)
-           C  = (x1 + sqrt(x1² + 4 * x2)) / 2
-           fs' = min(fy, max(0, 600 * (C - d') / C))
-           As1 = As - (As' * fs' / fy),  a = (As1 * fy) / (0.85 * fc' * b)
-           Mn  = As1 * fy * (d - a/2) + As' * fs' * (d - d')
-       - 'single' (Single Reinforcement):
-           Ku = (Mu * 10^6) / (0.90 * fc' * b * d²)
-           ω  = (1 - sqrt(1 - 2.36 * Ku)) / 1.18
-           ρ  = ω * (fc' / fy),  As_req = max(ρ * b * d, As,min)
-    3. Maximum Bars per Single Layer (Page 8 of PDF):
-       - n_max = floor(((b + db) - (6 * dst + 45)) / (db + 25))
-    4. Shear Stirrup Design (Page 13 of PDF):
-       - Vc = (1/6) * sqrt(fc') * bw * d,  φVc = 0.85 * Vc
+    Designs a reinforced concrete Hidden or Drop beam per ACI 318, Eng. Yousef's Code PDFs,
+    and the exact Excel VBA `Sub ReDesign_Sec()` / `Sub ReDesgin()` algorithm (`all_code_9bb47b25.txt` lines 11189–11703):
+    1. Iterative Section Sizing (`+100 mm` step):
+       - Governing absolute moment across all supports & mid-spans: `M_max = max(|M_i|)`
+       - `dc = 25 mm`, `d0 = h - dc - ds - db/2`, `asb = 3.14 * db² / 4`
+       - `pmin = 1.4 / fy` (`0.004` for `fy = 350 MPa`), `pmax = 0.75 * 0.85 * β1 * (fc'/fy) * (600/(600+fy))` (`0.01956`)
+       - `nbs = int(((B + db) - (6 * ds + 45)) / (db + 25))` (max bars in 1 single row)
+       - **Hidden Beam (`beam_kind == 'hidden'`):**
+         Starts at `B_min = 400 mm` (or `initial_width_m * 1000`), `h = slab_thickness_mm`.
+         Increments `B = B + 100 mm` whenever:
+           a) `1 - 2.36 * Ku < 0` (concrete compression failure),
+           b) `ρ > ρ_max`, or
+           c) `nbr > nbs` (bars exceed 1 single layer — hidden beams must fit all bars in 1 single row!).
+       - **Drop Beam (`beam_kind == 'drop'`):**
+         Starts at `B = wall_width (200 mm)`, `h_min = 400 mm` (or `initial_depth_m * 1000`).
+         Increments `h = h + 100 mm` whenever `1 - 2.36*Ku < 0` or `ρ > ρ_max`.
+         When `nbr > nbs`, places bars in `nrow = ceil(nbr / nbs)` layers, computes weighted centroid
+         `ddc = sum(n_i * d_i) / nbr` (with vertical spacing `25 + db` between layers), updates `d = h - ddc`,
+         and repeats the loop (increasing `h = h + 100 mm` if `1 - 2.36*Ku < 0`, `ρ > ρ_max`, `nrow > 3`, or `ddc >= 0.45 * h`).
+    2. Minimum & Maximum Constructive Bars per Excel Sheet4:
+       - `min_bars = int((pmin * B * d) / asb) + 1` (minimum 2 bars)
+       - `max_bars = int((pmax * B * d) / asb)`
     """
     raw_mode = str(design_mode or beam.get("design_mode", "double_as_min")).lower()
     mode_norm = "single" if raw_mode == "single" else "double_as_min"
 
-    db_mm = int(bar_dia_mm or main_bar_dia_mm or beam.get("main_bar_dia_mm", 16))
+    b_kind = str(beam.get("beam_kind", "hidden")).lower()
+    default_db = 14 if b_kind == "hidden" else 16
+    db_mm = int(bar_dia_mm or main_bar_dia_mm or beam.get("main_bar_dia_mm", default_db))
     if db_mm not in (12, 14, 16, 18, 20, 22, 25, 28, 32):
-        db_mm = 16
-    dst_mm = int(stirrup_dia_mm or beam.get("stirrup_dia_mm", 8))
+        db_mm = default_db
+    dst_mm = int(stirrup_dia_mm or beam.get("stirrup_dia_mm", 6 if b_kind == "hidden" else 8))
     if dst_mm not in (6, 8, 10, 12):
-        dst_mm = 8
+        dst_mm = 6 if b_kind == "hidden" else 8
 
-    b_mm = float(beam.get("width_m", 0.30)) * 1000.0
-    h_mm = float(beam.get("depth_m", 0.30)) * 1000.0
-    cover_mm = 25.0
-    d_prime_mm = round(cover_mm + dst_mm + (db_mm / 2.0), 1)
-    d_mm = round(max(110.0, h_mm - d_prime_mm), 1)
+    # Baseline dimensions for iterative sizing (reset to initial baseline if auto_size_section is True and not locked)
+    if auto_size_section and not beam.get("lock_section_dimensions", False):
+        init_w_m = float(beam.get("initial_width_m", 0.40 if b_kind == "hidden" else 0.20))
+        init_h_m = float(beam.get("initial_depth_m", beam.get("depth_m", 0.30 if b_kind == "hidden" else 0.40)))
+        b_mm = round(max(400.0 if b_kind == "hidden" else 150.0, init_w_m * 1000.0))
+        h_mm = round(max(200.0 if b_kind == "hidden" else 400.0, init_h_m * 1000.0))
+    else:
+        b_mm = round(float(beam.get("width_m", 0.40 if b_kind == "hidden" else 0.20)) * 1000.0)
+        h_mm = round(float(beam.get("depth_m", 0.30 if b_kind == "hidden" else 0.40)) * 1000.0)
+
+    init_b_mm = b_mm
+    init_h_mm = h_mm
+
+    dc_mm = 25.0  # Clear concrete cover per Excel Sheet4 (`dc = 25 mm`)
+    d_single_layer_mm = round(max(100.0, h_mm - dc_mm - dst_mm - (db_mm / 2.0)), 1)
+    d_prime_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 1)
 
     beta1 = 0.85 if fc_mpa <= 30.0 else max(0.65, round(0.85 - (0.05 / 7.0) * (fc_mpa - 30.0), 3))
-    rho_min = max(1.4 / fy_mpa, math.sqrt(fc_mpa) / (4.0 * fy_mpa))
-    rho_max_single = 0.75 * (0.85 * beta1 * (fc_mpa / fy_mpa) * (600.0 / (600.0 + fy_mpa)))
-    as_min_mm2 = round(rho_min * b_mm * d_mm, 1)
+    # Excel Sheet4 uses pmin = 1.4 / fy (0.004 for fy=350) and pmax = 0.75 * 0.85 * beta1 * (fc/fy) * (600/(600+fy)) (0.01956)
+    pmin_excel = round(1.4 / fy_mpa, 5)
+    pmax_excel = round(0.75 * 0.85 * beta1 * (fc_mpa / fy_mpa) * (600.0 / (600.0 + fy_mpa)), 5)
+    # Exact Excel bar area: 3.14 * db^2 / 4 (e.g. 153.86 mm² for Φ14)
+    asb_excel = round(3.14 * (db_mm ** 2) / 4.0, 2)
 
-    area_one_bar = round(math.pi * (db_mm ** 2) / 4.0, 2)
-    min_constructive_bars = 4 if b_mm >= 350.0 else (3 if b_mm >= 250.0 else 2)
-    n_min_cont = max(min_constructive_bars, int(math.ceil(as_min_mm2 / max(1.0, area_one_bar) - 1e-6)))
-    as_min_prov_mm2 = round(n_min_cont * area_one_bar, 1)
+    # Governing moment M_max across all support faces and span mid-spans
+    pos_mu = float(analysis_res.get("max_pos_mu_knm", 0.0))
+    neg_mu = abs(float(analysis_res.get("max_neg_face_mu_knm", 0.0)))
+    sup_table = analysis_res.get("support_critical_table", [])
+    span_pos_list = analysis_res.get("span_positive_moments", analysis_res.get("span_critical_table", []))
 
-    # Page 8 Equation: Max number of bars in a single layer
+    all_station_moments: List[float] = [abs(pos_mu), abs(neg_mu)]
+    for sup in sup_table:
+        all_station_moments.append(abs(float(sup.get("face_neg_mu_knm", sup.get("mu_face_neg_knm", 0.0)))))
+    for sp_info in span_pos_list:
+        all_station_moments.append(abs(float(sp_info.get("max_pos_mu_knm", 0.0))))
+    m_max_gov = max(all_station_moments) if all_station_moments else 0.0
+
+    sizing_iterations: List[Dict[str, Any]] = []
+    ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
+    nrow_gov = 1
+    d_mm = d_single_layer_mm
+
+    # Execute exact VBA `Sub ReDesign_Sec()` iterative section sizing (+100 mm step)
+    if auto_size_section and not beam.get("lock_section_dimensions", False) and m_max_gov > 0.05:
+        if b_kind == "hidden":
+            # Hidden beam (bt = 0): depth h is fixed to slab thickness; width B increments by +100 mm
+            d_mm = round(max(90.0, h_mm - dc_mm - dst_mm - (db_mm / 2.0)), 1)
+            for _iter in range(25):
+                nbs_cur = max(2, int(math.floor(((b_mm + db_mm) - (6.0 * dst_mm + 45.0)) / max(1.0, db_mm + 25.0))))
+                ku_cur = (m_max_gov * 1_000_000.0) / max(1.0, 0.90 * b_mm * fc_mpa * (d_mm ** 2))
+                if (1.0 - 2.36 * ku_cur) < 0.0:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": "1 - 2.36*Ku < 0 -> B + 100 mm"})
+                    b_mm += 100.0
+                    continue
+                w_cur = (1.0 - math.sqrt(max(0.0, 1.0 - 2.36 * ku_cur))) / 1.18
+                p_cur = w_cur * (fc_mpa / fy_mpa)
+                if p_cur > pmax_excel:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"ρ ({p_cur:.5f}) > ρ_max ({pmax_excel:.5f}) -> B + 100 mm"})
+                    b_mm += 100.0
+                    continue
+                ast_cur = p_cur * b_mm * d_mm
+                nbr_cur = int(math.floor(ast_cur / asb_excel)) + 1
+                min_b_cur = int(math.floor((pmin_excel * b_mm * d_mm) / asb_excel)) + 1
+                if nbr_cur < min_b_cur:
+                    nbr_cur = min_b_cur
+                if nbr_cur > nbs_cur:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"nbr ({nbr_cur}) > nbs ({nbs_cur}) -> B + 100 mm"})
+                    b_mm += 100.0
+                    continue
+                nrow_gov = 1
+                break
+        else:
+            # Drop beam (bt = 1): width B is fixed; depth h increments by +100 mm, with multi-row centroid ddc
+            nbs_cur = max(2, int(math.floor(((b_mm + db_mm) - (6.0 * dst_mm + 45.0)) / max(1.0, db_mm + 25.0))))
+            ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
+            d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
+            for _iter in range(25):
+                if d_mm <= 60.0 or ddc_weighted_mm >= 0.45 * h_mm:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": "ddc >= 0.45*h -> h + 100 mm"})
+                    h_mm += 100.0
+                    ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
+                    d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
+                    continue
+                ku_cur = (m_max_gov * 1_000_000.0) / max(1.0, 0.90 * b_mm * fc_mpa * (d_mm ** 2))
+                if (1.0 - 2.36 * ku_cur) < 0.0:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": "1 - 2.36*Ku < 0 -> h + 100 mm"})
+                    h_mm += 100.0
+                    ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
+                    d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
+                    continue
+                w_cur = (1.0 - math.sqrt(max(0.0, 1.0 - 2.36 * ku_cur))) / 1.18
+                p_cur = w_cur * (fc_mpa / fy_mpa)
+                if p_cur > pmax_excel:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"ρ ({p_cur:.5f}) > ρ_max ({pmax_excel:.5f}) -> h + 100 mm"})
+                    h_mm += 100.0
+                    ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
+                    d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
+                    continue
+                ast_cur = p_cur * b_mm * d_mm
+                nbr_cur = int(math.floor(ast_cur / asb_excel)) + 1
+                min_b_cur = int(math.floor((pmin_excel * b_mm * d_mm) / asb_excel)) + 1
+                if nbr_cur < min_b_cur:
+                    nbr_cur = min_b_cur
+                if nbr_cur <= nbs_cur:
+                    nrow_gov = 1
+                    break
+                # Multi-row calculation per VBA lines 11386–11408
+                if nbr_cur % nbs_cur == 0:
+                    nrow_try = nbr_cur // nbs_cur
+                else:
+                    nrow_try = (nbr_cur // nbs_cur) + 1
+                if nrow_try > 3:
+                    sizing_iterations.append({"b_mm": b_mm, "h_mm": h_mm, "reason": f"nrow ({nrow_try}) > 3 rows -> h + 100 mm"})
+                    h_mm += 100.0
+                    ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 2)
+                    d_mm = round(max(100.0, h_mm - ddc_weighted_mm), 1)
+                    continue
+                rem_bars = nbr_cur
+                dd_first = dc_mm + dst_mm + (db_mm / 2.0)
+                sum_nd = 0.0
+                for r_idx in range(1, nrow_try + 1):
+                    bars_in_row = nbs_cur if (rem_bars - nbs_cur >= 0) else rem_bars
+                    row_d = dd_first + (r_idx - 1) * (25.0 + db_mm)
+                    sum_nd += bars_in_row * row_d
+                    rem_bars = max(0, rem_bars - nbs_cur)
+                new_ddc = round(sum_nd / max(1, nbr_cur), 2)
+                new_d = round(h_mm - new_ddc, 1)
+                if abs(new_d - d_mm) < 0.2:
+                    nrow_gov = nrow_try
+                    ddc_weighted_mm = new_ddc
+                    d_mm = new_d
+                    break
+                nrow_gov = nrow_try
+                ddc_weighted_mm = new_ddc
+                d_mm = new_d
+
+    # Finalize section geometry after iterative sizing
+    beam["width_m"] = round(b_mm / 1000.0, 3)
+    beam["depth_m"] = round(h_mm / 1000.0, 3)
+
+    if b_kind == "hidden":
+        ddc_weighted_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 1)
+        d_mm = round(max(90.0, h_mm - ddc_weighted_mm), 1)
+
     n_max_single_layer = max(
         2,
         int(math.floor(((b_mm + db_mm) - (6.0 * dst_mm + 45.0)) / max(1.0, db_mm + 25.0))),
     )
+
+    # Excel Sheet4 min bars & max bars:
+    # min_bars = Int((pmin * B * D) / asb) + 1
+    # max_bars = Int((pmax * B * D) / asb)
+    as_min_mm2 = round(pmin_excel * b_mm * d_mm, 1)
+    min_bars_excel = max(2, int(math.floor((pmin_excel * b_mm * d_mm) / max(1.0, asb_excel))) + 1)
+    max_bars_excel = max(min_bars_excel, int(math.floor((pmax_excel * b_mm * d_mm) / max(1.0, asb_excel))))
+    n_min_cont = min_bars_excel
+    as_min_prov_mm2 = round(n_min_cont * asb_excel, 2)
 
     def eval_double_reinf_capacity_nmm(as_tension_mm2: float, as_comp_mm2: float) -> Dict[str, float]:
         denom = max(1.0, 0.85 * fc_mpa * b_mm * beta1)
@@ -1593,58 +1900,63 @@ def design_beam_aci318(
         }
 
     def calc_flexural_section(mu_knm: float) -> Dict[str, Any]:
+        """
+        Matches Excel Sheet4 (`5_e8049e44.PNG`) & VBA `Sub ReDesign_Sec()` / `Sub ReDesgin()`:
+        - Ku = (Mu * 10^6) / (0.9 * b * fc' * d^2)
+        - ω  = (1 - sqrt(1 - 2.36 * Ku)) / 1.18
+        - ρ  = ω * (fc' / fy)
+        - As = ρ * (b * d)
+        - Nbar = Int(As / As_one_bar) + 1 (clamped >= min_bars_excel)
+        """
         mu_abs = abs(float(mu_knm))
-        ku_val = round((mu_abs * 1e6) / max(1.0, 0.90 * fc_mpa * b_mm * (d_mm ** 2)), 4)
-        disc_s = max(0.0, 1.0 - 2.36 * min(0.42, ku_val))
-        omega_val = round((1.0 - math.sqrt(disc_s)) / 1.18, 4)
-        rho_single = round(omega_val * (fc_mpa / fy_mpa), 6)
-        as_single_calc = round(rho_single * b_mm * d_mm, 1)
+        ku_raw = (mu_abs * 1_000_000.0) / max(1.0, 0.90 * b_mm * fc_mpa * (d_mm ** 2))
+        ku_val = round(ku_raw, 5)
+        disc_s = max(0.0, 1.0 - 2.36 * min(0.42, ku_raw))
+        omega_raw = (1.0 - math.sqrt(disc_s)) / 1.18
+        omega_val = round(omega_raw, 5)
+        rho_raw = omega_raw * (fc_mpa / fy_mpa)
+        rho_single = round(rho_raw, 4)
+        as_single_calc = round(rho_single * b_mm * d_mm, 2)
 
-        if mu_abs <= 0.10:
+        if mu_abs <= 0.05:
             as_calc = 0.0
-        elif mode_norm == "single":
-            as_calc = as_single_calc
+            n_total = min_bars_excel
         else:
-            target_mn_nmm = (mu_abs * 1e6) / 0.90
-            lo_as, hi_as = 1.0, max(as_single_calc * 2.0 + 2000.0, 8.0 * as_min_prov_mm2)
-            for _ in range(42):
-                mid_as = 0.5 * (lo_as + hi_as)
-                ev = eval_double_reinf_capacity_nmm(mid_as, as_min_prov_mm2)
-                if (ev["phi_mn_knm"] * 1e6 / 0.90) < target_mn_nmm:
-                    lo_as = mid_as
-                else:
-                    hi_as = mid_as
-            as_calc = round(0.5 * (lo_as + hi_as), 1)
+            as_calc = as_single_calc
+            n_from_as = int(math.floor(as_calc / max(1.0, asb_excel))) + 1
+            n_total = max(min_bars_excel, n_from_as)
 
-        as_req = round(max(as_calc, as_min_mm2), 1)
-        n_total = max(n_min_cont, int(math.ceil(as_req / max(1.0, area_one_bar) - 1e-6)))
-        n_additional = max(0, n_total - n_min_cont)
-        as_prov = round(n_total * area_one_bar, 1)
-        num_layers = 1 if n_total <= n_max_single_layer else 2
+        as_req = round(max(as_calc, as_min_mm2), 2)
+        n_additional = max(0, n_total - min_bars_excel)
+        as_prov = round(n_total * asb_excel, 1)
+        rho_act = round(as_prov / max(1.0, b_mm * d_mm), 5)
+        num_layers = 1 if n_total <= n_max_single_layer else int(math.ceil(n_total / max(1, n_max_single_layer)))
 
         as_comp_used = as_min_prov_mm2 if mode_norm == "double_as_min" else 0.0
         eq_prov = eval_double_reinf_capacity_nmm(as_prov, as_comp_used)
 
         if n_additional > 0:
-            bars_callout = f"{n_total}Φ{db_mm} ({n_min_cont}Φ{db_mm} Cont. + {n_additional}Φ{db_mm} Add.)"
+            bars_callout = f"{n_total}Φ{db_mm} ({min_bars_excel}Φ{db_mm} Cont. + {n_additional}Φ{db_mm} Add.)"
             add_short = f"{n_additional} Φ {db_mm}"
         else:
-            bars_callout = f"{n_total}Φ{db_mm} ({n_min_cont}Φ{db_mm} Cont.)"
+            bars_callout = f"{n_total}Φ{db_mm} ({min_bars_excel}Φ{db_mm} Cont.)"
             add_short = "None"
-        bars_short = f"{n_total} Φ {db_mm} mm"
+        bars_short = f"{n_total} Φ {db_mm}"
 
         return {
             "mu_knm": round(mu_abs, 2),
             "ku": ku_val,
             "omega": omega_val,
             "rho": rho_single,
+            "rho_act": rho_act,
             "as_calc_mm2": as_calc,
             "as_single_calc_mm2": as_single_calc,
             "as_min_mm2": as_min_mm2,
             "as_req_mm2": as_req,
             "as_prov_mm2": as_prov,
+            "as_one_bar_mm2": asb_excel,
             "as_prime_mm2": round(as_comp_used, 1),
-            "n_min_cont": n_min_cont,
+            "n_min_cont": min_bars_excel,
             "n_additional": n_additional,
             "n_total": n_total,
             "n_max_per_layer": n_max_single_layer,
@@ -1667,7 +1979,7 @@ def design_beam_aci318(
     phi_shear = 0.85
     phi_vc = round(phi_shear * vc_kn, 2)
     n_legs = 4 if b_mm >= 350.0 else 2
-    av_mm2 = round(n_legs * (math.pi * (dst_mm ** 2) / 4.0), 2)
+    av_mm2 = round(n_legs * (3.14 * (dst_mm ** 2) / 4.0), 2)
 
     def calc_stirrups_detail(v_kn: float) -> Dict[str, Any]:
         vu_val = abs(float(v_kn))
@@ -1709,17 +2021,14 @@ def design_beam_aci318(
             "zone_label": zone_lbl,
         }
 
-    pos_mu = float(analysis_res.get("max_pos_mu_knm", 0.0))
-    neg_mu = abs(float(analysis_res.get("max_neg_face_mu_knm", 0.0)))
     vu_kn = float(analysis_res.get("max_face_vu_kn", 0.0))
-
     bot_sec = calc_flexural_section(pos_mu)
     top_sec = calc_flexural_section(neg_mu)
+    gov_signed_mu = -neg_mu if abs(neg_mu) >= abs(pos_mu) else pos_mu
+    gov_sec = calc_flexural_section(m_max_gov)
     stir_sec = calc_stirrups_detail(vu_kn)
 
     spans = analysis_res.get("spans", beam.get("spans", [4.0]))
-    sup_table = analysis_res.get("support_critical_table", [])
-    span_pos_list = analysis_res.get("span_positive_moments", analysis_res.get("span_critical_table", []))
 
     support_designs = []
     for sup in sup_table:
@@ -1797,15 +2106,45 @@ def design_beam_aci318(
             "shear_zone": b_stir["zone_label"],
         })
 
+    # Build Excel Sheet4 Station-by-Station Table (`For M = ... at support / mid span use n Φ db`)
+    station_design_table: List[Dict[str, Any]] = []
+    n_tot_stations = max(len(support_designs) + len(span_designs), 1)
+    for idx_s in range(max(len(support_designs), len(span_designs))):
+        if idx_s < len(support_designs):
+            sd = support_designs[idx_s]
+            m_signed = -round(abs(float(sd["face_neg_mu_knm"])), 2) if abs(float(sd["face_neg_mu_knm"])) > 0.05 else 0.0
+            station_design_table.append({
+                "station_type": "support",
+                "station_label": f"moment at support {sd['target_id']}",
+                "target_id": sd["target_id"],
+                "mu_signed_knm": m_signed,
+                "n_bars": sd["top_n_bars"],
+                "bars_str": f"{sd['top_n_bars']} Φ {db_mm}",
+                "line_text": f"For M = {m_signed:g} ( moment at support {sd['target_id']} ) use   {sd['top_n_bars']} Φ {db_mm}",
+            })
+        if idx_s < len(span_designs):
+            spd = span_designs[idx_s]
+            m_pos_val = round(float(spd["pos_mu_knm"]), 2)
+            station_design_table.append({
+                "station_type": "mid_span",
+                "station_label": f"moment at mid span {spd['span_index']}",
+                "target_id": str(spd["span_index"]),
+                "mu_signed_knm": m_pos_val,
+                "n_bars": spd["bottom_n_bars"],
+                "bars_str": f"{spd['bottom_n_bars']} Φ {db_mm}",
+                "shear_vu_kn": spd["max_vu_kn"],
+                "line_text": f"For M = {m_pos_val:g} ( moment at mid span {spd['span_index']} ) use   {spd['bottom_n_bars']} Φ {db_mm}",
+            })
+
     mode_label = (
-        "Double Reinf. (with Continuous As,min)"
+        "VBA Iterative Section Sizing (+100mm) + Double Reinf."
         if mode_norm == "double_as_min"
-        else "Single Reinforcement"
+        else "VBA Iterative Section Sizing (+100mm) + Single Reinf."
     )
 
     return {
         "beam_id": beam.get("id", "B1"),
-        "beam_kind": beam.get("beam_kind", "hidden"),
+        "beam_kind": b_kind,
         "design_mode": "double" if mode_norm == "double_as_min" else "single",
         "design_mode_key": mode_norm,
         "design_mode_label": mode_label,
@@ -1814,20 +2153,35 @@ def design_beam_aci318(
         "num_spans": len(spans),
         "cantilever_left_m": float(beam.get("cantilever_left_m", 0.0)),
         "cantilever_right_m": float(beam.get("cantilever_right_m", 0.0)),
+        "initial_b_mm": round(init_b_mm),
+        "initial_h_mm": round(init_h_mm),
         "b_mm": round(b_mm),
         "h_mm": round(h_mm),
+        "section_enlarged": (round(b_mm) > round(init_b_mm) or round(h_mm) > round(init_h_mm)),
+        "sizing_iterations": sizing_iterations,
+        "dc_mm": dc_mm,
         "d_mm": d_mm,
+        "ddc_weighted_mm": ddc_weighted_mm,
         "d_prime_mm": d_prime_mm,
+        "nrow_gov": nrow_gov,
         "beta1": beta1,
-        "rho_min": round(rho_min, 5),
-        "rho_max_single": round(rho_max_single, 5),
+        "rho_min": pmin_excel,
+        "rho_max_single": pmax_excel,
+        "rho_act": gov_sec["rho_act"],
+        "as_one_bar_mm2": asb_excel,
         "as_min_mm2": as_min_mm2,
         "as_min_prov_mm2": as_min_prov_mm2,
+        "min_bars_excel": min_bars_excel,
+        "max_bars_excel": max_bars_excel,
         "n_min_cont": n_min_cont,
         "n_bars_min_cont": n_min_cont,
         "continuous_min_bars": f"{n_min_cont} Φ {db_mm}",
         "continuous_bars_callout": f"{n_min_cont}Φ{db_mm} Continuous (Top & Bot, Start -> End)",
         "n_max_per_layer": n_max_single_layer,
+        "governing_mu_signed_knm": round(gov_signed_mu, 2),
+        "governing_mu_abs_knm": round(m_max_gov, 2),
+        "governing_flexure_details": gov_sec,
+        "station_design_table": station_design_table,
         "bottom_ast_mm2": bot_sec["as_req_mm2"],
         "as_pos_req_mm2": bot_sec["as_req_mm2"],
         "as_pos_single_mm2": bot_sec["as_single_calc_mm2"],

@@ -4,7 +4,31 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.1.0-structural-bim-pro` (2026-11-16)
+## Current Release: `v2.2.0-structural-bim-pro` (2026-11-17)
+**Release Title:** Standard Commercial Hordi Block Sizing, VBA-Compliant Section Auto-Sizing (+100 mm step), Coupled Equilibrium Load Convergence, Right-Edge Canvas Clipping Fix, and Excel Sheet4 Flexural Calculation Sheet
+
+### Key Features & Advancements in `v2.2.0-structural-bim-pro`:
+1. **Standard Commercial Hollow-Block Heights & Dynamic Topping Layer:**
+   - Hollow block height is strictly standardized to $200\text{ mm}$ ($20\text{ cm}$) for slab thickness $h \ge 25\text{ cm}$ (or $160\text{ mm}$ for $h < 25\text{ cm}$).
+   - Concrete compression topping layer dynamically adjusts: $h_s = h - h_{\text{block}}$.
+   - Exact 100% numerical match with Eng. Yousef's Excel sheet (`Design of rib slab` / `4_17463a4e.PNG`):
+     - At $h = 28\text{ cm}$: $h_{\text{block}} = 20\text{ cm}, h_s = 8\text{ cm} \rightarrow W_u(\text{rib}) = 6.07\text{ kN/m'/rib}, W_u(\text{m}\times\text{m}) = 11.04\text{ kN/m}^2$.
+     - At $h = 29\text{ cm}$: $h_{\text{block}} = 20\text{ cm}, h_s = 9\text{ cm} \rightarrow W_u(\text{rib}) = 6.26\text{ kN/m'/rib}, W_u(\text{m}\times\text{m}) = 11.38\text{ kN/m}^2$.
+     - At $h = 30\text{ cm}$: $h_{\text{block}} = 20\text{ cm}, h_s = 10\text{ cm} \rightarrow W_u(\text{rib}) = 6.44\text{ kN/m'/rib}, W_u(\text{m}\times\text{m}) = 11.71\text{ kN/m}^2$.
+2. **VBA-Compliant Iterative Section Sizing Loop (`Sub ReDesign_Sec()` / `+100 mm` Step):**
+   - Hidden Beams: depth $h$ is fixed to slab thickness; width $B$ automatically increments by $+100\text{ mm}$ (e.g. $400 \rightarrow 500 \rightarrow 600\text{ mm}$) whenever concrete capacity is exceeded ($1 - 2.36 K_u < 0$), tension steel exceeds max allowable single-layer limit ($\rho > \rho_{\text{max}}$), or required bars exceed single-layer capacity ($n_{\text{bars}} > n_{\text{max}}$).
+   - Drop Beams: width $b$ is fixed to wall thickness; depth $h$ increments by $+100\text{ mm}$ (e.g. $400 \rightarrow 500 \rightarrow 600\text{ mm}$) with multi-row placement ($n_{\text{row}} \le 3$, $d_{\text{dc}} < 0.45 h$).
+3. **Coupled Iterative Equilibrium Loop between Beam Sizing & Slab Rib Length Reduction:**
+   - In `analyze_all_story_beams_and_columns`, when supporting beams widen by $\Delta B = B_{\text{sized}} - B_{\text{initial}}$, beam self-weight is recomputed ($O.W = B \cdot h \cdot 24 \cdot 1.4$) and tributary slab rib length is reduced by $\Delta B / 2$ at each support ($L_{\text{rib,eff}} = L_0 - \Delta B / 2$).
+   - This iteratively decrements the transferred load ($w_{\text{Slab}}$) and repeats analysis until beam sections, self-weights, and slab loads reach perfect physical equilibrium.
+4. **Canvas Viewport Right-Edge Clipping Fix (Analysis & Design Tabs):**
+   - In Tab 2 (`BeamDiagramsViewWidget`) and Tab 3 (`BeamDesignDetailWidget`), dynamic scaling and right margin ($92\text{ px}$) prevent clipping of the rightmost support reactions, shear and moment diagrams, and rebar callouts.
+5. **Interactive Excel Sheet4 Flexural Design Calculation Sheet (`5_e8049e44.PNG`):**
+   - Integrated full flexural design report widget beside Section A-A and longitudinal rebar elevations, rendering $h, b, d, d_c, d_b, d_s, \beta_1, n_{\text{max}}, \rho_{\text{min}}, \rho_{\text{max}}, \rho_{\text{act}}, \text{min bars}, \text{max bars}, M_u, K_u, \omega, A_s$, bar counts, and station distribution $[n_1, n_2, n_3, n_4, n_5]$.
+
+---
+
+## Previous Release: `v2.1.0-structural-bim-pro` (2026-11-16)
 **Release Title:** Fullscreen Mode by Default, Standard Rebar Table Φ6-Φ32, Safe Dialogs, Single-Notice Thickness Warning with Math.Ceil, Unified Excel Finishing Loads, Standard Masonry Wall Dropdowns, and Complete Beam Flexural & Shear Code Implementation
 
 ### Key Features & Advancements in `v2.1.0-structural-bim-pro`:

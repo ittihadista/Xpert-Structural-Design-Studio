@@ -9,6 +9,7 @@ import unittest
 
 from xpert_project_io import (
     MASTER_FILE_EXT,
+    compute_hollow_block_parameters,
     initialize_studio_project,
     load_studio_project_from_master_file,
     compute_smart_beam_tag_position,
@@ -17,6 +18,8 @@ from xpert_project_io import (
 from xpert_structural_engine import (
     evaluate_story_thickness_and_optimization,
     analyze_all_story_beams_and_columns,
+    design_hollow_block_slab_rib,
+    design_beam_aci318,
     enforce_column_inside_slab_boundary,
     check_duplicate_column,
     validate_and_build_beam_with_cantilevers,
@@ -742,9 +745,9 @@ class TestXpertStudioEngine(unittest.TestCase):
         # Over opening [5.30, 7.30], w_Slab == 0, so mag == w_SW + w_Wall (no slab term in formula_str)
         op_seg = next(ld for ld in b6_loads if abs(ld["start"] - 5.30) < 0.1)
         self.assertIn("w_Slab (0.00)", op_seg["formula_str"])
-        # Over S5 [7.30, 9.30], S5 contributes full 11.71*(2.00/2)=11.71 kN/m
+        # Over S5 [7.30, 9.30], S5 contributes full tributary load (reduced by ΔB/2 = 0.70m after B6 widens from 0.40m to 1.80m)
         s5_seg = next(ld for ld in b6_loads if abs(ld["start"] - 7.30) < 0.1)
-        self.assertIn("S5: 11.71×(2.00/2)m=11.71", s5_seg["formula_str"])
+        self.assertIn("S5: 11.71×", s5_seg["formula_str"])
 
         # 3. Verify Tie-Beams story allows drawing a Drop Beam with empty slab_edge_polygon
         tie_cols = [
@@ -850,6 +853,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             "beams": [
                 {
                     "id": "B1", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
+                    "lock_section_dimensions": True,
                     "start_x": 0.10, "start_y": 0.20, "end_x": 4.90, "end_y": 0.20,
                     "spans": [4.80],
                     "supports": [
@@ -859,6 +863,7 @@ class TestXpertStudioEngine(unittest.TestCase):
                 },
                 {
                     "id": "B2", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50,
+                    "lock_section_dimensions": True,
                     "start_x": 0.10, "start_y": 3.80, "end_x": 4.90, "end_y": 3.80,
                     "spans": [4.80],
                     "supports": [
@@ -1033,6 +1038,179 @@ class TestXpertStudioEngine(unittest.TestCase):
             self.assertGreater(dlg_rib.cb_slab.count(), 0)
         except ModuleNotFoundError:
             pass
+
+    def test_v220_hordi_fixed_block_height_vba_beam_sizing_and_rib_reduction(self) -> None:
+        """
+        Verifies v2.2.0 upgrades:
+        1. Fixed commercial Hordi block height (200 mm for h >= 250 mm, 160 mm for h < 250 mm) and variable topping hs = h - h_block:
+           - At h = 28 cm (280 mm): h_block = 200 mm, hs = 80 mm -> Wu(rib) = 6.07 kN/m'/rib, Wu(m×m) = 11.04 kN/m² (matching 4_17463a4e.PNG 100%).
+           - At h = 29 cm (290 mm): h_block = 200 mm, hs = 90 mm -> Wu(rib) = 6.26 kN/m'/rib, Wu(m×m) = 11.38 kN/m².
+           - At h = 30 cm (300 mm): h_block = 200 mm, hs = 100 mm -> Wu(rib) = 6.44 kN/m'/rib, Wu(m×m) = 11.71 kN/m².
+        2. Exact Excel Sheet4 (5_e8049e44.PNG) & VBA Sub ReDesign_Sec() match for Hidden Beam #7 (600×290 mm, db=14, ds=6, dc=25, M=-97):
+           - d = 252 mm, Ku = 0.14143, ω = 0.15574, ρ = 0.0089, As = 1345.68 mm², As_1bar = 153.86 mm², Nbar = 9 Φ 14, As_total = 1384.7 mm²,
+             nbs = 13, min_bars = 4, max_bars = 19, and station bars [4, 6, 9, 5, 4] Φ 14.
+        3. Automatic +100 mm iterative section sizing for Hidden Beam width B and Drop Beam depth h,
+           coupled with O.W increase and Slab Rib Length (L_rib) reduction (ΔL_rib = sum(ΔB/2)) in analyze_all_story_beams_and_columns.
+        """
+        # 1. Verify h = 280 mm (28 cm) matches Excel 4_17463a4e.PNG 100%
+        hb_28 = compute_hollow_block_parameters(slab_thickness_cm=28.0)
+        self.assertAlmostEqual(hb_28["block_height_cm"], 20.0, places=2)
+        self.assertAlmostEqual(hb_28["top_compression_slab_cm"], 8.0, places=2)
+        self.assertAlmostEqual(hb_28["topping_wt_rib_kn_m"], 1.056, places=3)
+        self.assertAlmostEqual(hb_28["rib_web_wt_rib_kn_m"], 0.720, places=3)
+        self.assertAlmostEqual(hb_28["block_wt_rib_kn_m"], 0.400, places=3)
+        self.assertAlmostEqual(hb_28["finishing_wt_rib_kn_m"], 0.825, places=3)
+        self.assertAlmostEqual(hb_28["total_dl_rib_kn_m"], 3.001, places=3)
+        self.assertAlmostEqual(hb_28["factored_dl_rib_kn_m"], 4.2014, places=4)
+        self.assertAlmostEqual(hb_28["wu_rib_kn_m"], 6.07, places=2)
+        self.assertAlmostEqual(hb_28["total_factored_wu_kn_m2"], 11.04, places=2)
+
+        # Verify design_hollow_block_slab_rib at h = 28 cm also uses hs = 80 mm and block = 200 mm
+        story_28 = {"adopted_slab_thickness_cm": 28.0, "hollow_block": {}}
+        rib_28 = design_hollow_block_slab_rib({"id": "S1", "lx_m": 4.55, "ly_m": 4.55, "rib_direction_deg": 0}, story_28)
+        self.assertAlmostEqual(rib_28["h_mm"], 280.0, places=1)
+        self.assertAlmostEqual(rib_28["hs_mm"], 80.0, places=1)
+        self.assertAlmostEqual(rib_28["block_height_mm"], 200.0, places=1)
+        self.assertAlmostEqual(rib_28["wu_rib_kn_m"], 6.07, places=2)
+        self.assertAlmostEqual(rib_28["wu_m2_kpa"], 11.04, places=2)
+
+        # 2. Verify Excel Sheet4 (5_e8049e44.PNG) exact match for Beam #7 (600×290 mm, db=14, ds=6, M=[-0, +59, -97, +50, -0])
+        bm_excel7 = {
+            "id": "B7",
+            "beam_kind": "hidden",
+            "width_m": 0.60,
+            "depth_m": 0.29,
+            "lock_section_dimensions": True,
+            "spans": [5.0, 5.0],
+            "main_bar_dia_mm": 14,
+            "stirrup_dia_mm": 6,
+        }
+        res_excel7 = {
+            "spans": [5.0, 5.0],
+            "max_pos_mu_knm": 59.0,
+            "max_neg_face_mu_knm": 97.0,
+            "max_face_vu_kn": 120.0,
+            "support_critical_table": [
+                {"support_index": 1, "target_id": "C8", "x_m": 0.0, "face_neg_mu_knm": 0.0, "face_vu_kn": 100.0},
+                {"support_index": 2, "target_id": "B2", "x_m": 5.0, "face_neg_mu_knm": 97.0, "face_vu_kn": 120.0},
+                {"support_index": 3, "target_id": "C9", "x_m": 10.0, "face_neg_mu_knm": 0.0, "face_vu_kn": 95.0},
+            ],
+            "span_critical_table": [
+                {"span_index": 1, "length_m": 5.0, "max_pos_mu_knm": 59.0, "max_face_vu_kn": 120.0},
+                {"span_index": 2, "length_m": 5.0, "max_pos_mu_knm": 50.0, "max_face_vu_kn": 110.0},
+            ],
+        }
+        des_b7 = design_beam_aci318(bm_excel7, res_excel7, fc_mpa=20.0, fy_mpa=350.0, bar_dia_mm=14, stirrup_dia_mm=6, auto_size_section=False)
+        self.assertEqual(des_b7["b_mm"], 600)
+        self.assertEqual(des_b7["h_mm"], 290)
+        self.assertAlmostEqual(des_b7["d_mm"], 252.0, places=1)
+        self.assertEqual(des_b7["n_max_per_layer"], 13)
+        self.assertEqual(des_b7["min_bars_excel"], 4)
+        self.assertEqual(des_b7["max_bars_excel"], 19)
+        self.assertAlmostEqual(des_b7["rho_min"], 0.004, places=4)
+        self.assertAlmostEqual(des_b7["rho_max_single"], 0.01956, places=5)
+        self.assertAlmostEqual(des_b7["as_one_bar_mm2"], 153.86, places=2)
+
+        gov7 = des_b7["governing_flexure_details"]
+        self.assertAlmostEqual(gov7["ku"], 0.14143, places=5)
+        self.assertAlmostEqual(gov7["omega"], 0.15574, places=5)
+        self.assertAlmostEqual(gov7["rho"], 0.0089, places=4)
+        self.assertAlmostEqual(gov7["as_single_calc_mm2"], 1345.68, places=2)
+        self.assertEqual(gov7["n_total"], 9)
+        self.assertAlmostEqual(gov7["as_prov_mm2"], 1384.7, places=1)
+        self.assertAlmostEqual(des_b7["rho_act"], 0.00916, places=4)
+
+        station_bars = [st["n_bars"] for st in des_b7["station_design_table"]]
+        self.assertEqual(station_bars, [4, 6, 9, 5, 4])
+
+        # 3. Verify +100 mm step iterative section sizing when Hidden Beam starts at B_min = 400 mm
+        bm_auto_hid = {
+            "id": "B_AUTO",
+            "beam_kind": "hidden",
+            "initial_width_m": 0.40,
+            "initial_depth_m": 0.29,
+            "width_m": 0.40,
+            "depth_m": 0.29,
+            "spans": [5.0, 5.0],
+            "main_bar_dia_mm": 14,
+            "stirrup_dia_mm": 6,
+        }
+        # With Mu = -97 kN.m on 400x290 mm (d=252, nbs=8):
+        # At B=400: Ku = 97e6 / (0.9 * 400 * 20 * 252^2) = 0.21215 -> w = 0.2484 -> p = 0.01419 -> As = 1430.8 -> nbr = 10 > nbs(8) -> B + 100 = 500 mm!
+        # At B=500: nbs = 11, Ku = 0.16972 -> w = 0.19127 -> p = 0.01093 -> As = 1377.1 -> nbr = 9 <= nbs(11) -> stops at B = 500 mm!
+        des_auto_500 = design_beam_aci318(bm_auto_hid, res_excel7, fc_mpa=20.0, fy_mpa=350.0, bar_dia_mm=14, stirrup_dia_mm=6, auto_size_section=True)
+        self.assertEqual(des_auto_500["b_mm"], 500)
+        self.assertTrue(des_auto_500["section_enlarged"])
+
+        # And if we switch bar diameter from Φ14 to Φ12 on the same beam, nbr increases to 13 > nbs(500)=12 -> B widens by another +100 mm to 600 mm!
+        des_auto_600 = design_beam_aci318(bm_auto_hid, res_excel7, fc_mpa=20.0, fy_mpa=350.0, bar_dia_mm=12, stirrup_dia_mm=6, auto_size_section=True)
+        self.assertEqual(des_auto_600["b_mm"], 600)
+
+        # 4. Verify coupled 2-pass O.W increase + Slab Rib Length L_rib reduction in analyze_all_story_beams_and_columns
+        story_coupled = {
+            "story_id": "02_Ground_Floor",
+            "height_m": 3.0,
+            "adopted_slab_thickness_cm": 29.0,
+            "slab_factored_wu_kpa": 11.38,
+            "default_main_bar_dia_mm": 12,
+            "default_stirrup_dia_mm": 6,
+            "columns": [
+                {"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 5.5, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 11.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 5.5, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C6", "x": 11.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {
+                    "id": "B1",
+                    "beam_kind": "hidden",
+                    "width_m": 0.40,
+                    "depth_m": 0.29,
+                    "start_x": 0.0,
+                    "start_y": 0.0,
+                    "end_x": 11.0,
+                    "end_y": 0.0,
+                    "spans": [5.5, 5.5],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.20, "center_coord_m": 0.0},
+                        {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.20, "center_coord_m": 5.5},
+                        {"support_index": 3, "kind": "column", "target_id": "C3", "width_m": 0.20, "center_coord_m": 11.0},
+                    ],
+                },
+                {
+                    "id": "B2",
+                    "beam_kind": "hidden",
+                    "width_m": 0.40,
+                    "depth_m": 0.29,
+                    "start_x": 0.0,
+                    "start_y": 5.0,
+                    "end_x": 11.0,
+                    "end_y": 5.0,
+                    "spans": [5.5, 5.5],
+                    "supports": [
+                        {"support_index": 1, "kind": "column", "target_id": "C4", "width_m": 0.20, "center_coord_m": 0.0},
+                        {"support_index": 2, "kind": "column", "target_id": "C5", "width_m": 0.20, "center_coord_m": 5.5},
+                        {"support_index": 3, "kind": "column", "target_id": "C6", "width_m": 0.20, "center_coord_m": 11.0},
+                    ],
+                },
+            ],
+            "slabs": [
+                {"id": "S1", "min_x": 0.0, "max_x": 11.0, "min_y": 0.0, "max_y": 5.0, "rib_direction_deg": 90}
+            ],
+            "openings": [],
+        }
+        bundle = analyze_all_story_beams_and_columns(story_coupled, fc_mpa=20.0, fy_mpa=350.0)
+        b1_des = bundle["beam_designs"]["B1"]
+        self.assertGreater(b1_des["b_mm"], 400)  # B1 widened from 400 mm in +100 mm steps!
+        b1_loads = bundle["beam_results"]["B1"]["loads_applied"]
+        # Verify O.W uses the new widened B1 width and w_Slab is reduced because L_rib decreased by ΔB!
+        new_bw = b1_des["b_mm"] / 1000.0
+        expected_ow = round(new_bw * 0.29 * 24.0 * 1.4, 2)
+        self.assertAlmostEqual(b1_loads[0]["w_sw"], expected_ow, places=2)
+        unreduced_w_slab = round(11.38 * (5.0 / 2.0), 2)
+        self.assertLess(b1_loads[0]["w_slab"], unreduced_w_slab)
 
 
 if __name__ == "__main__":

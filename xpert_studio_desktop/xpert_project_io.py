@@ -27,7 +27,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.1.0-structural-bim-pro"
+STUDIO_VERSION = "v2.2.0-structural-bim-pro"
 
 DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
     {"active": True, "enabled": True, "label": "Φ 6", "bar_name": "Φ6", "dia_mm": 6, "diameter_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Stirrups (كانات الأعصاب والكمرات)"},
@@ -89,7 +89,8 @@ def load_studio_global_settings() -> Dict[str, Any]:
     Loads persistent global studio settings for:
     1. 'Startup Defaults' (Projects Root Folder & Rebar Diameters Table including Φ6 stirrups & Φ32 main bars)
     2. 'Options' (Material Properties & Hollow-Block / Hordi Slab Parameters matching Eng. Yousef's Excel sheet:
-       W_finishing = 1.5 kN/m², hs = 10.0 cm, γc = 24.0 kN/m³, Wu(rib) = 6.44 kN/m'/rib, Wu(m×m) = 11.71 kN/m²)
+       W_finishing = 1.5 kN/m², standard block height = 20.0 cm (or 16.0 cm), hs = h - h_block,
+       γc = 24.0 kN/m³, Wu(rib) = 6.44 kN/m'/rib @ h=30cm [6.07 @ h=28cm], Wu(m×m) = 11.71 kN/m² @ h=30cm [11.04 @ h=28cm])
     """
     default_root = os.path.abspath("./XpertStudio_Projects")
     mat_defaults = {
@@ -104,9 +105,9 @@ def load_studio_global_settings() -> Dict[str, Any]:
     }
     hb_defaults = {
         "slab_thickness_cm": 30.0,        # h = 300 mm
-        "top_flange_cm": 10.0,            # hs = 100 mm
+        "top_flange_cm": 10.0,            # hs = h - h_block = 100 mm (80 mm when h=280mm)
         "top_compression_slab_cm": 10.0,  # hs = 100 mm
-        "block_height_cm": 20.0,          # h - hs = 200 mm
+        "block_height_cm": 20.0,          # Fixed commercial block height: 20 cm (200 mm) or 16 cm (160 mm)
         "block_width_cm": 40.0,           # S = 400 mm (clear spacing between ribs)
         "block_length_cm": 25.0,          # 250 mm along rib (4 blocks / m)
         "rib_width_cm": 15.0,             # bw1 = 150 mm (top rib width)
@@ -121,29 +122,29 @@ def load_studio_global_settings() -> Dict[str, Any]:
         "live_load_kpa": 2.0,
         "dl_factor": 1.4,                 # 1.4 DL
         "ll_factor": 1.7,                 # 1.7 LL
-        "wu_rib_kn_m": 6.44,              # Wu(rib) = 6.44 kN/m'/rib
-        "slab_factored_wu_kpa": 11.71,    # Wu(m*m) = Wu(rib)/(S+bw1) = 6.441 / 0.55 = 11.71 kN/m²
+        "wu_rib_kn_m": 6.44,              # Wu(rib) = 6.44 kN/m'/rib @ h=30cm
+        "slab_factored_wu_kpa": 11.71,    # Wu(m*m) = Wu(rib)/(S+bw1) = 6.441 / 0.55 = 11.71 kN/m² @ h=30cm
         "wall_thickness_cm": 20.0,        # Default wall thickness = 20 cm (200 mm)
         "wall_unit_wt_20cm_kn_m2": 2.5,   # 2.5 kN/m² of wall elevation for 20 cm wall
         "default_wall_load_kn_m": 10.50,  # W_wall = 2.5 * H(3.0m) * 1.4 = 10.50 kN/m
-        "hidden_beam_min_width_cm": 30.0, # Min B for Hidden Beams = 300 mm
+        "hidden_beam_min_width_cm": 40.0, # Min B for Hidden Beams = 400 mm (Excel B_min = 400)
         "drop_beam_width_cm": 20.0,       # Default B for Drop Beams = 200 mm
-        "drop_beam_min_depth_cm": 40.0,   # Min h for Drop Beams = 400 mm
-        "drop_beam_depth_cm": 50.0,
+        "drop_beam_min_depth_cm": 40.0,   # Min h for Drop Beams = 400 mm (Excel h_min = 400)
+        "drop_beam_depth_cm": 40.0,
     }
     rebar_table = _normalize_rebar_table(DEFAULT_REBAR_DIAMETERS_TABLE)
 
     defaults: Dict[str, Any] = {
-        "schema_version": "2.0.0",
+        "schema_version": "2.2.0",
         "default_projects_root_folder": default_root,
-        "default_stirrup_bar_mm": 8,
+        "default_stirrup_bar_mm": 6,
         "default_main_bar_mm": 16,
         "rebar_diameters_table": rebar_table,
         "materials_and_soil": dict(mat_defaults),
         "hollow_block_slab_data": dict(hb_defaults),
         "startup_defaults": {
             "default_projects_root_dir": default_root,
-            "default_stirrup_dia_mm": 8,
+            "default_stirrup_dia_mm": 6,
             "default_beam_main_dia_mm": 16,
             "default_col_main_dia_mm": 16,
             "rebar_diameters_table": rebar_table,
@@ -159,7 +160,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
             with open(fpath, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
-                is_v200 = (saved.get("schema_version") == "2.0.0")
+                is_modern = str(saved.get("schema_version", "")).startswith("2.")
                 if "default_projects_root_folder" in saved:
                     defaults["default_projects_root_folder"] = saved["default_projects_root_folder"]
                 if "default_stirrup_bar_mm" in saved:
@@ -183,13 +184,14 @@ def load_studio_global_settings() -> Dict[str, Any]:
                         defaults["hollow_block_slab_data"].update(saved["options"]["hollow_block_slab"])
 
                 # Migrate pre-v2.0.0 legacy settings (where finish_load was 2.0, top_slab was 5.0, gamma_c was 25.0, wu was 10.0)
-                if not is_v200:
+                if not is_modern:
                     defaults["materials_and_soil"]["concrete_unit_weight_kn_m3"] = 24.0
                     defaults["materials_and_soil"]["gamma_c_kn_m3"] = 24.0
                     defaults["hollow_block_slab_data"]["finish_load_kn_m2"] = 1.5
                     defaults["hollow_block_slab_data"]["finishing_load_kpa"] = 1.5
                     defaults["hollow_block_slab_data"]["top_compression_slab_cm"] = 10.0
                     defaults["hollow_block_slab_data"]["top_flange_cm"] = 10.0
+                    defaults["hollow_block_slab_data"]["block_height_cm"] = 20.0
                     defaults["hollow_block_slab_data"]["slab_factored_wu_kpa"] = 11.71
                     defaults["hollow_block_slab_data"]["default_wall_load_kn_m"] = 10.50
 
@@ -205,7 +207,7 @@ def save_studio_global_settings(settings: Dict[str, Any]) -> str:
     """
     Saves global 'Startup Defaults' and 'Options' to `xpert_studio_defaults.json`.
     """
-    settings["schema_version"] = "2.0.0"
+    settings["schema_version"] = "2.2.0"
     if "rebar_diameters_table" in settings:
         settings["rebar_diameters_table"] = _normalize_rebar_table(settings["rebar_diameters_table"])
     fpath = _get_global_settings_file_path()
@@ -251,6 +253,32 @@ def validate_project_name(name: str) -> Tuple[bool, str, str, str]:
     return True, clean_name, folder_name, ""
 
 
+def resolve_standard_hordi_block_and_topping_cm(
+    slab_thickness_cm: float,
+    requested_block_height_cm: Optional[float] = None,
+) -> Tuple[float, float]:
+    """
+    Standard Commercial Hollow-Block (Hordi) Rule per Eng. Yousef's Engineering Specification:
+    - Hollow block height (`block_height_cm`) is strictly one of the two standard commercial sizes:
+        * 20.0 cm (200 mm) when total slab thickness h >= 25.0 cm (e.g., h = 25..35 cm -> block = 20 cm, hs = h - 20 cm).
+        * 16.0 cm (160 mm) when total slab thickness h < 25.0 cm (e.g., h = 20..24 cm -> block = 16 cm, hs = h - 16 cm).
+      (If the user explicitly selects 16.0 cm or 20.0 cm and h >= block + 4.0 cm, that choice is respected.)
+    - The concrete topping slab (`hs_cm`) is the variable layer above the block:
+        * hs_cm = h_cm - block_height_cm
+        * For h = 28 cm (280 mm): block = 20 cm (200 mm), hs = 8 cm (80 mm) -> Wu(rib)=6.07, Wu(m×m)=11.04 kN/m².
+        * For h = 29 cm (290 mm): block = 20 cm (200 mm), hs = 9 cm (90 mm) -> Wu(rib)=6.26, Wu(m×m)=11.38 kN/m².
+        * For h = 30 cm (300 mm): block = 20 cm (200 mm), hs = 10 cm (100 mm) -> Wu(rib)=6.44, Wu(m×m)=11.71 kN/m².
+    """
+    h_cm = max(18.0, float(slab_thickness_cm))
+    if requested_block_height_cm is not None and round(float(requested_block_height_cm), 1) in (16.0, 20.0):
+        cand_blk = round(float(requested_block_height_cm), 1)
+        if h_cm - cand_blk >= 4.0:
+            return cand_blk, round(h_cm - cand_blk, 2)
+    block_h_cm = 20.0 if h_cm >= 25.0 else 16.0
+    hs_cm = round(max(4.0, h_cm - block_h_cm), 2)
+    return block_h_cm, hs_cm
+
+
 def compute_hollow_block_parameters(
     slab_thickness_cm: Any = 30.0,
     rib_width_cm: float = 15.0,
@@ -259,16 +287,19 @@ def compute_hollow_block_parameters(
     block_weight_kn: float = 0.10,
     finish_load_kn_m2: float = 1.5,
     live_load_kn_m2: float = 2.0,
-    top_flange_cm: float = 10.0,
+    top_flange_cm: Optional[float] = None,
     rib_bw2_cm: Optional[float] = None,
     gamma_c_kn_m3: float = 24.0,
     dl_factor: float = 1.4,
     ll_factor: float = 1.7,
+    block_height_cm: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     Computes hollow-block (Hordi) rib loads and area load per Eng. Yousef's Excel Sheet ('Design of rib slab').
     Accepts either a dictionary of options as the first argument OR individual float parameters.
+    Enforces standard commercial block height (20 cm or 16 cm) so topping slab hs = h - block_height varies with h!
     """
+    req_blk_h = block_height_cm
     if isinstance(slab_thickness_cm, dict):
         d_in = slab_thickness_cm
         slab_thickness_cm = float(d_in.get("total_slab_thickness_cm", d_in.get("slab_thickness_cm", d_in.get("total_thickness_cm", 30.0))))
@@ -278,12 +309,12 @@ def compute_hollow_block_parameters(
         block_weight_kn = float(d_in.get("block_weight_kn", block_weight_kn))
         finish_load_kn_m2 = float(d_in.get("finish_load_kn_m2", d_in.get("finishing_load_kpa", finish_load_kn_m2)))
         live_load_kn_m2 = float(d_in.get("live_load_kn_m2", d_in.get("live_load_kpa", live_load_kn_m2)))
-        top_flange_cm = float(d_in.get("top_compression_slab_cm", d_in.get("top_flange_cm", d_in.get("topping_thickness_cm", top_flange_cm))))
+        if "block_height_cm" in d_in and round(float(d_in["block_height_cm"]), 1) in (16.0, 20.0):
+            req_blk_h = float(d_in["block_height_cm"])
         gamma_c_kn_m3 = float(d_in.get("gamma_c_kn_m3", d_in.get("concrete_unit_weight_kn_m3", gamma_c_kn_m3)))
 
-    h_cm = max(14.0, float(slab_thickness_cm))
-    hs_cm = min(h_cm - 5.0, max(5.0, float(top_flange_cm)))
-    block_height_cm = round(max(5.0, h_cm - hs_cm), 2)
+    h_cm = max(18.0, float(slab_thickness_cm))
+    block_height_cm_val, hs_cm = resolve_standard_hordi_block_and_topping_cm(h_cm, req_blk_h)
 
     s_cm = max(20.0, float(block_width_cm))
     bw1_cm = max(8.0, float(rib_width_cm))
@@ -292,6 +323,7 @@ def compute_hollow_block_parameters(
 
     h_m = h_cm / 100.0
     hs_m = hs_cm / 100.0
+    blk_h_m = block_height_cm_val / 100.0
     s_m = s_cm / 100.0
     bw1_m = bw1_cm / 100.0
     bw2_m = bw2_cm / 100.0
@@ -299,9 +331,11 @@ def compute_hollow_block_parameters(
     blk_len_m = max(0.10, float(block_length_cm) / 100.0)
     gamma_rc = max(18.0, float(gamma_c_kn_m3))
 
-    # Per-Rib Weights (kN/m'/rib) — matching Excel cells exactly
+    # Per-Rib Weights (kN/m'/rib) — matching Excel cells 100%:
+    # Topping = hs * (S + bw1) * gamma_c
+    # Rib Web = ((bw1 + bw2)/2) * (h - hs) * gamma_c = ((bw1 + bw2)/2) * block_height * gamma_c
     topping_wt_rib = round(hs_m * b_space_m * gamma_rc, 4)
-    rib_web_wt_rib = round(((bw1_m + bw2_m) / 2.0) * (h_m - hs_m) * gamma_rc, 4)
+    rib_web_wt_rib = round(((bw1_m + bw2_m) / 2.0) * blk_h_m * gamma_rc, 4)
     blocks_per_m_rib = round(1.0 / blk_len_m, 3)
     block_wt_rib = round(blocks_per_m_rib * float(block_weight_kn), 4)
     finishing_wt_rib = round(float(finish_load_kn_m2) * b_space_m, 4)
@@ -312,7 +346,7 @@ def compute_hollow_block_parameters(
     ll_rib = round(float(live_load_kn_m2) * b_space_m, 4)
     factored_ll_rib = round(float(ll_factor) * ll_rib, 4)
 
-    wu_rib_kn_m = round(factored_dl_rib + factored_ll_rib, 3)
+    wu_rib_kn_m = round(factored_dl_rib + factored_ll_rib, 4)
     wu_m2_kpa = round((factored_dl_rib + factored_ll_rib) / max(0.20, b_space_m), 2)
 
     blocks_per_m2 = (1.0 / b_space_m) * blocks_per_m_rib
@@ -325,7 +359,7 @@ def compute_hollow_block_parameters(
         "total_slab_thickness_cm": round(h_cm, 2),
         "top_flange_cm": round(hs_cm, 2),
         "top_compression_slab_cm": round(hs_cm, 2),
-        "block_height_cm": block_height_cm,
+        "block_height_cm": round(block_height_cm_val, 2),
         "block_width_cm": round(s_cm, 2),
         "block_length_cm": round(blk_len_m * 100.0, 2),
         "rib_width_cm": round(bw1_cm, 2),
@@ -341,7 +375,7 @@ def compute_hollow_block_parameters(
         "block_wt_rib_kn_m": round(block_wt_rib, 3),
         "finishing_wt_rib_kn_m": round(finishing_wt_rib, 3),
         "total_dl_rib_kn_m": round(total_dl_rib, 3),
-        "factored_dl_rib_kn_m": round(factored_dl_rib, 3),
+        "factored_dl_rib_kn_m": round(factored_dl_rib, 4),
         "ll_rib_kn_m": round(ll_rib, 3),
         "factored_ll_rib_kn_m": round(factored_ll_rib, 3),
         "wu_rib_kn_m": round(wu_rib_kn_m, 2),
