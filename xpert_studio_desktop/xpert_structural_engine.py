@@ -608,6 +608,27 @@ def ensure_beam_wall_flags(story_data: Dict[str, Any], beam: Dict[str, Any]) -> 
     return flags
 
 
+def resolve_effective_wall_height_for_story(story_data: Dict[str, Any]) -> float:
+    """
+    Resolves the true physical height of walls CARRIED by the beams of this level:
+    - 00_TieBeams: Carries the walls of the Ground Floor -> H_wall = ground_floor_height_m (default 3.20m, NOT 1.50m excavation depth!)
+    - 02_Ground_Floor: Carries the walls of the First/Typical Upper Floor -> H_wall = upper_floor_height_m (default 3.00m)
+    - Upper Floors: Carries the story above or Roof Parapet (1.50m)
+    - Penthouse / Roof: Parapet wall height (1.50m)
+    """
+    if "wall_height_m" in story_data and float(story_data["wall_height_m"]) > 0.10:
+        return float(story_data["wall_height_m"])
+    st_type = str(story_data.get("story_type", "")).lower()
+    st_id = str(story_data.get("story_id", "")).lower()
+    if "tie" in st_type or "tie" in st_id or "00_" in st_id:
+        return 3.20
+    if "ground" in st_type or "ground" in st_id or "02_" in st_id:
+        return 3.00
+    if "penthouse" in st_type or "penthouse" in st_id or "roof" in st_id:
+        return 1.50
+    return float(story_data.get("height_m", 3.00))
+
+
 def set_story_wall_load_policy(
     story_data: Dict[str, Any],
     policy: str,
@@ -620,16 +641,18 @@ def set_story_wall_load_policy(
     Sets the Story-Level General Wall & Slab Load Policy:
     - policy = 'all_beams': Default wall load ON for all beam spans.
     - policy = 'no_walls': Default wall load OFF for all beam spans (e.g., Roof slab, allowing selective stair walls).
-    - Default wall load for a 20 cm wall: W_wall = 2.5 * (t_wall / 20.0) * H_story * 1.4.
+    - Default wall load for a 20 cm wall: W_wall = 2.5 * (t_wall / 20.0) * H_effective_wall * 1.4.
     """
     clean_policy = "no_walls" if policy == "no_walls" else "all_beams"
     story_data["wall_load_policy"] = clean_policy
     story_h = float(story_data.get("height_m", 3.0))
+    effective_wall_h = resolve_effective_wall_height_for_story(story_data)
+    story_data["wall_height_m"] = effective_wall_h
     if wall_thickness_cm is not None:
         story_data["default_wall_thickness_cm"] = snap_standard_wall_thickness_cm(float(wall_thickness_cm))
     t_wall_def = snap_standard_wall_thickness_cm(float(story_data.get("default_wall_thickness_cm", 20.0)))
     story_data["default_wall_thickness_cm"] = t_wall_def
-    formula_wall_w = round(2.5 * (t_wall_def / 20.0) * story_h * 1.4, 2)
+    formula_wall_w = round(2.5 * (t_wall_def / 20.0) * effective_wall_h * 1.4, 2)
 
     if wall_load_kn_m is not None:
         story_data["default_wall_load_kn_m"] = round(max(0.0, float(wall_load_kn_m)), 2)
@@ -701,8 +724,8 @@ def set_beam_span_wall_thickness(
     t_clean = snap_standard_wall_thickness_cm(float(wall_thickness_cm))
     bm.setdefault("span_wall_thickness_cm", {})[skey] = t_clean
     bm.pop("manual_loads_override", None)
-    story_h = float(story_data.get("height_m", 3.0))
-    w_wall = round((2.5 * story_h * 1.4) * (t_clean / 20.0), 2)
+    eff_h = resolve_effective_wall_height_for_story(story_data)
+    w_wall = round((2.5 * eff_h * 1.4) * (t_clean / 20.0), 2)
     return True, f"Beam {beam_id} ({skey}): Wall thickness set to {t_clean:.0f} cm (W_wall = {w_wall:.2f} kN/m)."
 
 
@@ -722,8 +745,8 @@ def design_hollow_block_slab_rib(
        - hs = Topping Slab Thickness (100 mm)
        - S = Block Width (400 mm), bw1 = 150 mm, bw2 = 150 mm, b = bw1 + S = 550 mm
        - γc = 24 kN/m³, W_finishing = 1.5 kN/m², LL = 2.0 kN/m², W_block = 0.10 kN (4 blocks/m = 0.40 kN/m'/rib)
-       - dc = 20 mm concrete cover, ds = 6 mm triangular stirrup (كانة مثلثة ∅6)
-       - Top fixation bar = 1∅10 mm (سيخ واحد علوي للتثبيت فقط)
+       - dc = 20 mm concrete cover, ds = 6 mm triangular stirrup (triangular stirrup ∅6)
+       - Top fixation bar = 1∅10 mm (single top bar for fixation only)
        - Bottom reinforcement diameter db in {12, 14, 16} mm (default 12 mm)
     2. Load Distinction:
        - Per-Rib Factored Load (used for Rib Flexure & Shear Design):
@@ -922,8 +945,8 @@ def design_hollow_block_slab_rib(
         "n_bars_adopted": n_bars_adopted,
         "as_provided_mm2": as_provided_mm2,
         "bottom_rebar_callout": f"{n_bars_adopted}∅{db_mm} Bottom (per rib)",
-        "top_rebar_callout": f"1∅{top_bar_dia_mm} Top (Fixation Bar / سيخ تثبيت علوي)",
-        "stirrup_callout": f"∅{ds_mm} @ 200 mm Open Triangular Stirrups (كانة مثلثة مفتوحة)",
+        "top_rebar_callout": f"1∅{top_bar_dia_mm} Top (Fixation Bar)",
+        "stirrup_callout": f"∅{ds_mm} @ 200 mm Open Triangular Stirrups",
         "vc_kn": vc_kn,
         "phi_vc_kn": phi_vc_kn,
         "vu_kn": vu_kn,
@@ -1041,7 +1064,8 @@ def analyze_all_story_beams_and_columns(
     slab_wu_kpa = float(story_data.get("slab_factored_wu_kpa", auto_slab_wu_kpa))
 
     default_t_wall_cm = float(story_data.get("default_wall_thickness_cm", 20.0))
-    formula_wall_20cm = round(2.5 * story_h * 1.4, 2)
+    eff_wall_h = resolve_effective_wall_height_for_story(story_data)
+    formula_wall_20cm = round(2.5 * eff_wall_h * 1.4, 2)
     if not story_data.get("custom_wall_load_override", False):
         story_data["default_wall_load_kn_m"] = round(formula_wall_20cm * (default_t_wall_cm / 20.0), 2)
     default_wall_w = float(story_data.get("default_wall_load_kn_m", formula_wall_20cm))
@@ -2659,10 +2683,10 @@ def validate_and_build_beam_with_cantilevers(
     """
     Validates strict Revit-style structural beam rules:
     1. Outer Slab Boundary (Polyline) must exist on Slab stories, UNLESS `is_tie_beam_story=True`
-       (00_TieBeams / مسقط السملات), where Tie Beams can be drawn directly between columns without a boundary!
-    2. On `00_TieBeams`, only Drop Beams (Tie Beams / سملات) are allowed (Hidden Beams are forbidden).
-    3. Opening-Adjacent Rule: A Hidden Beam bordering or lying between slab openings (`openings`) is
-       automatically converted to a Drop Beam (`0.20 × 0.40 m`) so its width never expands into the opening!
+       (00_TieBeams), where Tie Beams can be drawn directly between columns without a boundary!
+    2. On `00_TieBeams`, only Drop Beams (Grade/Tie Beams) are allowed (Hidden Beams are forbidden).
+    3. Opening-Adjacent Rule: A Hidden Beam crossing an opening void or trapped with no expansion room is
+       automatically converted to a Drop Beam (`0.20 × 0.40 m`) so its width never expands into the void!
     4. Structural Hierarchy Rule: A Drop Beam (`drop`) CANNOT rest on a Hidden Beam (`hidden`)!
     5. Full Outer-Face Column Bearing & Full-Width Beam Boundary Shift.
     6. Duplicate Overlapping Beam Prevention & Continuous Multi-Span Recognition.
@@ -2671,7 +2695,7 @@ def validate_and_build_beam_with_cantilevers(
         return (
             False,
             None,
-            "Tie-Beams Story Rule (مسقط السملات): Hidden beams are not allowed in the Tie-Beams story. Use Drop Beam (Tie Beam / سمل).",
+            "Tie-Beams Story Rule: Hidden beams are not allowed on the Tie-Beams story (00_TieBeams). Use Drop Beams (Grade/Tie Beams).",
         )
 
     has_bnd, min_x, min_y, max_x, max_y = get_slab_bounding_box(slab_edge_polygon)
@@ -2809,21 +2833,25 @@ def validate_and_build_beam_with_cantilevers(
             "end_x": ex,
             "end_y": ey,
         }
-        adj_ops = [
+        crossing_ops = [
             str(op.get("id", "OP"))
             for op in openings
-            if beam_borders_or_crosses_opening(probe_bm, op) in ("borders", "crosses")
+            if beam_borders_or_crosses_opening(probe_bm, op) == "crosses"
         ]
-        if adj_ops:
+        has_room = beam_has_solid_slab_expansion_room(
+            {"slab_edge_polygon": slab_edge_polygon, "openings": openings},
+            probe_bm,
+        )
+        if crossing_ops or not has_room:
             beam_kind = "drop"
             width_m = 0.20
             depth_m = 0.40
             half_w = width_m / 2.0
             opening_note = (
-                f" [تنبيه فتحة سقف: الكمرة {beam_id} محاذية للفتحة {', '.join(adj_ops)} — "
-                f"تم تحويلها تلقائياً إلى كمرة ساقطة (0.20×0.40م) لمنع تمددها داخل الفتحة أو خارج السقف]"
+                f" [Opening Rule: Beam {beam_id} converted to Drop Beam (0.20x0.40m) "
+                f"because it cuts across opening void or lacks solid slab expansion room]"
             )
-            _log_eng("OPENING_BEAM_RULE", f"Beam {beam_id} drawn near opening(s) {adj_ops} forced to Drop 0.20x0.40m")
+            _log_eng("OPENING_BEAM_RULE", f"Beam {beam_id} drawn near void forced to Drop 0.20x0.40m")
 
     # STRICT STRUCTURAL RULE: A Drop Beam CANNOT rest on a Hidden Beam!
     if str(beam_kind).lower() == "drop":
@@ -2836,7 +2864,7 @@ def validate_and_build_beam_with_cantilevers(
             return (
                 False,
                 None,
-                f"Structural Hierarchy Error (خطأ إنشائي): Drop Beam {beam_id} cannot rest on Hidden Beam(s) {', '.join(hidden_carriers)}! "
+                f"Structural Hierarchy Error: Drop Beam {beam_id} cannot rest on Hidden Beam(s) {', '.join(hidden_carriers)}! "
                 f"Convert {', '.join(hidden_carriers)} to a Drop Beam first, or draw {beam_id} as a Hidden Beam.",
             )
 
@@ -3008,6 +3036,36 @@ def _point_in_polygon_2d(px: float, py: float, poly: List[List[float]]) -> bool:
     return inside
 
 
+def has_beam_on_segment(story_data: Dict[str, Any], x1: float, y1: float, x2: float, y2: float) -> Optional[Dict[str, Any]]:
+    """
+    Checks if a physical beam exists along the line segment (x1, y1) -> (x2, y2).
+    Uses tighter end tolerance (+0.05m instead of +0.35m) to prevent phantom overlap
+    from beams terminating at an intersection from bleeding into adjacent segments.
+    """
+    beams = story_data.get("beams", [])
+    is_seg_horiz = abs(x2 - x1) >= abs(y2 - y1)
+    seg_len = max(0.10, abs(x2 - x1) if is_seg_horiz else abs(y2 - y1))
+    for bm in beams:
+        bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+        bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+        b_width = float(bm.get("width_m", 0.40))
+        tol_lat = max(0.20, b_width / 2.0 + 0.08)
+        b_horiz = abs(bex - bsx) >= abs(bey - bsy)
+        if is_seg_horiz and b_horiz and abs(bsy - y1) <= tol_lat:
+            b_min, b_max = min(bsx, bex), max(bsx, bex)
+            s_min, s_max = min(x1, x2), max(x1, x2)
+            ov = min(b_max + 0.05, s_max) - max(b_min - 0.05, s_min)
+            if ov >= seg_len * 0.60:
+                return bm
+        elif (not is_seg_horiz) and (not b_horiz) and abs(bsx - x1) <= tol_lat:
+            b_min, b_max = min(bsy, bey), max(bsy, bey)
+            s_min, s_max = min(y1, y2), max(y1, y2)
+            ov = min(b_max + 0.05, s_max) - max(b_min - 0.05, s_min)
+            if ov >= seg_len * 0.60:
+                return bm
+    return None
+
+
 def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Revit Room-Bounding Bay Detection with True Physical Beam-Bounded Room Merging:
@@ -3059,23 +3117,7 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     sorted_y = sorted(ys)
 
     def has_beam_on_segment(x1: float, y1: float, x2: float, y2: float) -> Optional[Dict[str, Any]]:
-        is_seg_horiz = abs(x2 - x1) >= abs(y2 - y1)
-        seg_len = max(0.10, abs(x2 - x1) if is_seg_horiz else abs(y2 - y1))
-        for bm in beams:
-            bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
-            bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
-            b_width = float(bm.get("width_m", 0.40))
-            tol_lat = max(0.48, b_width + 0.15)
-            b_horiz = abs(bex - bsx) >= abs(bey - bsy)
-            if is_seg_horiz and b_horiz and abs(bsy - y1) <= tol_lat:
-                ov = min(max(bsx, bex) + 0.35, max(x1, x2)) - max(min(bsx, bex) - 0.35, min(x1, x2))
-                if ov >= seg_len * 0.65:
-                    return bm
-            elif (not is_seg_horiz) and (not b_horiz) and abs(bsx - x1) <= tol_lat:
-                ov = min(max(bsy, bey) + 0.35, max(y1, y2)) - max(min(bsy, bey) - 0.35, min(y1, y2))
-                if ov >= seg_len * 0.65:
-                    return bm
-        return None
+        return globals()["has_beam_on_segment"](story_data, x1, y1, x2, y2)
 
     def has_poly_edge_on_segment(x1: float, y1: float, x2: float, y2: float) -> bool:
         is_seg_horiz = abs(x2 - x1) >= abs(y2 - y1)
@@ -3085,13 +3127,17 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             px1, py1 = float(poly[idx][0]), float(poly[idx][1])
             px2, py2 = float(poly[(idx + 1) % n][0]), float(poly[(idx + 1) % n][1])
             p_horiz = abs(px2 - px1) >= abs(py2 - py1)
-            if is_seg_horiz and p_horiz and abs(py1 - y1) <= 0.35:
-                ov = min(max(px1, px2) + 0.25, max(x1, x2)) - max(min(px1, px2) - 0.25, min(x1, x2))
-                if ov >= seg_len * 0.65:
+            if is_seg_horiz and p_horiz and abs(py1 - y1) <= 0.25:
+                p_min, p_max = min(px1, px2), max(px1, px2)
+                s_min, s_max = min(x1, x2), max(x1, x2)
+                ov = min(p_max + 0.05, s_max) - max(p_min - 0.05, s_min)
+                if ov >= seg_len * 0.60:
                     return True
-            elif (not is_seg_horiz) and (not p_horiz) and abs(px1 - x1) <= 0.35:
-                ov = min(max(py1, py2) + 0.25, max(y1, y2)) - max(min(py1, py2) - 0.25, min(y1, y2))
-                if ov >= seg_len * 0.65:
+            elif (not is_seg_horiz) and (not p_horiz) and abs(px1 - x1) <= 0.25:
+                p_min, p_max = min(py1, py2), max(py1, py2)
+                s_min, s_max = min(y1, y2), max(y1, y2)
+                ov = min(p_max + 0.05, s_max) - max(p_min - 0.05, s_min)
+                if ov >= seg_len * 0.60:
                     return True
         return False
 
@@ -3386,7 +3432,7 @@ def _find_controlling_cantilever_slabs_for_bay(
 ) -> List[Dict[str, Any]]:
     """
     Dynamically checks live geometry across all existing slabs in `story_data['slabs']` to determine
-    if `target_bay` is currently acting as the back-span extension (`بلاطة امتداد الكابولي`) for any
+    if `target_bay` is currently acting as the back-span extension (Cantilever Back-Span Continuity) for any
     adjacent Cantilever Slab whose ribs are oriented perpendicular to the shared carrier beam.
     Immune to slab splitting, beam additions, or creation order!
     """
@@ -3465,8 +3511,23 @@ def reconcile_and_split_slabs_after_beam_change(story_data: Dict[str, Any]) -> T
                         matching_bays.append(b)
 
             if not matching_bays:
-                reconciled_slabs.append(dict(old_s))
-                continue
+                # If a dividing beam was removed/moved and the bay expanded to a larger room:
+                expanded_bay = next(
+                    (
+                        b for b in new_bays
+                        if b["beam_count"] >= 3
+                        and float(b["min_x"]) <= omin_x + 0.35
+                        and float(b["max_x"]) >= omax_x - 0.35
+                        and float(b["min_y"]) <= omin_y + 0.35
+                        and float(b["max_y"]) >= omax_y - 0.35
+                    ),
+                    None,
+                )
+                if expanded_bay is not None and expanded_bay["bay_key"] not in used_bay_keys:
+                    matching_bays = [expanded_bay]
+                else:
+                    reconciled_slabs.append(dict(old_s))
+                    continue
 
             if len(matching_bays) > 1:
                 split_count += len(matching_bays)
@@ -3635,7 +3696,7 @@ def pick_area_create_or_update_slab(
     Handles the 'Pick Area' tool for creating/toggling Slabs (00-XD-SLAB) and Openings (00-XD-OPEN),
     implementing Eng. Yousef's exact structural rules + Bidirectional Cantilever Back-Span Continuity:
     1. True Physical Bay Detection (never split by neighboring bays' partial beams).
-    2. Strict Dynamic Cantilever Back-Span Equilibrium Lock (`بلاطة امتداد الكابولي`):
+    2. Strict Dynamic Cantilever Back-Span Equilibrium Lock:
        - Whenever a Cantilever Slab (e.g. S4) has its ribs oriented perpendicular to its interior carrier beam,
          the adjacent Back-Span Slab (e.g. S3) is automatically aligned to the same rib direction AND strictly
          locked against flipping unless S4's ribs are first flipped onto two side beams (0°/90°) or S4 is deleted!
@@ -3702,7 +3763,7 @@ def pick_area_create_or_update_slab(
 
     existing_open = next((o for o in openings if o.get("bay_key") == bay_key), None)
 
-    # Dynamic check: Does an existing adjacent Cantilever Slab rely on `target_bay` as its back-span (`بلاطة امتداد الكابولي`)?
+    # Dynamic check: Does an existing adjacent Cantilever Slab rely on `target_bay` as its back-span extension?
     controlling_cantilevers = _find_controlling_cantilever_slabs_for_bay(story_data, target_bay, bays)
     controlling_cantilever_slab = controlling_cantilevers[0] if controlling_cantilevers else None
 
@@ -3774,7 +3835,7 @@ def pick_area_create_or_update_slab(
     else:
         chosen_dir = default_dir
 
-    # STRICT RULE 1: If this bay is the back-span (`بلاطة امتداد الكابولي`) of an active Cantilever Slab,
+    # STRICT RULE 1: If this bay is the back-span of an active Cantilever Slab,
     # it CANNOT be flipped perpendicular to the cantilever unless the cantilever slab itself is first flipped
     # onto two side drop beams or deleted!
     if controlling_cantilever_slab is not None:
@@ -3784,7 +3845,7 @@ def pick_area_create_or_update_slab(
                 alt_dir = 0 if req_c_dir == 90 else 90
                 return (
                     False,
-                    f"Cantilever Back-Span Lock (قفل بلاطة امتداد الكابولي): Slab {existing_slab['id'] if existing_slab else bay_key} "
+                    f"Cantilever Back-Span Lock: Slab {existing_slab['id'] if existing_slab else bay_key} "
                     f"is the back-span extension for Cantilever Slab {controlling_cantilever_slab['id']} ({req_c_dir}°). "
                     f"Its ribs CANNOT be changed unless {controlling_cantilever_slab['id']} is first flipped to {alt_dir}° (on two side beams) or deleted!",
                     existing_slab,
@@ -3992,7 +4053,7 @@ def flip_slab_rib_by_id(
             if ok and updated is not None and str(updated.get("id")) == str(slab_id):
                 updated["rib_angle_deg"] = int(updated.get("rib_direction_deg", 0))
                 return ok, msg, updated
-            if not ok and ("Cantilever" in msg or "امتداد الكابولي" in msg):
+            if not ok and ("Cantilever" in msg):
                 return ok, msg, updated
 
     cur_dir = int(target_slb.get("rib_direction_deg", target_slb.get("rib_angle_deg", 0)))
@@ -4942,7 +5003,7 @@ def coalesce_adjacent_openings(story_data: Dict[str, Any]) -> Tuple[int, List[st
                     oa["polygon"] = new_poly
                     oa["merged_from"] = [str(oa.get("id")), str(ob.get("id"))]
                     normalize_opening_dict(oa)
-                    merged_events.append(f"تم دمج الفتحتين المتلاصقتين ({oa.get('id')} + {ob.get('id')}) في فتحة واحدة موحدة لعدم وجود كمرة فاصلة بينهما.")
+                    merged_events.append(f"Merged adjacent openings ({oa.get('id')} + {ob.get('id')}) into a unified opening because no dividing beam separates them.")
                     openings.pop(j)
                     merges += 1
                     changed = True
@@ -5023,14 +5084,56 @@ def beam_borders_or_crosses_opening(
     return None
 
 
+def beam_has_solid_slab_expansion_room(
+    story_data: Dict[str, Any],
+    bm: Dict[str, Any],
+    test_offset_m: float = 0.35,
+) -> bool:
+    """
+    Checks if a beam has solid slab space on at least one lateral side
+    (strictly inside slab_edge_polygon and outside all openings) to expand as a Hidden Beam.
+    If BOTH lateral sides are voids or exterior boundaries, the beam is trapped and MUST be a Drop Beam.
+    """
+    poly = story_data.get("slab_edge_polygon", [])
+    openings = story_data.get("openings", [])
+    if len(poly) < 3:
+        return True
+
+    bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+    bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+    mx, my = (bsx + bex) / 2.0, (bsy + bey) / 2.0
+    is_horiz = abs(bex - bsx) >= abs(bey - bsy)
+
+    if is_horiz:
+        probes = [(mx, my + test_offset_m), (mx, my - test_offset_m)]
+    else:
+        probes = [(mx + test_offset_m, my), (mx - test_offset_m, my)]
+
+    for px, py in probes:
+        if not _point_in_polygon_2d(px, py, poly):
+            continue
+        in_any_op = any(
+            is_point_in_opening(px, py, op, include_edge=True, tol=0.04)
+            for op in openings
+        )
+        if not in_any_op:
+            return True
+
+    return False
+
+
 def enforce_opening_adjacent_drop_beams_and_cascade(story_data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     """
-    Enforces two mandatory rules requested by Eng. Yousef:
-    1. Any beam adjacent to / bordering / between Slab Openings (e.g., Beam B7 between stairwell openings)
-       or whose widened width expands outside the slab boundary into a void/edge MUST be a Drop Beam
-       (`0.20 × 0.40 m`) — Hidden Beams are forbidden there!
-    2. Recursive Carrier Cascade: Whenever any beam becomes a Drop Beam, EVERY carrier beam supporting
-       it (`sup['kind'] == 'beam'`) MUST also convert from Hidden Beam -> Drop Beam, cascading upstream!
+    Selective Opening Drop Beam Enforcement & Recursive Carrier Cascade (v2.4.0):
+    1. A beam is converted to a Drop Beam ONLY if:
+       - It cuts directly across a slab opening void (`crosses`), OR
+       - It is trapped between two voids/openings with NO solid slab expansion room on either side, OR
+       - Its cross-section width physically overflows outside the outer building boundary.
+       Parallel boundary/trimmer beams (such as B8 or B9) that have solid slab on the opposite side
+       CAN remain Hidden Beams and are NOT auto-converted to Drop!
+    2. Recursive Carrier Cascade: Whenever any beam becomes a Drop Beam (such as secondary B7),
+       EVERY carrier beam supporting it (`sup['kind'] == 'beam'`) MUST also convert from Hidden Beam -> Drop Beam,
+       cascading upstream (e.g. Carrier B6 becomes Drop because B7 rests on it).
     """
     beams = story_data.get("beams", [])
     openings = story_data.get("openings", [])
@@ -5046,18 +5149,23 @@ def enforce_opening_adjacent_drop_beams_and_cascade(story_data: Dict[str, Any]) 
     converted_ids: List[str] = []
     alerts: List[str] = []
 
-    # Step 1: Convert any Hidden beam bordering/crossing an opening (or overflowing outside boundary) -> Drop Beam
+    # Step 1: Convert Hidden beam crossing opening void or trapped with no expansion room -> Drop Beam
     for bm in beams:
         bid = str(bm.get("id", ""))
         b_kind = "drop" if "drop" in str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower() else "hidden"
         if b_kind != "hidden":
             continue
 
-        touch_ops: List[str] = []
+        crossing_ops: List[str] = []
+        bordering_ops: List[str] = []
         for op in openings:
             rel = beam_borders_or_crosses_opening(bm, op)
-            if rel in ("borders", "crosses"):
-                touch_ops.append(str(op.get("id", "OP")))
+            if rel == "crosses":
+                crossing_ops.append(str(op.get("id", "OP")))
+            elif rel == "borders":
+                bordering_ops.append(str(op.get("id", "OP")))
+
+        has_room = beam_has_solid_slab_expansion_room(story_data, bm)
 
         overflows_boundary = False
         if has_bnd and float(bm.get("width_m", 0.40)) > 0.405:
@@ -5071,7 +5179,28 @@ def enforce_opening_adjacent_drop_beams_and_cascade(story_data: Dict[str, Any]) 
                 if (bsx - hw) < (pmin_x - 0.05) or (bsx + hw) > (pmax_x + 0.05):
                     overflows_boundary = True
 
-        if touch_ops or overflows_boundary:
+        must_convert = False
+        reason_msg = ""
+        if crossing_ops:
+            must_convert = True
+            reason_msg = (
+                f"Opening Rule: Beam {bid} converted to Drop Beam (0.20x0.40m) "
+                f"because it cuts directly across opening void(s) {', '.join(crossing_ops)}."
+            )
+        elif not has_room and bordering_ops:
+            must_convert = True
+            reason_msg = (
+                f"Opening Boundary Rule: Beam {bid} converted to Drop Beam (0.20x0.40m) "
+                f"because both lateral sides are voids ({', '.join(bordering_ops)}) with no solid slab expansion room."
+            )
+        elif overflows_boundary:
+            must_convert = True
+            reason_msg = (
+                f"Building Boundary Rule: Beam {bid} section width expands outside building perimeter "
+                f"and was converted to Drop Beam (0.20x0.40m)."
+            )
+
+        if must_convert:
             bm["beam_kind"] = "drop"
             bm["kind"] = "drop"
             bm["width_m"] = 0.20
@@ -5080,17 +5209,8 @@ def enforce_opening_adjacent_drop_beams_and_cascade(story_data: Dict[str, Any]) 
             bm["initial_depth_m"] = bm["depth_m"]
             bm.pop("manual_loads_override", None)
             converted_ids.append(bid)
-            if touch_ops:
-                msg = (
-                    f"تنبيه فتحة سقف: تم تحويل الكمرة {bid} إلى كمرة ساقطة (0.20×{bm['depth_m']:.2f}م) ومنع أن تكون مدفونة "
-                    f"لمحاذاتها للفتحة ({', '.join(touch_ops)}) حتى لا تتمدد داخل الفتحة أو خارج حدود السقف."
-                )
-            else:
-                msg = (
-                    f"تنبيه حدود السقف: الكمرة {bid} تمدد عرضها خارج حدود السقف فتم تحويلها تلقائياً إلى كمرة ساقطة (0.20×{bm['depth_m']:.2f}م)."
-                )
-            alerts.append(msg)
-            _log_eng("OPENING_DROP_FORCE", msg, {"beam_id": bid, "openings": touch_ops})
+            alerts.append(reason_msg)
+            _log_eng("OPENING_DROP_FORCE", reason_msg, {"beam_id": bid, "openings": crossing_ops or bordering_ops})
 
     # Step 2: Recursive Upstream Carrier Cascade (Drop secondary beam -> Drop carrier beam!)
     changed = True
@@ -5120,8 +5240,8 @@ def enforce_opening_adjacent_drop_beams_and_cascade(story_data: Dict[str, Any]) 
                         if car_id not in converted_ids:
                             converted_ids.append(car_id)
                         cmsg = (
-                            f"تسلسل التحميل الإنشائي (Cascade): تم تحويل الكمرة الحاملة {car_id} تلقائياً إلى كمرة ساقطة "
-                            f"(0.20×{car_bm['depth_m']:.2f}م) لأن الكمرة الساقطة {bid} محملة عليها."
+                            f"Structural Carrier Cascade: Carrier Beam {car_id} automatically converted to Drop Beam "
+                            f"(0.20x{car_bm['depth_m']:.2f}m) because Secondary Drop Beam {bid} rests on it."
                         )
                         alerts.append(cmsg)
                         _log_eng("CARRIER_CASCADE", cmsg, {"secondary": bid, "carrier": car_id})
@@ -5224,8 +5344,31 @@ def create_opening_with_priority_resolution(
         p1, p2 = points_or_rect[0], points_or_rect[1]
         x1, y1 = round(min(float(p1[0]), float(p2[0])), 3), round(min(float(p1[1]), float(p2[1])), 3)
         x2, y2 = round(max(float(p1[0]), float(p2[0])), 3), round(max(float(p1[1]), float(p2[1])), 3)
-        if (x2 - x1) < 0.30 or (y2 - y1) < 0.30:
-            return {"ok": False, "error": "Opening width and height must be at least 0.30 m."}
+
+        # Smart flush alignment with nearby bounding beams (v2.4.0):
+        # Snap flush to beam inner faces so the opening does not expand into beams by half_w
+        for bm_cand in story_data.get("beams", []):
+            bw_c = float(bm_cand.get("width_m", 0.20))
+            hw_c = bw_c / 2.0
+            bsx_c, bsy_c = float(bm_cand.get("start_x", 0.0)), float(bm_cand.get("start_y", 0.0))
+            bex_c, bey_c = float(bm_cand.get("end_x", 0.0)), float(bm_cand.get("end_y", 0.0))
+            if abs(bex_c - bsx_c) >= abs(bey_c - bsy_c):
+                # Horizontal beam
+                if max(bsx_c, bex_c) + 0.10 > x1 and min(bsx_c, bex_c) - 0.10 < x2:
+                    if abs(y1 - bsy_c) <= hw_c + 0.08 or abs(y1 - (bsy_c + hw_c)) <= 0.08:
+                        y1 = round(bsy_c + hw_c, 3)
+                    elif abs(y2 - bsy_c) <= hw_c + 0.08 or abs(y2 - (bsy_c - hw_c)) <= 0.08:
+                        y2 = round(bsy_c - hw_c, 3)
+            else:
+                # Vertical beam
+                if max(bsy_c, bey_c) + 0.10 > y1 and min(bsy_c, bey_c) - 0.10 < y2:
+                    if abs(x1 - bsx_c) <= hw_c + 0.08 or abs(x1 - (bsx_c + hw_c)) <= 0.08:
+                        x1 = round(bsx_c + hw_c, 3)
+                    elif abs(x2 - bsx_c) <= hw_c + 0.08 or abs(x2 - (bsx_c - hw_c)) <= 0.08:
+                        x2 = round(bsx_c - hw_c, 3)
+
+        if (x2 - x1) < 0.25 or (y2 - y1) < 0.25:
+            return {"ok": False, "error": "Opening width and height must be at least 0.25 m."}
         new_op = {
             "id": f"OP{len(openings) + 1}",
             "shape": "rectangle",
@@ -5272,7 +5415,7 @@ def create_opening_with_priority_resolution(
                 best_y = min(cand_ys, key=lambda cy_c: abs(cy_c - sy))
                 bm["start_y"] = bm["end_y"] = best_y
                 shifted_beams.append(bid)
-                alerts.append(f"أولوية الفتحة: الكمرة {bid} كانت تقطع داخل الفتحة {op['id']} فتم إزاحتها إلى الحافة الصلبة (Y={best_y:.2f}م) وتحويلها لكمرة ساقطة.")
+                alerts.append(f"Opening Priority: Beam {bid} cut through opening {op['id']}; shifted to solid edge (Y={best_y:.2f}m) and converted to Drop Beam.")
             else:
                 cand_xs = [round(float(op["min_x"]) - 0.10, 3), round(float(op["max_x"]) + 0.10, 3)]
                 if has_bnd:
@@ -5280,7 +5423,7 @@ def create_opening_with_priority_resolution(
                 best_x = min(cand_xs, key=lambda cx_c: abs(cx_c - sx))
                 bm["start_x"] = bm["end_x"] = best_x
                 shifted_beams.append(bid)
-                alerts.append(f"أولوية الفتحة: الكمرة {bid} كانت تقطع داخل الفتحة {op['id']} فتم إزاحتها إلى الحافة الصلبة (X={best_x:.2f}م) وتحويلها لكمرة ساقطة.")
+                alerts.append(f"Opening Priority: Beam {bid} cut through opening {op['id']}; shifted to solid edge (X={best_x:.2f}m) and converted to Drop Beam.")
 
     # Enforce Opening-Adjacent Drop Beam & Carrier Cascade
     conv_ids, cascade_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story_data)
@@ -5299,7 +5442,7 @@ def create_opening_with_priority_resolution(
         kept_slabs.append(slb)
     if rem_slabs:
         story_data["slabs"] = kept_slabs
-        alerts.append(f"تمت إزالة البلاطات المتداخلة مع الفتحة: {', '.join(rem_slabs)}.")
+        alerts.append(f"Removed slabs overlapping opening: {', '.join(rem_slabs)}.")
 
     # Detect any conflicting columns strictly inside any opening
     conflicting_columns: List[Dict[str, Any]] = []
@@ -5351,7 +5494,7 @@ def convert_beam_kind_and_section(
     Converts a beam between Hidden Beam ('hidden', e.g., 0.40x0.30m) and Drop Beam ('drop', e.g., 0.20x0.40m)
     or updates its cross-section, clamps it inside the building boundary, and reconciles adjacent slabs.
     Enforces:
-    - Opening-Adjacent Rule: A beam bordering an opening CANNOT be converted to Hidden!
+    - Opening Rule: A beam cutting across an opening or trapped between voids cannot be Hidden!
     - Structural Hierarchy Rule: A Carrier Beam cannot be Hidden if a Drop Beam rests on it!
     - If converting a Secondary Beam to Drop, automatically cascades Hidden Carrier Beam(s) -> Drop Beam!
     """
@@ -5367,18 +5510,28 @@ def convert_beam_kind_and_section(
 
     beam_by_id = {str(b.get("id")): b for b in beams if b.get("id")}
 
-    # Rule 0: Prevent converting Opening-Adjacent Beam to Hidden
+    # Rule 0: Check Opening Relations
     if target_kind == "hidden":
-        adj_ops = [
-            str(op.get("id", "OP"))
-            for op in story_data.get("openings", [])
-            if beam_borders_or_crosses_opening(bm, op) in ("borders", "crosses")
-        ]
-        if adj_ops:
+        crossing_ops: List[str] = []
+        trapped_ops: List[str] = []
+        for op in story_data.get("openings", []):
+            rel = beam_borders_or_crosses_opening(bm, op)
+            if rel == "crosses":
+                crossing_ops.append(str(op.get("id", "OP")))
+            elif rel == "borders":
+                trapped_ops.append(str(op.get("id", "OP")))
+
+        if crossing_ops:
             return (
                 False,
-                f"Opening Boundary Rule (منع المدفونة بجانب الفتحات): لا يمكن تحويل الكمرة {beam_id} إلى كمرة مدفونة "
-                f"لأنها محاذية لفتحة السقف ({', '.join(adj_ops)}) — يجب أن تبقى كمرة ساقطة حتى لا تتمدد داخل الفتحة أو خارج السقف.",
+                f"Opening Boundary Rule: Cannot convert Beam {beam_id} to a Hidden Beam "
+                f"because it cuts directly across opening void(s) ({', '.join(crossing_ops)})!",
+            )
+        if trapped_ops and not beam_has_solid_slab_expansion_room(story_data, bm):
+            return (
+                False,
+                f"Opening Boundary Rule: Cannot convert Beam {beam_id} to a Hidden Beam "
+                f"because both lateral sides are voids ({', '.join(trapped_ops)}) with no solid slab expansion room!",
             )
 
     # Rule A: Prevent converting Carrier Beam `beam_id` to Hidden if any Secondary Drop Beam rests on it
@@ -5396,7 +5549,7 @@ def convert_beam_kind_and_section(
         if supported_drop_beams:
             return (
                 False,
-                f"Structural Hierarchy Error (خطأ إنشائي - كمرة ساقطة على مدفونة): Cannot convert Carrier Beam {beam_id} to a Hidden Beam "
+                f"Structural Hierarchy Error: Cannot convert Carrier Beam {beam_id} to a Hidden Beam "
                 f"because Drop Beam(s) {', '.join(supported_drop_beams)} rest on it! Convert {', '.join(supported_drop_beams)} to Hidden Beam(s) first.",
             )
 
@@ -5415,7 +5568,7 @@ def convert_beam_kind_and_section(
         if hidden_carriers:
             return (
                 False,
-                f"Structural Hierarchy Error (خطأ إنشائي - كمرة ساقطة على مدفونة): Cannot convert Beam {beam_id} to a Drop Beam "
+                f"Structural Hierarchy Error: Cannot convert Beam {beam_id} to a Drop Beam "
                 f"because it rests on Hidden Carrier Beam(s) {', '.join(hidden_carriers)}! Convert {', '.join(hidden_carriers)} to a Drop Beam first.",
             )
 

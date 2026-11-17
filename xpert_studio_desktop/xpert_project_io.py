@@ -29,7 +29,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.3.0-structural-bim-pro"
+STUDIO_VERSION = "v2.4.0-structural-bim-pro"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
@@ -122,8 +122,8 @@ def clear_studio_log(project_dir: Optional[str] = None) -> None:
         pass
 
 DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
-    {"active": True, "enabled": True, "label": "Φ 6", "bar_name": "Φ6", "dia_mm": 6, "diameter_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Stirrups (كانات الأعصاب والكمرات)"},
-    {"active": True, "enabled": True, "label": "Φ 8", "bar_name": "Φ8", "dia_mm": 8, "diameter_mm": 8, "area_mm2": 50.27, "weight_kg_m": 0.395, "role": "Stirrups (كانات)"},
+    {"active": True, "enabled": True, "label": "Φ 6", "bar_name": "Φ6", "dia_mm": 6, "diameter_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Stirrups (Ribs & Beams)"},
+    {"active": True, "enabled": True, "label": "Φ 8", "bar_name": "Φ8", "dia_mm": 8, "diameter_mm": 8, "area_mm2": 50.27, "weight_kg_m": 0.395, "role": "Stirrups (Beams & Columns)"},
     {"active": True, "enabled": True, "label": "Φ 10", "bar_name": "Φ10", "dia_mm": 10, "diameter_mm": 10, "area_mm2": 78.54, "weight_kg_m": 0.617, "role": "Stirrups / Top Fixation Bar"},
     {"active": True, "enabled": True, "label": "Φ 12", "bar_name": "Φ12", "dia_mm": 12, "diameter_mm": 12, "area_mm2": 113.10, "weight_kg_m": 0.888, "role": "Longitudinal / Slab Ribs"},
     {"active": True, "enabled": True, "label": "Φ 14", "bar_name": "Φ14", "dia_mm": 14, "diameter_mm": 14, "area_mm2": 153.94, "weight_kg_m": 1.208, "role": "Longitudinal / Slab Ribs"},
@@ -631,20 +631,21 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
     stories_meta: List[Dict[str, Any]] = []
 
-    # 00 - Tie Beams
+    # 00 - Tie Beams (Carries Ground Floor walls -> H_wall = ground_h, NOT foundation depth!)
     stories_meta.append({
         "story_id": "00_TieBeams",
         "story_label": "00 - Tie Beams & Grade Beams",
         "story_type": "tie_beams",
         "multiplier": 1,
         "height_m": foundation_depth,
+        "wall_height_m": ground_h,
         "adopted_slab_thickness_cm": 0.0,
         "allow_hidden_beams": False,
         "allow_slabs": False,
         "status": "PENDING_GROUND_COLUMNS",
     })
 
-    # 01 - Optional Basement
+    # 01 - Optional Basement (Carries Ground Floor walls)
     if include_basement:
         stories_meta.append({
             "story_id": "01_Basement_Slab",
@@ -652,26 +653,29 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             "story_type": "basement",
             "multiplier": 1,
             "height_m": basement_h,
+            "wall_height_m": ground_h,
             "adopted_slab_thickness_cm": 30.0,
             "allow_hidden_beams": True,
             "allow_slabs": True,
             "status": "PENDING_GROUND_COLUMNS",
         })
 
-    # 02 - Mandatory Ground Floor
+    # 02 - Mandatory Ground Floor (Carries Upper/First Floor walls -> H_wall = upper_h!)
+    ground_wall_h = upper_h if floors_above_ground > 0 else (penthouse_h if include_penthouse else 1.50)
     stories_meta.append({
         "story_id": "02_Ground_Floor",
         "story_label": "02 - Ground Floor Slab (Mandatory Start)",
         "story_type": "ground",
         "multiplier": 1,
         "height_m": ground_h,
+        "wall_height_m": ground_wall_h,
         "adopted_slab_thickness_cm": 30.0,
         "allow_hidden_beams": True,
         "allow_slabs": True,
         "status": "ACTIVE_START",
     })
 
-    # Upper Floors (03+)
+    # Upper Floors (03+) (Carries Upper / Penthouse / Parapet walls)
     next_code = 3
     if floors_above_ground > 0:
         if upper_mode == "typical" and floors_above_ground >= 1:
@@ -681,6 +685,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
                 "story_type": "typical",
                 "multiplier": floors_above_ground,
                 "height_m": upper_h,
+                "wall_height_m": upper_h if include_penthouse else 1.50,
                 "adopted_slab_thickness_cm": 30.0,
                 "allow_hidden_beams": True,
                 "allow_slabs": True,
@@ -689,12 +694,15 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             next_code += 1
         else:
             for idx in range(floors_above_ground):
+                is_last_upper = (idx == floors_above_ground - 1)
+                u_wall_h = upper_h if (not is_last_upper or include_penthouse) else 1.50
                 stories_meta.append({
                     "story_id": f"{next_code:02d}_Upper_Floor_{idx + 1}",
                     "story_label": f"{next_code:02d} - Upper Floor #{idx + 1}",
                     "story_type": "standard",
                     "multiplier": 1,
                     "height_m": upper_h,
+                    "wall_height_m": u_wall_h,
                     "adopted_slab_thickness_cm": 30.0,
                     "allow_hidden_beams": True,
                     "allow_slabs": True,
@@ -710,6 +718,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             "story_type": "penthouse",
             "multiplier": 1,
             "height_m": penthouse_h,
+            "wall_height_m": 1.50,
             "adopted_slab_thickness_cm": 30.0,
             "allow_hidden_beams": True,
             "allow_slabs": True,
@@ -773,13 +782,16 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         json_path = os.path.join(stories_dir, json_fname)
         dxf_path = os.path.join(cad_dir, dxf_fname)
 
+        st_h = float(sm["height_m"])
+        st_wall_h = float(sm.get("wall_height_m", st_h))
+        st_wall_w = round(2.5 * st_wall_h * 1.4, 2)
+
         sm_entry = dict(sm)
+        sm_entry["wall_height_m"] = st_wall_h
+        sm_entry["default_wall_load_kn_m"] = st_wall_w
         sm_entry["json_file"] = json_path
         sm_entry["dxf_file"] = dxf_path
         master_payload["stories"].append(sm_entry)
-
-        st_h = float(sm["height_m"])
-        st_wall_w = round(2.5 * st_h * 1.4, 2)
         story_data = {
             "project_name": clean_name,
             "story_id": sid,
@@ -787,6 +799,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             "story_type": sm["story_type"],
             "multiplier": sm["multiplier"],
             "height_m": st_h,
+            "wall_height_m": st_wall_h,
             "adopted_slab_thickness_cm": sm["adopted_slab_thickness_cm"],
             "slab_factored_wu_kpa": hordi_defaults["total_factored_wu_kn_m2"],
             "default_wall_thickness_cm": 20.0,
@@ -810,6 +823,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     boq_file = os.path.join(stories_dir, f"{clean_name}-BOQ_Quantities.json")
     foundations_dxf = os.path.join(cad_dir, f"{clean_name}-Foundations_And_Axes.dxf")
 
+    master_payload["stories_meta"] = master_payload["stories"]
     with open(master_xsd_file, "w", encoding="utf-8") as f:
         json.dump(master_payload, f, indent=2)
 

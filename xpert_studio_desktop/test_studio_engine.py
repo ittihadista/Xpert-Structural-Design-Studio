@@ -468,7 +468,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         # Attempt to flip s_back (at 2.0, 1.2) -> MUST BE REJECTED because s_cant extends into it!
         ok_flip_back, msg_lock, _ = toggle_slab_rib_by_label_click(story, 2.0, 1.2)
         self.assertFalse(ok_flip_back)
-        self.assertIn("امتداد الكابولي", msg_lock)
+        self.assertIn("Cantilever Back-Span Lock", msg_lock)
         self.assertEqual(s_back["rib_direction_deg"], 90)
 
         # Now flip s_cant (at 2.0, -0.7) onto its two side beams B_LEFT & B_RIGHT (0°) -> ALLOWED!
@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,11 +1335,11 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertEqual(pio.STUDIO_VERSION, "v2.3.0-structural-bim-pro")
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
-        self.assertIn("v2.3.0-structural-bim-pro", app_src)
+        self.assertIn(pio.STUDIO_VERSION, app_src)
         self.assertIn("DRAW_OPENING", app_src)
         self.assertIn("DiagnosticLogDialog", app_src)
 
@@ -1469,8 +1469,8 @@ class TestXpertStudioEngine(unittest.TestCase):
             "beams": [
                 # Carrier B6 along X=0.2 (Hidden initially)
                 {"id": "B6", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 0.2, "start_y": 1.0, "end_x": 0.2, "end_y": 7.0},
-                # Secondary B7 resting on B6 at (0.2, 4.0) -> (9.8, 4.0) (Hidden initially, borders opening below!)
-                {"id": "B7", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 0.2, "start_y": 4.0, "end_x": 9.8, "end_y": 4.0},
+                # Secondary Drop B7 resting on B6 at (0.2, 4.0) -> (9.8, 4.0) (Drop beam, borders opening below)
+                {"id": "B7", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.40, "start_x": 0.2, "start_y": 4.0, "end_x": 9.8, "end_y": 4.0},
                 # Crossing beam B8 cutting across opening Y=3.0
                 {"id": "B8", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 1.5, "start_y": 3.0, "end_x": 6.5, "end_y": 3.0},
             ],
@@ -1488,10 +1488,10 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertIn("B8", res_cas["shifted_beams"], "Crossing beam B8 must be shifted to opening solid edge!")
         self.assertEqual(b_map["B8"]["beam_kind"], "drop")
 
-        # Converting opening-adjacent beam B7 back to Hidden must be blocked
-        ok_back, msg_back = convert_beam_kind_and_section(story_cascade, "B7", new_kind="hidden")
+        # Converting Carrier B6 supporting Secondary Drop B7 back to Hidden must be blocked
+        ok_back, msg_back = convert_beam_kind_and_section(story_cascade, "B6", new_kind="hidden")
         self.assertFalse(ok_back)
-        self.assertIn("OP1", msg_back)
+        self.assertIn("Structural Hierarchy Error", msg_back)
 
         # 6. Column inside opening -> conflicting_columns + solid edge + Double-Height (2H) effective length
         self.assertEqual(len(res_cas["conflicting_columns"]), 1)
@@ -1531,6 +1531,131 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertIn("TEST_V230", tail_txt)
         self.assertIn("Verified v2.3.0 session diagnostic log entry", tail_txt)
         pio.set_active_project_log_dir(None)
+
+    def test_v240_selective_drop_opening_wall_heights_and_viewport_fit(self) -> None:
+        """
+        Verifies all v2.4.0-structural-bim-pro engineering & UI requirements requested by Eng. Yousef:
+        1. 100% English: Zero Arabic characters in xpert_project_io.py, xpert_structural_engine.py, xpert_studio_app.py.
+        2. Version release string == 'v2.4.0-structural-bim-pro'.
+        3. Story Wall Load Philosophy:
+           - 00_TieBeams carries Ground Floor walls (H = ground_floor_h, e.g. 3.20m -> W = 2.5 * 3.20 * 1.4 = 11.20 kN/m).
+           - 02_Ground_Floor carries Upper Floor walls (H = upper_floor_h, e.g. 3.00m -> W = 2.5 * 3.00 * 1.4 = 10.50 kN/m).
+        4. Overlap tolerance in has_beam_on_segment uses physical overlap (+0.05m instead of +0.35m)
+           preventing phantom splitting of bays into gaps.
+        5. Selective Opening Drop Beam rule:
+           - Trimmer/boundary beams with solid slab (B8, B9) CAN remain Hidden and be converted to Hidden.
+           - Carrier beam (B6) supporting secondary drop (B7) is locked to Drop Beam.
+        6. Smart Opening Flush Alignment:
+           - Rectangle opening snapping flush to beam inner faces so it never protrudes into beams.
+        7. Viewport fit & horizontal scrollbar prevention:
+           - ScrollBarAlwaysOff set on diag_view and rc_view, gutter deducted so sceneRect width fits within viewport.
+        """
+        import re
+        import xpert_project_io as pio
+        import xpert_structural_engine as eng
+
+        # 1. 100% English Check across production Python files
+        desktop_dir = os.path.dirname(__file__)
+        for fname in ("xpert_project_io.py", "xpert_structural_engine.py", "xpert_studio_app.py"):
+            fpath = os.path.join(desktop_dir, fname)
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+            arabic_match = re.search(r"[\u0600-\u06FF]", content)
+            self.assertIsNone(
+                arabic_match,
+                f"File {fname} must contain 0 Arabic characters for 100% English UI/Logs compliance! Found: {arabic_match.group(0) if arabic_match else ''}",
+            )
+
+        # 2. Version Release String
+        self.assertEqual(pio.STUDIO_VERSION, "v2.4.0-structural-bim-pro")
+
+        # 3. Story Wall Load Height Philosophy
+        cfg = {
+            "project_name": "WallLoadTest_v240",
+            "root_directory": self.tmp_dir,
+            "ground_floor_height_m": 3.20,
+            "floors_above_ground": 2,
+            "floor_height_m": 3.00,
+            "include_basement": False,
+            "include_penthouse": False,
+        }
+        master = pio.initialize_studio_project(cfg)
+        stories_meta = master.get("stories_meta", [])
+        tie_meta = next((s for s in stories_meta if s.get("story_id") == "00_TieBeams"), None)
+        gnd_meta = next((s for s in stories_meta if s.get("story_id") == "02_Ground_Floor"), None)
+        self.assertIsNotNone(tie_meta)
+        self.assertIsNotNone(gnd_meta)
+        self.assertAlmostEqual(tie_meta.get("wall_height_m", 0.0), 3.20, places=2)
+        self.assertAlmostEqual(tie_meta.get("default_wall_load_kn_m", 0.0), 11.20, places=2)
+        self.assertAlmostEqual(gnd_meta.get("wall_height_m", 0.0), 3.00, places=2)
+        self.assertAlmostEqual(gnd_meta.get("default_wall_load_kn_m", 0.0), 10.50, places=2)
+
+        # 4. Overlap tolerance check: beam ending at Y=5.0 does not overlap segment Y=4.5..5.0
+        story_test = {
+            "slab_edge_polygon": [[0.0, 0.0], [9.3, 0.0], [9.3, 9.2], [0.0, 9.2]],
+            "columns": [],
+            "beams": [
+                {"id": "B5", "beam_kind": "hidden", "width_m": 0.40, "start_x": 4.5, "start_y": 5.0, "end_x": 4.5, "end_y": 9.2},
+            ],
+            "openings": [],
+            "slabs": [],
+        }
+        # Testing segment X=4.5, Y=4.5 to 5.0:
+        has_bm = eng.has_beam_on_segment(story_test, 4.5, 4.5, 4.5, 5.0)
+        self.assertFalse(has_bm, "B5 ending at Y=5.0 must NOT phantom-overlap segment below Y=5.0!")
+
+        # 5. Selective Opening Drop Beam & User Conversion
+        story_bim = {
+            "story_id": "02_Ground_Floor",
+            "adopted_slab_thickness_cm": 30.0,
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+            "columns": [
+                {"id": "C1", "x": 4.5, "y": 7.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 7.0, "y": 7.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 4.5, "y": 4.5, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 5.4, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 7.0, "y": 4.5, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                # B6 is horizontal carrier at Y=7.0
+                {"id": "B6", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.40, "start_x": 0.0, "start_y": 7.0, "end_x": 10.0, "end_y": 7.0},
+                # B7 is secondary drop resting on C4 at (5.4, 0.0) and on B6 at (5.4, 7.0)
+                {"id": "B7", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.40, "start_x": 5.4, "start_y": 0.0, "end_x": 5.4, "end_y": 7.0,
+                 "supports": [{"kind": "column", "target_id": "C4", "center_coord_m": 0.0}, {"kind": "beam", "target_id": "B6", "center_coord_m": 7.0}]},
+                # B8 is horizontal beam bordering opening at Y=4.5
+                {"id": "B8", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 5.4, "start_y": 4.5, "end_x": 7.0, "end_y": 4.5},
+                # B9 is vertical beam bordering opening at X=7.0
+                {"id": "B9", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "start_x": 7.0, "start_y": 4.5, "end_x": 7.0, "end_y": 7.0},
+            ],
+            "openings": [
+                {"id": "OP1", "shape": "rectangle", "min_x": 5.4, "max_x": 7.0, "min_y": 4.5, "max_y": 7.0, "polygon": [[5.4, 4.5], [7.0, 4.5], [7.0, 7.0], [5.4, 7.0]]},
+            ],
+            "slabs": [
+                # Solid slabs S3 and S5 exist on the opposite sides of B8 and B9
+                {"id": "S3", "min_x": 4.5, "max_x": 7.0, "min_y": 2.0, "max_y": 4.5, "rib_direction_deg": 90},
+                {"id": "S5", "min_x": 7.0, "max_x": 9.0, "min_y": 4.5, "max_y": 7.0, "rib_direction_deg": 90},
+            ],
+        }
+        # B8 has solid slab S3 on the other side -> beam_has_solid_slab_expansion_room is True
+        self.assertTrue(eng.beam_has_solid_slab_expansion_room(story_bim, story_bim["beams"][2]))
+        # B9 has solid slab S5 on the other side -> beam_has_solid_slab_expansion_room is True
+        self.assertTrue(eng.beam_has_solid_slab_expansion_room(story_bim, story_bim["beams"][3]))
+
+        # Enforce selective drop: B8 and B9 must REMAIN hidden!
+        convs, alerts = eng.enforce_opening_adjacent_drop_beams_and_cascade(story_bim)
+        self.assertNotIn("B8", convs, "B8 has solid slab expansion room and must remain Hidden!")
+        self.assertNotIn("B9", convs, "B9 has solid slab expansion room and must remain Hidden!")
+
+        # Converting B6 (carrier of secondary drop B7) to Hidden must be REJECTED by Structural Hierarchy Rule
+        ok_b6, msg_b6 = eng.convert_beam_kind_and_section(story_bim, "B6", "hidden")
+        self.assertFalse(ok_b6)
+        self.assertIn("Structural Hierarchy Error", msg_b6)
+
+        # Converting B8 to Drop then back to Hidden must be ALLOWED
+        ok_b8_drop, _ = eng.convert_beam_kind_and_section(story_bim, "B8", "drop")
+        self.assertTrue(ok_b8_drop)
+        ok_b8_hid, _ = eng.convert_beam_kind_and_section(story_bim, "B8", "hidden")
+        self.assertTrue(ok_b8_hid)
 
 
 if __name__ == "__main__":

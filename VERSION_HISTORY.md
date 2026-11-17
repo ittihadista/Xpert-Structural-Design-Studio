@@ -4,7 +4,34 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.3.0-structural-bim-pro` (2026-11-17)
+## Current Release: `v2.4.0-structural-bim-pro` (2026-11-18)
+**Release Title:** Selective Opening Drop Enforcement, Inner Beam Face Flush Snapping, 100% English-Only UI, Non-Clipping Tabs 2 & 3 Viewports, Floor-by-Floor Wall Load Elevation Calibration, and Phantom Slab Gap Elimination.
+
+### Key Features & Advancements in `v2.4.0-structural-bim-pro`:
+1. **Selective Opening Drop Enforcement (`Selective Opening Drop Enforcement`):**
+   - Beams bordering slab openings (such as B8 and B9) remain Hidden Beams and can be freely converted between Hidden and Drop sections by the user whenever solid slab expansion room exists on the opposite side (`beam_has_solid_slab_expansion_room`).
+   - Beams without solid slab room (such as B7 bounded by openings/voids) are strictly enforced as Drop Beams ($0.20 \times 0.40\text{ m}$).
+   - Primary carrier beams supporting secondary drop beams (such as B6 carrying B7) are strictly protected by the structural hierarchy rule (`Carrier Cascade`); converting carrier beams to Hidden is blocked with descriptive engineering errors.
+2. **Inner Beam Face Flush Snapping (`Inner Beam Face Flush Snapping`):**
+   - Rectangular opening drafting automatically snaps to the clear inner faces of bordering beams (`Top Face`, `Bottom Face`, `Left Face`, `Right Face`), ensuring openings fit tightly within the clear room boundary without intersecting the beam core.
+3. **100% English-Only LTR UI:**
+   - Standardized all menus, dialogs, status bar messages, tabs, callouts, and diagnostic logs strictly in 100% professional structural engineering English.
+4. **Viewport Scaling & Zero Horizontal Scrollbars:**
+   - Eliminated distracting horizontal scrollbars (`ScrollBarAlwaysOff`) in Tabs 2 and 3.
+   - Dynamic `sceneRect` and bounding-box calculation guarantees that beam elevation diagrams, shear force/bending moment envelopes, and Section A-A cross-sections render completely without right-side clipping.
+5. **Calibrated Multi-Story Wall Load Heights:**
+   - Corrected physical wall heights across floor levels:
+     - `00_TieBeams` (Tie Beams) carries Ground Floor walls: $H_{\text{wall}} = H_{\text{ground}} = 3.20\text{ m} \rightarrow W_{\text{wall}} = 11.20\text{ kN/m}$.
+     - `02_Ground_Floor` (Ground Floor Slab) carries Upper Floor walls: $H_{\text{wall}} = H_{\text{upper}} = 3.00\text{ m} \rightarrow W_{\text{wall}} = 10.50\text{ kN/m}$.
+     - Standard initial Drop Beam depth unified at $0.40\text{ m}$ ($400\text{ mm}$).
+6. **Phantom Slab Gap Elimination:**
+   - Reduced longitudinal overlap tolerance in `has_beam_on_segment` to $0.05\text{ m}$, preventing false beam interceptions and eliminating accidental splitting of continuous slab panels (such as S5).
+7. **Automated Unit Test Suite:**
+   - 20 unit tests in `test_studio_engine.py` (20/20 pass in ~1.8s) including `test_v240_selective_drop_opening_wall_heights_and_viewport_fit`.
+
+---
+
+## Previous Release: `v2.3.0-structural-bim-pro` (2026-11-17)
 **Release Title:** Independent Slab Openings CAD Engine, Opening-Over-Framing Priority, Double-Height Columns (2H), Recursive Carrier Beam Cascade, Standard 100mm Drop Beam Depth Snapping, Span-Isolated Shear Envelope, Non-Clipping Section A-A Scaling, and Real-Time Diagnostic Logging (`xpert_studio_session.log`).
 
 ### Key Features & Advancements in `v2.3.0-structural-bim-pro`:

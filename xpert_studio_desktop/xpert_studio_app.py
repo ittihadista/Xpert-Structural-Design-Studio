@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.3.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.4.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -115,9 +115,9 @@ from xpert_structural_engine import (
 
 class StartupDefaultsDialog(QDialog):
     """
-    Startup Defaults Dialog (إعدادات البداية الافتراضية):
-    1. Default Projects Root Storage Folder (مجلد مكان تخزين المشاريع).
-    2. Reinforcing Steel Bar Diameters Table (جدول أقطار حديد التسليح والكانات — including Φ6 Stirrups & Φ32 Main Bars).
+    Startup Defaults Dialog:
+    1. Default Projects Root Storage Folder.
+    2. Reinforcing Steel Bar Diameters Table (including Φ6 Stirrups & Φ32 Main Bars).
     Accessible from both the Startup Welcome Screen (Start Menu) and the top Menu Bar.
     """
 
@@ -133,7 +133,7 @@ class StartupDefaultsDialog(QDialog):
         vbox = QVBoxLayout(self)
         vbox.setSpacing(12)
 
-        grp_folder = QGroupBox("1. Default Projects Storage Folder (مجلد مكان تخزين المشاريع الافتراضي)")
+        grp_folder = QGroupBox("1. Default Projects Storage Folder")
         form_f = QFormLayout(grp_folder)
         row_f = QHBoxLayout()
         self.ed_root_folder = QLineEdit(str(self.settings.get("default_projects_root_folder", os.path.abspath("./XpertStudio_Projects"))))
@@ -144,18 +144,18 @@ class StartupDefaultsDialog(QDialog):
         form_f.addRow("Projects Root Directory:", row_f)
         vbox.addWidget(grp_folder)
 
-        grp_rebar = QGroupBox("2. Reinforcing Steel Bar Diameters Table (جدول أقطار حديد التسليح والكانات)")
+        grp_rebar = QGroupBox("2. Reinforcing Steel Bar Diameters Table")
         v_reb = QVBoxLayout(grp_rebar)
 
         top_bar_row = QHBoxLayout()
-        top_bar_row.addWidget(QLabel("Default Stirrup Bar (الكانات):"))
+        top_bar_row.addWidget(QLabel("Default Stirrup Bar:"))
         self.cb_def_stirrup = QComboBox()
         self.cb_def_stirrup.addItems(["6", "8", "10", "12"])
         self.cb_def_stirrup.setCurrentText(str(self.settings.get("default_stirrup_bar_mm", 8)))
         top_bar_row.addWidget(self.cb_def_stirrup)
         top_bar_row.addSpacing(18)
 
-        top_bar_row.addWidget(QLabel("Default Main Longitudinal Bar (التسليح الطولي الرئيسي):"))
+        top_bar_row.addWidget(QLabel("Default Main Longitudinal Bar:"))
         self.cb_def_main = QComboBox()
         self.cb_def_main.addItems(["12", "14", "16", "18", "20", "22", "25", "28", "32"])
         self.cb_def_main.setCurrentText(str(self.settings.get("default_main_bar_mm", 16)))
@@ -233,9 +233,9 @@ class StartupDefaultsDialog(QDialog):
 
 class StudioOptionsDialog(QDialog):
     """
-    Options Dialog (خيارات المواد وبيانات سقف الهوردي):
-    1. Material Properties (خواص المواد: f'c, Fy, Fyt, γ_c = 24 kN/m³, q_all).
-    2. Hollow-Block Slab Data (بيانات سقف الهوردي: Slab Thickness h = 30 cm, Topping Slab hs = 10 cm,
+    Options Dialog:
+    1. Material Properties (f'c, Fy, Fyt, γ_c = 24 kN/m³, q_all).
+    2. Hollow-Block Slab Data (Slab Thickness h = 30 cm, Topping Slab hs = 10 cm,
        Block Dimensions 40×25×20 cm, Rib Width bw = 15 cm, Finish Load = 1.5 kN/m², Live Load = 2.0 kN/m²,
        Wu(rib) = 6.44 kN/m'/rib, Wu(m×m) = 11.71 kN/m²).
     Accessible from both the Startup Welcome Screen (Start Menu) and the top Menu Bar.
@@ -279,7 +279,7 @@ class StudioOptionsDialog(QDialog):
             hb_cfg["finish_load_kn_m2"] = st_hb.get("finishing_load_kpa", hb_cfg.get("finish_load_kn_m2", 1.5))
             hb_cfg["live_load_kn_m2"] = st_hb.get("live_load_kpa", hb_cfg.get("live_load_kn_m2", 2.0))
 
-        grp_mat = QGroupBox("1. Material Properties & Soil Bearing (خواص المواد وقدرة تحمل التربة)")
+        grp_mat = QGroupBox("1. Material Properties & Soil Bearing")
         form_m = QFormLayout(grp_mat)
 
         self.sp_fc = QDoubleSpinBox()
@@ -313,7 +313,7 @@ class StudioOptionsDialog(QDialog):
         form_m.addRow("Allowable Soil Bearing Capacity q_all:", self.sp_qall)
         vbox.addWidget(grp_mat)
 
-        grp_hb = QGroupBox("2. Hollow-Block Slab Data & Default Loads (بيانات سقف الهوردي والأحمال)")
+        grp_hb = QGroupBox("2. Hollow-Block Slab Data & Default Loads")
         form_hb = QFormLayout(grp_hb)
 
         self.sp_slab_t = QDoubleSpinBox()
@@ -340,7 +340,7 @@ class StudioOptionsDialog(QDialog):
         self.sp_block_h.setSingleStep(4.0)
         self.sp_block_h.setValue(init_blk_h)
         self.sp_block_h.setSuffix(" cm (Standard: 20 or 16 cm)")
-        form_hb.addRow("Hollow Block Height (سمك البلوك القياسي 20 أو 16 سم):", self.sp_block_h)
+        form_hb.addRow("Hollow Block Height (Standard 20 or 16 cm):", self.sp_block_h)
 
         blk_row = QHBoxLayout()
         self.sp_block_w = QDoubleSpinBox()
@@ -355,13 +355,13 @@ class StudioOptionsDialog(QDialog):
         blk_row.addWidget(self.sp_block_w)
         blk_row.addWidget(QLabel("× Length:"))
         blk_row.addWidget(self.sp_block_l)
-        form_hb.addRow("Hollow Block Plan Size (أبعاد البلوك):", blk_row)
+        form_hb.addRow("Hollow Block Plan Size (cm):", blk_row)
 
         self.sp_rib_w = QDoubleSpinBox()
         self.sp_rib_w.setRange(10.0, 30.0)
         self.sp_rib_w.setValue(float(hb_cfg.get("rib_width_cm", 15.0)))
         self.sp_rib_w.setSuffix(" cm")
-        form_hb.addRow("Concrete Rib Width (عرض العصب bw):", self.sp_rib_w)
+        form_hb.addRow("Concrete Rib Width bw (cm):", self.sp_rib_w)
 
         ld_row = QHBoxLayout()
         self.sp_finish = QDoubleSpinBox()
@@ -526,8 +526,8 @@ class StartupWelcomeDialog(QDialog):
     1. Start a New Structural Project (opens NewProjectSetupDialog)
     2. Open an Existing Project (`*.xsd`) (goes directly to Ground Floor Plan)
     Plus direct buttons for:
-    - Startup Defaults (مجلد المشاريع وجدول أقطار التسليح)
-    - Options (خواص المواد وبيانات سقف الهوردي)
+    - Startup Defaults (Projects Folder & Rebar Table)
+    - Options (Materials & Hollow-Block Data)
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -963,7 +963,7 @@ class SlabRibDesignDialog(QDialog):
         top_lay.setContentsMargins(10, 6, 10, 6)
         top_lay.setSpacing(12)
 
-        lbl_slb = QLabel("Select Slab (البلاطة):")
+        lbl_slb = QLabel("Select Slab:")
         lbl_slb.setStyleSheet("color: #0284C7; font-weight: bold;")
         top_lay.addWidget(lbl_slb)
 
@@ -983,7 +983,7 @@ class SlabRibDesignDialog(QDialog):
         self.cb_slab.currentIndexChanged.connect(self._on_slab_changed)
         top_lay.addWidget(self.cb_slab)
 
-        lbl_db = QLabel("Bottom Rebar Dia db (قطر التسليح السفلي):")
+        lbl_db = QLabel("Bottom Rebar Dia db:")
         lbl_db.setStyleSheet("color: #0D9488; font-weight: bold;")
         top_lay.addWidget(lbl_db)
 
@@ -994,7 +994,7 @@ class SlabRibDesignDialog(QDialog):
         top_lay.addWidget(self.cb_db)
 
         self.lbl_fixed_rebar_info = QLabel(
-            "Stirrups: ∅6 mm Triangular (كانة مثلثة) | Top Bar: 1∅10 mm (سيخ واحد علوي للتثبيت)"
+            "Stirrups: ∅6 mm Triangular | Top Bar: 1∅10 mm"
         )
         self.lbl_fixed_rebar_info.setStyleSheet("color: #475569; font-weight: bold;")
         top_lay.addWidget(self.lbl_fixed_rebar_info)
@@ -1311,7 +1311,7 @@ class SlabRibDesignDialog(QDialog):
             self.sec_scene.addRect(c1, blk_pen, void_brush)
             self.sec_scene.addRect(c2, blk_pen, void_brush)
 
-        # 3. Open Triangular Stirrup (كانة مثلثة مفتوحة ∅6) inside Central Rib
+        # 3. Open Triangular Stirrup (∅6) inside Central Rib
         cover_px = float(d["dc_mm"]) * sc
         rib_cx = ox + s_px + bw2_px / 2.0
         bot_y = oy + h_px - cover_px
@@ -1329,7 +1329,7 @@ class SlabRibDesignDialog(QDialog):
         ])
         self.sec_scene.addPolygon(tri_poly, stirrup_pen, QBrush(Qt.BrushStyle.NoBrush))
 
-        # 4. Top Fixation Bar (1∅10 mm — سيخ واحد علوي للتثبيت فقط)
+        # 4. Top Fixation Bar (1∅10 mm)
         top_bar_r = 5.5
         self.sec_scene.addEllipse(
             rib_cx - top_bar_r,
@@ -1340,7 +1340,7 @@ class SlabRibDesignDialog(QDialog):
             QBrush(QColor("#0284C7")),
         )
 
-        # 5. Bottom Main Reinforcement Bars (n_bars_adopted ∅ db_mm — تسليح العصب السفلي)
+        # 5. Bottom Main Reinforcement Bars (n_bars_adopted ∅ db_mm)
         n_bars = int(d["n_bars_adopted"])
         bar_r = 6.5 if d["db_mm"] >= 14 else 5.8
         usable_bot_w = max(16.0, (right_bot_x - left_bot_x) - 2.0 * bar_r)
@@ -1408,8 +1408,8 @@ class SlabRibDesignDialog(QDialog):
 
         c_lines = [
             (f"● Bottom Main Steel: {d['n_bars_adopted']}∅{d['db_mm']} per rib (As,prov = {d['as_provided_mm2']:.1f} mm² >= As,req = {d['as_req_mm2']:.1f} mm²)", "#DC2626"),
-            (f"● Top Fixation Bar: 1∅{d['top_bar_dia_mm']} mm (سيخ واحد علوي للتثبيت فقط)", "#0284C7"),
-            (f"● Rib Stirrups: ∅{d['ds_mm']} @ 200 mm Open Triangular Stirrups (كانة مثلثة مفتوحة)", "#1D4ED8"),
+            (f"● Top Fixation Bar: 1∅{d['top_bar_dia_mm']} mm (Erection Bar)", "#0284C7"),
+            (f"● Rib Stirrups: ∅{d['ds_mm']} @ 200 mm Open Triangular Stirrups", "#1D4ED8"),
             (f"● Loads: Wu_rib = {d['wu_rib_kn_m']:.2f} kN/m'/rib  |  Wu(m×m) = {d['wu_m2_kpa']:.2f} kN/m²  |  Mu = {d['mu_knm']:.2f} kN.m", "#0F172A"),
         ]
         for idx_l, (txt_str, col_hex) in enumerate(c_lines):
@@ -1773,6 +1773,24 @@ class StructuralCadCanvas2D(QGraphicsView):
                         d_m = math.hypot(raw_x - mx, raw_y - my)
                         if d_m <= snap_radius:
                             candidates.append((d_m, mx, my, "BEAM_MID", f"OSNAP [Midpoint]: {bid} ({mx:.2f}, {my:.2f})"))
+                    if self.active_tool == "DRAW_OPENING":
+                        # Inner beam face snapping so opening snaps flush with beam inner edges
+                        bw = float(bm.get("width_m", 0.20))
+                        hw = bw / 2.0
+                        if abs(ex - sx) >= abs(ey - sy):
+                            # Horizontal beam: top and bottom faces
+                            for fy, flbl in [(sy - hw, "Bottom Face"), (sy + hw, "Top Face")]:
+                                for fx in (sx, ex, (sx + ex) / 2.0):
+                                    d_f = math.hypot(raw_x - fx, raw_y - fy)
+                                    if d_f <= snap_radius * 1.1:
+                                        candidates.append((d_f - 0.12, fx, fy, "BEAM_FACE", f"OSNAP [Beam Face]: {bid} {flbl} ({fx:.2f}, {fy:.2f})"))
+                        else:
+                            # Vertical beam: left and right faces
+                            for fx, flbl in [(sx - hw, "Left Face"), (sx + hw, "Right Face")]:
+                                for fy in (sy, ey, (sy + ey) / 2.0):
+                                    d_f = math.hypot(raw_x - fx, raw_y - fy)
+                                    if d_f <= snap_radius * 1.1:
+                                        candidates.append((d_f - 0.12, fx, fy, "BEAM_FACE", f"OSNAP [Beam Face]: {bid} {flbl} ({fx:.2f}, {fy:.2f})"))
 
             poly_pts = story_data.get("slab_edge_polygon", [])
             if len(poly_pts) >= 3:
@@ -2005,7 +2023,7 @@ class StructuralCadCanvas2D(QGraphicsView):
             hdr.setEnabled(False)
             menu.addSeparator()
             act_rib = menu.addAction(
-                f"Inspect {eid} Rib Loads, Flexural/Shear Design & Cross-Section (تصميم العصب الهوردي)..."
+                f"Inspect {eid} Rib Loads, Flexural/Shear Design & Cross-Section..."
             )
             act_sched = menu.addAction("View Story Schedules & Calculation Report (Tab 4)")
             menu.addSeparator()
@@ -2473,15 +2491,14 @@ class StructuralCadCanvas2D(QGraphicsView):
                     if "--check" not in sys.argv:
                         mb = QMessageBox(self)
                         mb.setIcon(QMessageBox.Icon.Question)
-                        mb.setWindowTitle(f"تنبيه وجود عمود داخل فتحة السقف ({hit_op.get('id', 'OP')})")
+                        mb.setWindowTitle(f"Column Inside Slab Opening ({hit_op.get('id', 'OP')})")
                         mb.setText(
-                            f"تحذير: العمود الجديد {next_id} يقع داخل فتحة السقف ({hit_op.get('id', 'OP')})!\n"
-                            f"Warning: Column {next_id} lies inside slab opening {hit_op.get('id', 'OP')}.\n\n"
-                            f"هل تريد إزاحة العمود إلى الحافة الصلبة للفتحة ({edge_x:.2f}, {edge_y:.2f})، أم الاستمرار واعتباره عموداً بارتفاع مزدوج (Double-Height 2H)؟"
+                            f"Warning: New Column {next_id} lies inside slab opening void ({hit_op.get('id', 'OP')})!\n\n"
+                            f"Do you want to shift the column to the solid opening edge ({edge_x:.2f}, {edge_y:.2f}), or continue and designate it as a Double-Height Column (2H)?"
                         )
-                        btn_shift = mb.addButton("إزاحة العمود لحافة الفتحة", QMessageBox.ButtonRole.ActionRole)
-                        btn_2h = mb.addButton("الاستمرار (عمود بارتفاع مزدوج 2H)", QMessageBox.ButtonRole.AcceptRole)
-                        btn_cancel = mb.addButton("إلغاء", QMessageBox.ButtonRole.RejectRole)
+                        btn_shift = mb.addButton("Shift Column to Opening Edge", QMessageBox.ButtonRole.ActionRole)
+                        btn_2h = mb.addButton("Continue (Double-Height Column 2H)", QMessageBox.ButtonRole.AcceptRole)
+                        btn_cancel = mb.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
                         mb.setDefaultButton(btn_shift)
                         mb.exec()
                         clicked = mb.clickedButton()
@@ -2527,7 +2544,7 @@ class StructuralCadCanvas2D(QGraphicsView):
             if is_tie_story and tool == "DRAW_BEAM_HID":
                 QMessageBox.warning(
                     self,
-                    "Tie-Beams Story Rule (مسقط السملات)",
+                    "Tie-Beams Story Rule",
                     "Hidden beams are disabled on the Tie-Beams / Grade Beams story (00_TieBeams). Please use '3B. + Drop Beam'.",
                 )
                 return
@@ -2581,7 +2598,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 if cascade_alerts and "--check" not in sys.argv:
                     QMessageBox.information(
                         self,
-                        "تنبيه التحويل التلقائي للكمرات الساقطة (Opening / Carrier Cascade)",
+                        "Opening Drop Beam / Carrier Cascade Notification",
                         "\n\n".join(cascade_alerts),
                     )
                 log_studio_event(
@@ -2643,7 +2660,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 if c_alerts and "--check" not in sys.argv:
                     QMessageBox.information(
                         self,
-                        "تنبيه فتحات السقف وتسلسل الكمرات",
+                        "Slab Openings and Beam Hierarchy Notification",
                         "\n\n".join(c_alerts),
                     )
             self.studio.save_and_sync_current_story()
@@ -2710,14 +2727,13 @@ class StructuralCadCanvas2D(QGraphicsView):
             if "--check" not in sys.argv:
                 mb = QMessageBox(self)
                 mb.setIcon(QMessageBox.Icon.Question)
-                mb.setWindowTitle(f"تعارض عمود {cid} مع فتحة السقف ({op_id})")
+                mb.setWindowTitle(f"Column {cid} Conflict with Slab Opening ({op_id})")
                 mb.setText(
-                    f"العمود {cid} عند ({cx:.2f}, {cy:.2f}) أصبح واقعاً داخل فراغ الفتحة {op_id}!\n"
-                    f"Column {cid} lies inside slab opening {op_id}.\n\n"
-                    f"اختر التصرف الهندسي المطلوب:"
+                    f"Column {cid} at ({cx:.2f}, {cy:.2f}) lies inside slab opening void {op_id}!\n\n"
+                    f"Choose the structural action:"
                 )
-                btn_shift = mb.addButton(f"إزاحة العمود + الكمرات للحافة ({ex:.2f}, {ey:.2f})", QMessageBox.ButtonRole.ActionRole)
-                btn_2h = mb.addButton("الاستمرار (عمود بارتفاع مزدوج 2H)", QMessageBox.ButtonRole.AcceptRole)
+                btn_shift = mb.addButton(f"Shift Column + Beams to Solid Edge ({ex:.2f}, {ey:.2f})", QMessageBox.ButtonRole.ActionRole)
+                btn_2h = mb.addButton("Continue (Double-Height Column 2H)", QMessageBox.ButtonRole.AcceptRole)
                 mb.setDefaultButton(btn_shift)
                 mb.exec()
                 choose_2h = (mb.clickedButton() != btn_shift)
@@ -2726,13 +2742,13 @@ class StructuralCadCanvas2D(QGraphicsView):
                 col_obj["double_height"] = True
                 col_obj["in_slab_opening"] = True
                 col_obj["opening_id"] = op_id
-                alerts.append(f"تم اعتماد العمود {cid} كعمود بارتفاع مزدوج (Double-Height 2H) داخل الفتحة {op_id}.")
+                alerts.append(f"Column {cid} confirmed as Double-Height (2H) inside opening {op_id}.")
             else:
                 move_column_and_sync_connected_beams(
                     story, cid, round(ex - cx, 3), round(ey - cy, 3), boundary_mode="clamp"
                 )
                 shifted_any_col = True
-                alerts.append(f"تمت إزاحة العمود {cid} مع الكمرات المتصلة إلى حافة الفتحة ({ex:.2f}, {ey:.2f}).")
+                alerts.append(f"Column {cid} and connected beams shifted to solid opening edge ({ex:.2f}, {ey:.2f}).")
 
         if shifted_any_col:
             _, extra_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story)
@@ -2742,7 +2758,7 @@ class StructuralCadCanvas2D(QGraphicsView):
         if alerts and "--check" not in sys.argv:
             QMessageBox.information(
                 self,
-                f"ملخص أولوية فتحة السقف ({res_op['opening']['id']})",
+                f"Slab Opening Priority Summary ({res_op['opening']['id']})",
                 "\n\n".join(alerts),
             )
 
@@ -3113,6 +3129,7 @@ class XpertBeamDiagramCanvas(QGraphicsView):
         self.owner = parent_widget
         self.diag_scene = QGraphicsScene(self)
         self.setScene(self.diag_scene)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setMouseTracking(True)
         self.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
@@ -3648,18 +3665,18 @@ class BeamDiagramsViewWidget(QWidget):
         if not xs:
             return
 
-        # True Viewport Width Utilization (v2.2.0 Right-Edge Clipping Fix):
+        # True Viewport Width Utilization (v2.4.0 Gutter Deduction & Horizontal Scrollbar Fix):
         raw_vp_w = float(self.diag_view.viewport().width())
         raw_vp_h = float(self.diag_view.viewport().height())
-        vp_w = raw_vp_w if raw_vp_w >= 420.0 else 880.0
-        vp_h = raw_vp_h if raw_vp_h >= 380.0 else 640.0
+        vp_w = max(420.0, raw_vp_w - 28.0)
+        vp_h = max(380.0, raw_vp_h - 10.0)
 
         tot_l = max(0.5, float(xs[-1]))
-        x0 = 54.0
-        right_margin_px = 92.0
-        w_px = max(340.0, vp_w - x0 - right_margin_px)
+        x0 = 50.0
+        right_margin_px = 75.0
+        w_px = max(320.0, vp_w - x0 - right_margin_px)
         scale_x = w_px / tot_l
-        max_x_allowed = x0 + w_px + right_margin_px - 12.0
+        max_x_allowed = x0 + w_px + right_margin_px - 8.0
         self.diag_view.set_curve_data(xs, vs, ms, x0, w_px, tot_l)
 
         # Proportional vertical layout across the full viewport height
@@ -3916,7 +3933,7 @@ class BeamDiagramsViewWidget(QWidget):
             rlbl.setDefaultTextColor(QColor("#1E3A8A"))
             rlbl.setPos(min(max(4.0, px - 14.0), max_x_allowed - 38.0), y_ruler + 14)
 
-        sc.setSceneRect(0, 0, x0 + w_px + right_margin_px, y_ruler + 44)
+        sc.setSceneRect(0, 0, min(vp_w, x0 + w_px + right_margin_px), y_ruler + 44)
 
 
 class BeamDesignDetailWidget(QWidget):
@@ -4009,6 +4026,7 @@ class BeamDesignDetailWidget(QWidget):
         # Right Pane: Longitudinal Reinforcement & Section A-A
         self.rc_scene = QGraphicsScene(self)
         self.rc_view = QGraphicsView(self.rc_scene)
+        self.rc_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.rc_view.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.rc_view.setBackgroundBrush(QBrush(QColor("#FFFFFF")))
         self.rc_view.setStyleSheet("border: 1px solid #CBD5E1; background: #FFFFFF;")
@@ -4266,16 +4284,16 @@ class BeamDesignDetailWidget(QWidget):
         sc = self.rc_scene
         tot_l = max(0.5, float(res.get("total_len", 5.0)))
 
-        # True Right-Pane Viewport Width Utilization (v2.2.0 Right-Edge Clipping Fix):
+        # True Right-Pane Viewport Width Utilization (v2.4.0 Gutter Deduction & Section A-A Fit):
         raw_vp_w = float(self.rc_view.viewport().width())
         raw_vp_h = float(self.rc_view.viewport().height())
-        vp_w = raw_vp_w if raw_vp_w >= 420.0 else 860.0
-        vp_h = raw_vp_h if raw_vp_h >= 380.0 else 600.0
+        vp_w = max(420.0, raw_vp_w - 28.0)
+        vp_h = max(380.0, raw_vp_h - 10.0)
 
         b_m = float(bm.get("width_m", 0.40))
         h_m = float(bm.get("depth_m", 0.30))
-        sec_w = max(115.0, min(190.0, b_m * 240.0))
-        sec_h = max(110.0, min(210.0, h_m * 240.0))
+        sec_w = max(110.0, min(170.0, b_m * 220.0))
+        sec_h = max(110.0, min(190.0, h_m * 220.0))
 
         sup_table = res.get("support_critical_table", [])
         c_left = float(bm.get("cantilever_left_m", 0.0))
@@ -4285,10 +4303,10 @@ class BeamDesignDetailWidget(QWidget):
         ext_right_m = (float(sup_table[-1].get("width_m", 0.20)) / 2.0) if (sup_table and c_right <= 1e-3) else 0.0
 
         # Solve horizontal scale across FULL physical width (ext_left + tot_l + ext_right) so Section A-A NEVER clips!
-        left_margin_px = 58.0
-        gap_to_sec_px = 42.0
-        right_sec_pad_px = 46.0
-        avail_phys_px = max(300.0, vp_w - left_margin_px - gap_to_sec_px - sec_w - right_sec_pad_px)
+        left_margin_px = 50.0
+        gap_to_sec_px = 36.0
+        right_sec_pad_px = 24.0
+        avail_phys_px = max(280.0, vp_w - left_margin_px - gap_to_sec_px - sec_w - right_sec_pad_px)
         tot_phys_m = max(0.5, ext_left_m + tot_l + ext_right_m)
         scale_x = avail_phys_px / tot_phys_m
         x_beam_left = left_margin_px
@@ -4447,7 +4465,7 @@ class BeamDesignDetailWidget(QWidget):
         sec_info.setDefaultTextColor(QColor("#0F172A"))
         sec_info.setPos(sec_x, sec_y + sec_h + 8)
 
-        sc.setSceneRect(0, 0, sec_x + sec_w + 36, max(vp_h - 16.0, y_bot + 145.0))
+        sc.setSceneRect(0, 0, min(vp_w, sec_x + sec_w + 16.0), max(vp_h - 16.0, y_bot + 145.0))
 
 
 class SchedulesAndReportsWidget(QWidget):
@@ -4754,11 +4772,11 @@ class XpertStudioMainWindow(QMainWindow):
         m_file.addAction(act_save)
 
         m_file.addSeparator()
-        act_start_def = QAction("Startup Defaults (إعدادات البداية — المجلد وأقطار التسليح)...", self)
+        act_start_def = QAction("Startup Defaults (Projects Folder & Rebar Table)...", self)
         act_start_def.triggered.connect(self.open_startup_defaults_dialog)
         m_file.addAction(act_start_def)
 
-        act_opts = QAction("Options (خيارات المواد وبيانات سقف الهوردي)...", self)
+        act_opts = QAction("Options (Materials & Hollow-Block Data)...", self)
         act_opts.triggered.connect(self.open_studio_options_dialog)
         m_file.addAction(act_opts)
 
@@ -4775,7 +4793,7 @@ class XpertStudioMainWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             m_view.addAction(act)
         m_view.addSeparator()
-        act_diag_log = QAction("Open Session Diagnostic Log (سجل الأحداث والأعطال)...", self)
+        act_diag_log = QAction("Open Session Diagnostic Log...", self)
         act_diag_log.triggered.connect(self.open_diagnostic_log_dialog)
         m_view.addAction(act_diag_log)
 
@@ -4860,17 +4878,17 @@ class XpertStudioMainWindow(QMainWindow):
         m_analyze.addAction(act_sched_tab)
 
         m_analyze.addSeparator()
-        act_slab_rib = QAction("Open Hollow-Block Slab Rib Design && Cross-Section (تصميم الأعصاب والقطاع العرضي للبلاطات)...", self)
+        act_slab_rib = QAction("Open Hollow-Block Slab Rib Design && Cross-Section...", self)
         act_slab_rib.triggered.connect(lambda: self.open_slab_rib_design_dialog())
         m_analyze.addAction(act_slab_rib)
 
         # 7. OPTIONS MENU (Startup Defaults & Materials/Hollow-Block Slab Options)
         m_options = mbar.addMenu("&Options")
-        act_opt_start = QAction("Startup Defaults (إعدادات البداية — المجلد وأقطار التسليح)...", self)
+        act_opt_start = QAction("Startup Defaults (Projects Folder & Rebar Table)...", self)
         act_opt_start.triggered.connect(self.open_startup_defaults_dialog)
         m_options.addAction(act_opt_start)
 
-        act_opt_mat = QAction("Materials && Hollow-Block Slab Options (خيارات المواد وسقف الهوردي)...", self)
+        act_opt_mat = QAction("Materials && Hollow-Block Slab Options...", self)
         act_opt_mat.triggered.connect(self.open_studio_options_dialog)
         m_options.addAction(act_opt_mat)
 
@@ -5320,7 +5338,7 @@ class XpertStudioMainWindow(QMainWindow):
         if self.is_tie_beams_story():
             QMessageBox.warning(
                 self,
-                "Tie-Beams Story Rule (مسقط السملات)",
+                "Tie-Beams Story Rule",
                 "All Tie-Beams / Grade Beams must remain Drop / Rectangular Beams (0.20×0.50m). Hidden beams are disabled on this story.",
             )
             return
@@ -5343,7 +5361,7 @@ class XpertStudioMainWindow(QMainWindow):
                 converted += 1
                 last_msg = msg
             else:
-                QMessageBox.warning(self, "Structural Hierarchy Rule (كمرة ساقطة على مدفونة)", msg)
+                QMessageBox.warning(self, "Structural Hierarchy Rule", msg)
                 self.update_contextual_prompt(msg)
         if converted > 0:
             self.save_and_sync_current_story()
@@ -5657,7 +5675,7 @@ class XpertStudioMainWindow(QMainWindow):
         reconcile_all_story_beams_supports_and_spans(self.current_story_data)
         self.cad_canvas.render_story(self.current_story_data)
         if self.is_tie_beams_story():
-            self.lbl_calc_thick.setText("Tie-Beams Story (مسقط السملات): No Slabs / Hidden Beams")
+            self.lbl_calc_thick.setText("Tie-Beams Story: No Slabs / Hidden Beams")
             self.lbl_gov_member.setText("Draw Drop Tie-Beams (3B) directly between Columns without Boundary")
             self.btn_smart_opt.setVisible(False)
             return
@@ -5681,9 +5699,9 @@ class XpertStudioMainWindow(QMainWindow):
         always rounded UP to the nearest integer centimeter via math.ceil).
         If entered < calculated_min_thickness_cm and `interactive=True`, shows a ONE-TIME warning dialog
         giving the user two explicit choices:
-          1. Continue with entered thickness (`الاستمرار بالسمك المدخل`) -> keep entered value and record
+          1. Continue with entered thickness -> keep entered value and record
              `thickness_warning_acknowledged_cm = entered` so the warning does NOT pop up repeatedly.
-          2. Modify thickness to calculated minimum (`تعديل السمك إلى القيمة المحسوبة`) -> update spinbox & story thickness.
+          2. Modify thickness to calculated minimum -> update spinbox & story thickness.
         Then updates `adopted_slab_thickness_cm`, hidden beam depths, and Hordi area load `Wu (m×m)`.
         """
         if self.is_tie_beams_story():
@@ -5704,18 +5722,17 @@ class XpertStudioMainWindow(QMainWindow):
         ):
             msg_box = QMessageBox(self)
             msg_box.setIcon(QMessageBox.Icon.Warning)
-            msg_box.setWindowTitle("تحذير الحد الأدنى لسمك السقف الهوردي (Minimum Slab Thickness Warning)")
+            msg_box.setWindowTitle("Minimum Hollow-Block Slab Thickness Warning")
             msg_box.setText(
-                f"السمك المدخل للسقف ({entered:.0f} cm) أقل من السمك الأدنى المسموح به والمحسوب من المسقط "
-                f"({req:.0f} cm) والمحكوم بالعنصر: {eval_res.get('governing_member', '')}.\n\n"
-                f"Entered slab thickness ({entered:.0f} cm) is less than the calculated minimum thickness ({req:.0f} cm).\n\n"
-                f"اختر الإجراء المطلوب لحساب الأحمال والتصميم:"
+                f"Entered slab thickness ({entered:.0f} cm) is less than the calculated minimum thickness ({req:.0f} cm) "
+                f"governed by member: {eval_res.get('governing_member', '')}.\n\n"
+                f"Choose calculation action:"
             )
             btn_continue = msg_box.addButton(
-                f"الاستمرار بالسمك المدخل ({entered:.0f} cm)", QMessageBox.ButtonRole.AcceptRole
+                f"Continue with entered thickness ({entered:.0f} cm)", QMessageBox.ButtonRole.AcceptRole
             )
             btn_modify = msg_box.addButton(
-                f"تعديل السمك إلى ({req:.0f} cm) وحساب الأحمال", QMessageBox.ButtonRole.ActionRole
+                f"Adjust thickness to ({req:.0f} cm) and calculate", QMessageBox.ButtonRole.ActionRole
             )
             msg_box.setDefaultButton(btn_modify)
             msg_box.exec()
@@ -5798,7 +5815,7 @@ class XpertStudioMainWindow(QMainWindow):
             if self.is_tie_beams_story():
                 QMessageBox.information(
                     self,
-                    "Tie-Beams Story (مسقط السملات)",
+                    "Tie-Beams Story",
                     "Tie-Beams story (00_TieBeams) does not contain hollow-block slabs.",
                 )
                 return
@@ -5806,7 +5823,7 @@ class XpertStudioMainWindow(QMainWindow):
             if not slabs:
                 QMessageBox.information(
                     self,
-                    "Hollow-Block Slab Rib Design (تصميم الأعصاب الهوردي)",
+                    "Hollow-Block Slab Rib Design",
                     "No slabs found on the active story. Click 'Auto-Fill All Slabs' or '4A. Pick: Slab' first.",
                 )
                 return
@@ -5930,7 +5947,8 @@ class XpertStudioMainWindow(QMainWindow):
             ]
             self.current_story_data["beams"] = [
                 {
-                    "id": "B1", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B1", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.40,
+                    "initial_width_m": 0.20, "initial_depth_m": 0.40, "room_bounding": True,
                     "start_x": 0.0, "start_y": 8.40, "end_x": 10.0, "end_y": 8.40,
                     "spans": [5.1, 4.7],
                     "supports": [
@@ -5940,7 +5958,8 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B2", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "room_bounding": True,
+                    "id": "B2", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
+                    "initial_width_m": 0.40, "initial_depth_m": 0.30, "room_bounding": True,
                     "start_x": 0.0, "start_y": 4.20, "end_x": 10.0, "end_y": 4.20,
                     "spans": [5.1, 4.7],
                     "supports": [
@@ -5950,7 +5969,8 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B3", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B3", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.40,
+                    "initial_width_m": 0.20, "initial_depth_m": 0.40, "room_bounding": True,
                     "start_x": 0.0, "start_y": 0.10, "end_x": 10.0, "end_y": 0.10,
                     "spans": [5.1, 4.7],
                     "supports": [
@@ -5960,7 +5980,8 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B4", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B4", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.40,
+                    "initial_width_m": 0.20, "initial_depth_m": 0.40, "room_bounding": True,
                     "start_x": 0.10, "start_y": 0.0, "end_x": 0.10, "end_y": 8.5,
                     "spans": [4.0, 4.1],
                     "supports": [
@@ -5970,7 +5991,8 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B5", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30, "room_bounding": True,
+                    "id": "B5", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
+                    "initial_width_m": 0.40, "initial_depth_m": 0.30, "room_bounding": True,
                     "start_x": 5.20, "start_y": 0.0, "end_x": 5.20, "end_y": 8.5,
                     "spans": [4.0, 4.1],
                     "supports": [
@@ -5980,7 +6002,8 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B6", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.50, "room_bounding": True,
+                    "id": "B6", "beam_kind": "drop", "kind": "drop", "width_m": 0.20, "depth_m": 0.40,
+                    "initial_width_m": 0.20, "initial_depth_m": 0.40, "room_bounding": True,
                     "start_x": 9.90, "start_y": 0.0, "end_x": 9.90, "end_y": 8.5,
                     "spans": [4.0, 4.1],
                     "supports": [
@@ -6088,7 +6111,7 @@ class XpertStudioMainWindow(QMainWindow):
             if pre_alerts and "--check" not in sys.argv:
                 QMessageBox.information(
                     self,
-                    "تنبيه التسلسل الإنشائي قبل التحليل",
+                    "Structural Hierarchy Notification",
                     "\n\n".join(pre_alerts),
                 )
             self.save_and_sync_current_story()

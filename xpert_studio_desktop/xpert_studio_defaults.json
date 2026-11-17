@@ -1,7 +1,7 @@
 {
-  "schema_version": "2.2.1",
+  "schema_version": "2.3.0",
   "default_projects_root_folder": "C:/Users/Xpert/Documents/cad test",
-  "default_stirrup_bar_mm": 8,
+  "default_stirrup_bar_mm": 6,
   "default_main_bar_mm": 14,
   "rebar_diameters_table": [
     {
@@ -146,15 +146,15 @@
     "soil_bearing_qall_kn_m2": 150.0
   },
   "hollow_block_slab_data": {
-    "slab_thickness_cm": 29.0,
-    "top_compression_slab_cm": 9.0,
-    "topping_thickness_cm": 9.0,
+    "slab_thickness_cm": 25.0,
+    "top_compression_slab_cm": 5.0,
+    "topping_thickness_cm": 5.0,
     "block_height_cm": 20.0,
     "block_width_cm": 40.0,
     "block_length_cm": 25.0,
     "rib_width_cm": 15.0,
-    "slab_factored_wu_kpa": 11.37,
-    "wu_rib_kn_m": 6.26,
+    "slab_factored_wu_kpa": 10.03,
+    "wu_rib_kn_m": 5.52,
     "finish_load_kn_m2": 1.5,
     "live_load_kn_m2": 2.0,
     "default_wall_load_kn_m": 11.2
@@ -168,7 +168,7 @@
       {
         "active": true,
         "enabled": true,
-        "label": "\u03a6 6",
+        "label": "\u03a66",
         "bar_name": "\u03a66",
         "dia_mm": 6,
         "diameter_mm": 6,
@@ -337,7 +337,8 @@
       "hidden_beam_min_width_cm": 40.0,
       "drop_beam_width_cm": 20.0,
       "drop_beam_min_depth_cm": 40.0,
-      "drop_beam_depth_cm": 50.0
+      "drop_beam_depth_cm": 50.0,
+      "topping_thickness_cm": 9.0
     }
   }
 }
