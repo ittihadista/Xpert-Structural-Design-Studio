@@ -29,7 +29,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.4.1-structural-bim-pro"
+STUDIO_VERSION = "v2.4.2-structural-bim-pro"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
@@ -1364,3 +1364,60 @@ def update_project_story_configuration(master_payload: Dict[str, Any], config: D
         with open(mf, "w", encoding="utf-8") as f: json.dump(master_payload, f, indent=2)
     log_studio_event("PROJECT_DATA_UPDATED", f"Story configuration updated: {len(stories)} stories, upper={n_upper}")
     return master_payload
+
+
+def migrate_story_to_v242(story, master):
+    ld = (master or {}).get("loads_and_defaults", {})
+    hb = story.setdefault("hollow_block", {})
+    hb["min_b_hidden_mm"] = float(ld.get("hidden_beam_min_width_cm", 30.0)) * 10.0
+    hb["min_h_drop_mm"] = float(ld.get("drop_beam_min_depth_cm", 40.0)) * 10.0
+    n_upper = sum(1 for s in (master or {}).get("stories", []) if s.get("story_type") in ("typical", "standard", "penthouse"))
+    story["has_upper_floors"] = bool(n_upper > 0)
+    is_tie = str(story.get("story_type", "")) == "tie_beams" or str(story.get("story_id", "")).startswith("00_")
+    if "wall_load_policy" not in story:
+        story["wall_load_policy"] = "all_beams" if (is_tie or story["has_upper_floors"]) else "no_walls"
+    if is_tie:
+        story["slabs"] = []; story["openings"] = []
+        story["adopted_slab_thickness_cm"] = 0.0; story["slab_factored_wu_kpa"] = 0.0
+        hb["factored_wu_kpa"] = 0.0; hb["total_thickness_cm"] = 0.0
+    beams = {str(b.get("id")): b for b in story.get("beams", [])}
+    for slb in story.get("slabs", []):
+        bb = slb.get("bounding_beams") or {}
+        def hw(key):
+            b = beams.get(str(bb.get(key))) if bb.get(key) else None
+            return (float(b.get("width_m", 0.20)) / 2.0) if b else 0.0
+        if "min_x" in slb:
+            slb["clear_min_x"] = round(float(slb["min_x"]) + hw("West"), 3)
+            slb["clear_max_x"] = round(float(slb["max_x"]) - hw("East"), 3)
+            slb["clear_min_y"] = round(float(slb["min_y"]) + hw("South"), 3)
+            slb["clear_max_y"] = round(float(slb["max_y"]) - hw("North"), 3)
+    return story
+
+def migrate_master_to_v242(master):
+    import json as _j
+    for s in (master or {}).get("stories", []):
+        jp = s.get("json_file", "")
+        if jp and os.path.isfile(jp):
+            with open(jp, encoding="utf-8") as f: sd = _j.load(f)
+            migrate_story_to_v242(sd, master)
+            with open(jp, "w", encoding="utf-8") as f: _j.dump(sd, f, indent=2)
+    return master
+
+def update_min_sections(master, hidden_width_cm, drop_depth_cm):
+    import json as _j
+    ld = master.setdefault("loads_and_defaults", {})
+    ld["hidden_beam_min_width_cm"] = float(hidden_width_cm)
+    ld["drop_beam_min_depth_cm"] = float(drop_depth_cm)
+    for s in master.get("stories", []):
+        jp = s.get("json_file", "")
+        if jp and os.path.isfile(jp):
+            with open(jp, encoding="utf-8") as f: sd = _j.load(f)
+            hb = sd.setdefault("hollow_block", {})
+            hb["min_b_hidden_mm"] = float(hidden_width_cm) * 10.0
+            hb["min_h_drop_mm"] = float(drop_depth_cm) * 10.0
+            with open(jp, "w", encoding="utf-8") as f: _j.dump(sd, f, indent=2)
+    mf = master.get("master_file", "")
+    if mf:
+        with open(mf, "w", encoding="utf-8") as f: _j.dump(master, f, indent=2)
+    log_studio_event("MIN_SECTIONS", f"Hidden min width={hidden_width_cm}cm, Drop min depth={drop_depth_cm}cm")
+    return master

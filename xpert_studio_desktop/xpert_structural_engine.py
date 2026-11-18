@@ -5621,3 +5621,27 @@ def convert_beam_kind_and_section(
         True,
         f"Converted Beam {beam_id} to {target_kind.upper()} ({bm['width_m']:.2f} × {bm['depth_m']:.2f} m).",
     )
+
+
+# ===== v2.4.2 additive overrides =====
+def resolve_effective_wall_height_for_story(story_data):
+    if "wall_height_m" in story_data and float(story_data["wall_height_m"]) > 0.10:
+        return float(story_data["wall_height_m"])
+    st = str(story_data.get("story_type", "")).lower(); sid = str(story_data.get("story_id", "")).lower()
+    if "tie" in st or "tie" in sid or "00_" in sid: return 3.20
+    if "ground" in st or "ground" in sid or "02_" in sid:
+        return 3.00 if story_data.get("has_upper_floors", True) else 0.0
+    if "penthouse" in st or "roof" in sid: return 1.50
+    return float(story_data.get("height_m", 3.00))
+
+def ensure_beam_wall_flags(story_data, beam):
+    policy = str(story_data.get("wall_load_policy", "all_beams" if story_data.get("has_upper_floors", True) else "no_walls"))
+    default_flag = (policy != "no_walls")
+    default_t_cm = snap_standard_wall_thickness_cm(float(story_data.get("default_wall_thickness_cm", 20.0)))
+    flags = beam.setdefault("span_wall_flags", {}); thick = beam.setdefault("span_wall_thickness_cm", {})
+    for seg in get_beam_span_segments(beam):
+        k = seg["key"]
+        if k not in flags: flags[k] = default_flag
+        if k not in thick: thick[k] = default_t_cm
+        else: thick[k] = snap_standard_wall_thickness_cm(thick[k])
+    return flags

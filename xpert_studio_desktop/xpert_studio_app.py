@@ -6310,3 +6310,77 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ===== v2.4.2-structural-bim-pro additive upgrades =====
+class MinSectionsDialog(QDialog):
+    def __init__(self, parent_studio, master):
+        super().__init__(parent_studio)
+        self.studio = parent_studio; self.master = master
+        self.setWindowTitle("Minimum Beam Sections (persistent project-wide)")
+        self.setMinimumWidth(420); self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        ld = master.get("loads_and_defaults", {})
+        vb = QVBoxLayout(self); form = QFormLayout()
+        self.sp_hw = QDoubleSpinBox(); self.sp_hw.setRange(20.0, 60.0); self.sp_hw.setSingleStep(5.0)
+        self.sp_hw.setValue(float(ld.get("hidden_beam_min_width_cm", 30.0))); self.sp_hw.setSuffix(" cm")
+        form.addRow("Hidden Beam MIN width:", self.sp_hw)
+        self.sp_dd = QDoubleSpinBox(); self.sp_dd.setRange(30.0, 80.0); self.sp_dd.setSingleStep(5.0)
+        self.sp_dd.setValue(float(ld.get("drop_beam_min_depth_cm", 40.0))); self.sp_dd.setSuffix(" cm")
+        form.addRow("Drop Beam MIN depth:", self.sp_dd)
+        vb.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._save); bb.rejected.connect(self.reject); vb.addWidget(bb)
+    def _save(self):
+        import xpert_project_io as _pio
+        _pio.update_min_sections(self.master, self.sp_hw.value(), self.sp_dd.value())
+        self.studio._populate_story_selector(); self.studio.refresh_story_ui()
+        self.accept()
+
+def _open_min_sections(self):
+    if not self.master_project:
+        QMessageBox.information(self, "Minimum Sections", "Open a project first."); return
+    MinSectionsDialog(self, self.master_project).exec()
+XpertStudioMainWindow.open_min_sections_dialog = _open_min_sections
+
+_orig_menu = XpertStudioMainWindow._build_classic_menu_bar
+def _menu2(self):
+    _orig_menu(self)
+    m = self.menuBar().addMenu("&Sections")
+    a = QAction("Minimum Beam Sections (Hidden Width / Drop Depth)...", self)
+    a.triggered.connect(self.open_min_sections_dialog); m.addAction(a)
+XpertStudioMainWindow._build_classic_menu_bar = _menu2
+
+_orig_load = XpertStudioMainWindow.load_project_from_file
+def _load2(self, path):
+    _orig_load(self, path)
+    if self.master_project:
+        import xpert_project_io as _pio
+        _pio.migrate_master_to_v242(self.master_project)
+        self._populate_story_selector()
+XpertStudioMainWindow.load_project_from_file = _load2
+
+_orig_story = XpertStudioMainWindow._on_story_changed
+def _story2(self, idx):
+    _orig_story(self, idx)
+    if self.master_project and self.current_story_data:
+        import xpert_project_io as _pio
+        _pio.migrate_story_to_v242(self.current_story_data, self.master_project)
+        self.refresh_story_ui(); self.cad_canvas.zoom_extents()
+XpertStudioMainWindow._on_story_changed = _story2
+
+_orig_render = StructuralCadCanvas2D.render_story
+def _render2(self, story_data):
+    import xpert_project_io as _pio
+    _pio.migrate_story_to_v242(story_data, getattr(self.studio, "master_project", None))
+    _orig_render(self, story_data)
+StructuralCadCanvas2D.render_story = _render2
+
+_orig_zoom = StructuralCadCanvas2D.zoom_extents
+def _zoom2(self):
+    _orig_zoom(self)
+    rect = self.scene_2d.itemsBoundingRect()
+    if not rect.isNull():
+        self.scene_2d.setSceneRect(rect.adjusted(-40, -40, 40, 40))
+    self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+StructuralCadCanvas2D.zoom_extents = _zoom2

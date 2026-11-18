@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1749,6 +1749,53 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertEqual(n_upper, 3)
         tie = next(s for s in master["stories"] if s["story_id"] == "00_TieBeams")
         self.assertAlmostEqual(tie["wall_height_m"], 3.4, places=2)
+
+
+    def test_v242_no_upper_floor_defaults_no_walls(self):
+        import xpert_project_io as pio
+        from xpert_structural_engine import ensure_beam_wall_flags
+        cfg = {"project_name":"NoUpper","root_directory":self.tmp_dir,"ground_floor_height_m":3.2,
+               "floors_above_ground":0,"include_basement":False,"include_penthouse":False}
+        m = pio.initialize_studio_project(cfg)
+        pio.migrate_master_to_v242(m)
+        g = next(s for s in m["stories"] if s["story_id"]=="02_Ground_Floor")
+        import json
+        sd = json.load(open(g["json_file"], encoding="utf-8"))
+        self.assertEqual(sd["wall_load_policy"], "no_walls")
+        bm = {"id":"B1","spans":[4.0]}
+        flags = ensure_beam_wall_flags(sd, bm)
+        self.assertFalse(flags["span_1"])
+
+    def test_v242_tie_story_slabs_purged(self):
+        import xpert_project_io as pio
+        st = {"story_id":"00_TieBeams","story_type":"tie_beams","slabs":[{"id":"S1"}],"openings":[{"id":"OP1"}],
+              "adopted_slab_thickness_cm":30.0}
+        pio.migrate_story_to_v242(st, {"stories":[]})
+        self.assertEqual(st["slabs"], []); self.assertEqual(st["openings"], [])
+        self.assertEqual(st["slab_factored_wu_kpa"], 0.0)
+
+    def test_v242_min_sections_editable_persistent(self):
+        import xpert_project_io as pio, json
+        cfg = {"project_name":"MinSec","root_directory":self.tmp_dir,"ground_floor_height_m":3.2,
+               "floors_above_ground":1,"include_basement":False,"include_penthouse":False}
+        m = pio.initialize_studio_project(cfg)
+        pio.update_min_sections(m, 35.0, 45.0)
+        g = next(s for s in m["stories"] if s["story_id"]=="02_Ground_Floor")
+        sd = json.load(open(g["json_file"], encoding="utf-8"))
+        self.assertEqual(sd["hollow_block"]["min_b_hidden_mm"], 350.0)
+        self.assertEqual(sd["hollow_block"]["min_h_drop_mm"], 450.0)
+
+    def test_v242_slab_clear_bounds_flush_to_actual_beam_width(self):
+        import xpert_project_io as pio
+        st = {"story_id":"02_Ground_Floor","story_type":"ground",
+              "beams":[{"id":"BW","width_m":0.30,"start_x":0.0,"start_y":0.0,"end_x":0.0,"end_y":4.0},
+                       {"id":"BE","width_m":0.30,"start_x":5.0,"start_y":0.0,"end_x":5.0,"end_y":4.0}],
+              "slabs":[{"id":"S1","min_x":0.0,"max_x":5.0,"min_y":0.0,"max_y":4.0,
+                        "bounding_beams":{"West":"BW","East":"BE"}}]}
+        pio.migrate_story_to_v242(st, {"stories":[{"story_type":"standard"}]})
+        s = st["slabs"][0]
+        self.assertAlmostEqual(s["clear_min_x"], 0.15, places=3)
+        self.assertAlmostEqual(s["clear_max_x"], 4.85, places=3)
 
 
 if __name__ == "__main__":

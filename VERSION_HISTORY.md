@@ -400,3 +400,12 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 - Options > Project Data: edit story count / heights / foundation depth / materials post-creation (columns preserved).
 - Regression suite expanded 20 -> 24 tests (centerline Excel parity, wall routing, hidden300/ds6, trimmer divider + project regen).
 - Backup of v2.4.0 preserved in xpert_studio_desktop/reference_v2_4_0/.
+
+## v2.4.2-structural-bim-pro (2026-11-18)
+- Persistent editable Minimum Beam Sections (Hidden width / Drop depth) via Sections menu, project-wide.
+- Auto-migration of OLD projects on load (wall policy, min sections, flush slab clear bounds, tie purge).
+- No-upper-floor => ground beams default NO wall load (per-span checkbox still available).
+- Tie-beam plan fully purged of slab loads/openings.
+- Slab clear bounds flush to ACTUAL beam widths (closes rib/beam gaps).
+- CAD canvas sceneRect bounded + fit-on-load (no off-screen overflow).
+- 28 regression tests.
