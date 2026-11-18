@@ -390,3 +390,13 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
    - Designs all beams according to `ACI 318` (flexural reinforcement + shear stirrups).
    - Tracks for every column: story load, cumulative axial load ($\sum P_u$), end moments ($M_{ux}, M_{uy}$), and **4-Way Framing Beams (`North, South, East, West`)**, generates **ACI 318 P-M Interaction Diagrams**, and exports `SPColumn (.cti)` files.
    - Designs isolated footings (`Foundations_Design.json`) and generates a printable **Master Calculation Report** (`Ctrl+P`).
+
+## v2.4.1-structural-bim-pro (2026-11-18)
+- CENTERLINE design moments for beams & slabs (permanent Eng. Yousef rule); face values kept for display only.
+- Wall-load routing fixed: TieBeams carry ground walls (3.20m -> 11.20 kN/m); Ground carries first-floor walls (3.00m -> 10.50 kN/m).
+- Hidden beam baseline width 300mm (Excel Con.Beam), stirrups ds=6 hidden / ds=8 drop.
+- Tie-beam drop baseline depth 400mm (legacy 500mm removed); TieBeams skip phantom Hordi slab.
+- Opening merge respects 0.20m trimmer dividers; slab bays subtract openings.
+- Options > Project Data: edit story count / heights / foundation depth / materials post-creation (columns preserved).
+- Regression suite expanded 20 -> 24 tests (centerline Excel parity, wall routing, hidden300/ds6, trimmer divider + project regen).
+- Backup of v2.4.0 preserved in xpert_studio_desktop/reference_v2_4_0/.

@@ -1218,7 +1218,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertGreater(b1_des["b_mm"], 400)  # B1 widened post-analysis from 400 mm in +100 mm steps!
         b1_loads = bundle["beam_results"]["B1"]["loads_applied"]
         # Verify Single-Pass O.W stays at baseline 0.40 m and w_Slab stays at unreduced 5.0 m / 2 = 2.50 m
-        expected_baseline_ow = round(0.40 * 0.29 * 24.0 * 1.4, 2)
+        expected_baseline_ow = round(0.30 * 0.29 * 24.0 * 1.4, 2)
         wu_m2_29 = float(story_single_pass["hollow_block"]["factored_wu_kpa"])
         expected_unreduced_w_slab = round(wu_m2_29 * (5.0 / 2.0), 2)
         self.assertAlmostEqual(b1_loads[0]["w_sw"], expected_baseline_ow, places=2)
@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertEqual(pio.STUDIO_VERSION, "v2.4.0-structural-bim-pro")
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1656,6 +1656,99 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertTrue(ok_b8_drop)
         ok_b8_hid, _ = eng.convert_beam_kind_and_section(story_bim, "B8", "hidden")
         self.assertTrue(ok_b8_hid)
+
+
+    def test_v241_centerline_design_matches_excel_conbeam(self) -> None:
+        from xpert_structural_engine import design_beam_aci318
+        bm = {"id": "BX", "beam_kind": "hidden", "width_m": 0.30, "depth_m": 0.25,
+              "lock_section_dimensions": True, "spans": [4.2, 4.2], "main_bar_dia_mm": 14, "stirrup_dia_mm": 6}
+        res = {"spans": [4.2, 4.2], "max_pos_mu_knm": 18.06, "max_neg_face_mu_knm": -24.75,
+               "max_neg_center_mu_knm": -32.10, "max_face_vu_kn": 38.2,
+               "support_critical_table": [
+                   {"support_index": 1, "target_id": "C5", "x_m": 0.0, "face_neg_mu_knm": 0.0, "centerline_neg_mu_knm": 0.0, "face_vu_kn": 22.9},
+                   {"support_index": 2, "target_id": "C6", "x_m": 4.2, "face_neg_mu_knm": -24.75, "centerline_neg_mu_knm": -32.10, "face_vu_kn": 38.2},
+                   {"support_index": 3, "target_id": "C1", "x_m": 8.4, "face_neg_mu_knm": 0.0, "centerline_neg_mu_knm": 0.0, "face_vu_kn": 22.9}],
+               "span_critical_table": [
+                   {"span_index": 1, "length_m": 4.2, "max_pos_mu_knm": 18.06, "max_abs_vu_kn": 38.2},
+                   {"span_index": 2, "length_m": 4.2, "max_pos_mu_knm": 18.06, "max_abs_vu_kn": 38.2}]}
+        des = design_beam_aci318(bm, res, fc_mpa=20.0, fy_mpa=350.0, bar_dia_mm=14, stirrup_dia_mm=6, auto_size_section=False)
+        self.assertEqual(des["b_mm"], 300); self.assertEqual(des["h_mm"], 250); self.assertAlmostEqual(des["d_mm"], 212.0, places=1)
+        gov = des["governing_flexure_details"]
+        self.assertAlmostEqual(gov["ku"], 0.13226, places=4)
+        self.assertEqual(gov["n_total"], 4)
+        self.assertAlmostEqual(des["governing_mu_abs_knm"], 32.10, places=2)
+        sup = des["support_designs"][1]
+        self.assertAlmostEqual(sup["centerline_neg_mu_knm"], 32.10, places=2)
+        self.assertAlmostEqual(sup["face_neg_mu_knm"], 24.75, places=2)
+
+    def test_v241_wall_heights_routing_and_tie_no_hordi(self) -> None:
+        from xpert_structural_engine import analyze_all_story_beams_and_columns
+        tie = {"story_id": "00_TieBeams", "story_type": "tie_beams", "height_m": 1.5, "wall_height_m": 3.2,
+               "adopted_slab_thickness_cm": 0.0,
+               "columns": [{"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                           {"id": "C2", "x": 5.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True}],
+               "beams": [{"id": "B1", "beam_kind": "drop", "width_m": 0.2, "depth_m": 0.5, "start_x": 0.0, "start_y": 0.0,
+                          "end_x": 5.0, "end_y": 0.0, "spans": [5.0],
+                          "supports": [{"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.2, "center_coord_m": 0.0},
+                                       {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.2, "center_coord_m": 5.0}]}],
+               "slabs": [], "openings": []}
+        b = analyze_all_story_beams_and_columns(tie, 20.0, 350.0)
+        ld = b["beam_results"]["B1"]["loads_applied"][0]
+        self.assertAlmostEqual(ld["w_wall"], 11.20, places=2)
+        self.assertIn("3.2", ld["wall_eq"])
+        self.assertEqual(b["hollow_block_summary"]["factored_wu_kpa"], 0.0)
+        self.assertEqual(tie["slab_factored_wu_kpa"], 0.0)
+        self.assertAlmostEqual(tie["beams"][0]["depth_m"], 0.40, places=2)
+        gnd = {"story_id": "02_Ground_Floor", "story_type": "ground", "height_m": 3.2, "wall_height_m": 3.0,
+               "adopted_slab_thickness_cm": 30.0,
+               "columns": [{"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                           {"id": "C2", "x": 5.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True}],
+               "beams": [{"id": "B1", "beam_kind": "drop", "width_m": 0.2, "depth_m": 0.4, "start_x": 0.0, "start_y": 0.0,
+                          "end_x": 5.0, "end_y": 0.0, "spans": [5.0],
+                          "supports": [{"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.2, "center_coord_m": 0.0},
+                                       {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.2, "center_coord_m": 5.0}]}],
+               "slabs": [], "openings": []}
+        b2 = analyze_all_story_beams_and_columns(gnd, 20.0, 350.0)
+        ld2 = b2["beam_results"]["B1"]["loads_applied"][0]
+        self.assertAlmostEqual(ld2["w_wall"], 10.50, places=2)
+        self.assertIn("3.0", ld2["wall_eq"])
+
+    def test_v241_hidden_min300_and_stirrup6(self) -> None:
+        from xpert_structural_engine import analyze_all_story_beams_and_columns
+        st = {"story_id": "02_Ground_Floor", "story_type": "ground", "height_m": 3.0, "wall_height_m": 3.0,
+              "adopted_slab_thickness_cm": 30.0, "wall_load_policy": "no_walls",
+              "columns": [{"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                          {"id": "C2", "x": 3.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True}],
+              "beams": [{"id": "B1", "beam_kind": "hidden", "start_x": 0.0, "start_y": 0.0, "end_x": 3.0, "end_y": 0.0,
+                         "spans": [3.0], "loads": [{"type": "dist", "x1": 0.0, "x2": 3.0, "val": 5.0}],
+                         "supports": [{"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.2, "center_coord_m": 0.0},
+                                      {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.2, "center_coord_m": 3.0}]}],
+              "slabs": [], "openings": []}
+        b = analyze_all_story_beams_and_columns(st, 20.0, 350.0)
+        des = b["beam_designs"]["B1"]
+        self.assertEqual(des["b_mm"], 300)
+        self.assertEqual(des["stirrup_dia_mm"], 6)
+        self.assertAlmostEqual(st["beams"][0]["width_m"], 0.30, places=2)
+
+    def test_v241_opening_trimmer_divider_and_project_data_regen(self) -> None:
+        import xpert_project_io as pio
+        import xpert_structural_engine as eng
+        st = {"slab_edge_polygon": [[0, 0], [10, 0], [10, 10], [0, 10]], "columns": [], "slabs": [], "openings": [],
+              "beams": [{"id": "B9", "beam_kind": "hidden", "width_m": 0.20, "depth_m": 0.30,
+                         "start_x": 7.0, "start_y": 4.5, "end_x": 7.0, "end_y": 7.0}]}
+        eng.create_opening_with_priority_resolution(st, [[5.4, 4.5], [6.9, 7.0]], is_polygon=False)
+        eng.create_opening_with_priority_resolution(st, [[7.1, 4.5], [9.0, 7.0]], is_polygon=False)
+        self.assertEqual(len(st["openings"]), 2, "0.20m trimmer B9 must keep openings separate")
+        cfg = {"project_name": "RegenTest", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.2,
+               "floors_above_ground": 1, "upper_floor_height_m": 3.0, "include_basement": False, "include_penthouse": False}
+        master = pio.initialize_studio_project(cfg)
+        cfg2 = {"floors_above_ground": 3, "ground_floor_height_m": 3.4, "upper_floor_height_m": 3.3, "foundation_depth_m": 1.8}
+        pio.update_project_story_configuration(master, cfg2)
+        self.assertEqual(master["story_heights"]["upper_floor_height_m"], 3.3)
+        n_upper = sum(1 for s in master["stories"] if s.get("story_type") in ("typical", "standard"))
+        self.assertEqual(n_upper, 3)
+        tie = next(s for s in master["stories"] if s["story_id"] == "00_TieBeams")
+        self.assertAlmostEqual(tie["wall_height_m"], 3.4, places=2)
 
 
 if __name__ == "__main__":

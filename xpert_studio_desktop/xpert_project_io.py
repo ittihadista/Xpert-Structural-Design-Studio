@@ -29,7 +29,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.4.0-structural-bim-pro"
+STUDIO_VERSION = "v2.4.1-structural-bim-pro"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
@@ -219,7 +219,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
         "wall_thickness_cm": 20.0,        # Default wall thickness = 20 cm (200 mm)
         "wall_unit_wt_20cm_kn_m2": 2.5,   # 2.5 kN/m² of wall elevation for 20 cm wall
         "default_wall_load_kn_m": 10.50,  # W_wall = 2.5 * H(3.0m) * 1.4 = 10.50 kN/m
-        "hidden_beam_min_width_cm": 40.0, # Min B for Hidden Beams = 400 mm (Excel B_min = 400)
+        "hidden_beam_min_width_cm": 30.0, # Min B for Hidden Beams = 400 mm (Excel B_min = 400)
         "drop_beam_width_cm": 20.0,       # Default B for Drop Beams = 200 mm
         "drop_beam_min_depth_cm": 40.0,   # Min h for Drop Beams = 400 mm (Excel h_min = 400)
         "drop_beam_depth_cm": 40.0,
@@ -227,7 +227,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
     rebar_table = _normalize_rebar_table(DEFAULT_REBAR_DIAMETERS_TABLE)
 
     defaults: Dict[str, Any] = {
-        "schema_version": "2.3.0",
+        "schema_version": "2.4.1",
         "default_projects_root_folder": default_root,
         "default_stirrup_bar_mm": 6,
         "default_main_bar_mm": 16,
@@ -299,7 +299,7 @@ def save_studio_global_settings(settings: Dict[str, Any]) -> str:
     """
     Saves global 'Startup Defaults' and 'Options' to `xpert_studio_defaults.json`.
     """
-    settings["schema_version"] = "2.3.0"
+    settings["schema_version"] = "2.4.1"
     if "rebar_diameters_table" in settings:
         settings["rebar_diameters_table"] = _normalize_rebar_table(settings["rebar_diameters_table"])
     fpath = _get_global_settings_file_path()
@@ -1271,3 +1271,96 @@ def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
         "candidate_columns": closed_rects,
     }
 
+
+
+def update_project_story_configuration(master_payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """v2.4.1: Edit story count / heights / foundation depth / materials AFTER creation, preserving columns."""
+    import copy as _copy
+    stories = master_payload.get("stories", [])
+    by_id = {s["story_id"]: s for s in stories}
+    ground_h = float(config.get("ground_floor_height_m", 3.20))
+    upper_h = float(config.get("upper_floor_height_m", 3.00))
+    basement_h = float(config.get("basement_height_m", 3.00))
+    penthouse_h = float(config.get("penthouse_height_m", 3.00))
+    found_d = float(config.get("foundation_depth_m", 1.50))
+    n_upper = max(0, int(config.get("floors_above_ground", 0)))
+    include_pent = bool(config.get("include_penthouse", False))
+    for s in stories:
+        st = s.get("story_type", "")
+        if st == "tie_beams":
+            s["height_m"] = found_d; s["wall_height_m"] = ground_h
+        elif st == "basement":
+            s["height_m"] = basement_h; s["wall_height_m"] = ground_h
+        elif st == "ground":
+            s["height_m"] = ground_h; s["wall_height_m"] = upper_h if n_upper > 0 else (penthouse_h if include_pent else 1.5)
+        elif st == "penthouse":
+            s["height_m"] = penthouse_h; s["wall_height_m"] = 1.5
+        else:
+            s["height_m"] = upper_h; s["wall_height_m"] = upper_h
+        s["default_wall_load_kn_m"] = round(2.5 * float(s.get("wall_height_m", upper_h)) * 1.4, 2)
+    upper_ids = [s["story_id"] for s in stories if s.get("story_type") in ("typical", "standard")]
+    cur = len(upper_ids)
+    proj_dir = master_payload.get("project_dir") or os.path.dirname(master_payload.get("master_file", ""))
+    clean = master_payload.get("project_name", "Project")
+    stories_dir = os.path.join(proj_dir, "Stories_Data"); cad_dir = os.path.join(proj_dir, "CAD_Drawings")
+    os.makedirs(stories_dir, exist_ok=True); os.makedirs(cad_dir, exist_ok=True)
+    if n_upper > cur:
+        g = by_id.get("02_Ground_Floor"); cols = []
+        if g and os.path.isfile(g.get("json_file", "")):
+            with open(g["json_file"], encoding="utf-8") as f: cols = json.load(f).get("columns", [])
+        for k in range(cur, n_upper):
+            code = 3 + k; sid = f"{code:02d}_Upper_Floor_{k+1}"
+            entry = {"story_id": sid, "story_label": f"{code:02d} - Upper Floor #{k+1}", "story_type": "standard", "multiplier": 1,
+                     "height_m": upper_h, "wall_height_m": upper_h, "adopted_slab_thickness_cm": 30.0, "allow_hidden_beams": True,
+                     "allow_slabs": True, "status": "PENDING_GROUND_COLUMNS", "default_wall_load_kn_m": round(2.5*upper_h*1.4, 2),
+                     "json_file": os.path.join(stories_dir, f"{clean}-{sid}.json"), "dxf_file": os.path.join(cad_dir, f"{clean}-{sid}.dxf")}
+            sd = {"project_name": clean, "story_id": sid, "story_label": entry["story_label"], "story_type": "standard", "multiplier": 1,
+                  "height_m": upper_h, "wall_height_m": upper_h, "adopted_slab_thickness_cm": 30.0, "slab_edge_polygon": [], "openings": [],
+                  "columns": _copy.deepcopy(cols), "beams": [], "slabs": [], "arch_underlay_lines": []}
+            with open(entry["json_file"], "w", encoding="utf-8") as f: json.dump(sd, f, indent=2)
+            sync_story_to_dxf(sd, entry["dxf_file"]); stories.append(entry)
+    elif n_upper < cur:
+        remove = upper_ids[n_upper:]
+        stories[:] = [s for s in stories if s["story_id"] not in remove]
+        for sid in remove:
+            for p in (os.path.join(stories_dir, f"{clean}-{sid}.json"), os.path.join(cad_dir, f"{clean}-{sid}.dxf")):
+                try: os.remove(p)
+                except OSError: pass
+    has_pent = any(s.get("story_type") == "penthouse" for s in stories)
+    if include_pent and not has_pent:
+        code = 3 + n_upper; sid = f"{code:02d}_Penthouse_Floor"
+        entry = {"story_id": sid, "story_label": f"{code:02d} - Roof Annex / Penthouse Slab", "story_type": "penthouse", "multiplier": 1,
+                 "height_m": penthouse_h, "wall_height_m": 1.5, "adopted_slab_thickness_cm": 30.0, "allow_hidden_beams": True, "allow_slabs": True,
+                 "status": "PENDING_GROUND_COLUMNS", "default_wall_load_kn_m": round(2.5*1.5*1.4, 2),
+                 "json_file": os.path.join(stories_dir, f"{clean}-{sid}.json"), "dxf_file": os.path.join(cad_dir, f"{clean}-{sid}.dxf")}
+        sd = {"project_name": clean, "story_id": sid, "story_label": entry["story_label"], "story_type": "penthouse", "multiplier": 1,
+              "height_m": penthouse_h, "wall_height_m": 1.5, "adopted_slab_thickness_cm": 30.0, "slab_edge_polygon": [], "openings": [],
+              "columns": [], "beams": [], "slabs": [], "arch_underlay_lines": []}
+        with open(entry["json_file"], "w", encoding="utf-8") as f: json.dump(sd, f, indent=2)
+        sync_story_to_dxf(sd, entry["dxf_file"]); stories.append(entry)
+    elif not include_pent and has_pent:
+        pent = [s for s in stories if s.get("story_type") == "penthouse"]
+        stories[:] = [s for s in stories if s.get("story_type") != "penthouse"]
+        for s in pent:
+            for p in (s.get("json_file", ""), s.get("dxf_file", "")):
+                try: os.remove(p)
+                except OSError: pass
+    for s in stories:
+        jp = s.get("json_file", "")
+        if jp and os.path.isfile(jp):
+            with open(jp, encoding="utf-8") as f: sd = json.load(f)
+            sd["height_m"] = s["height_m"]; sd["wall_height_m"] = s.get("wall_height_m", s["height_m"])
+            sd["default_wall_load_kn_m"] = s.get("default_wall_load_kn_m", 0.0)
+            with open(jp, "w", encoding="utf-8") as f: json.dump(sd, f, indent=2)
+            sync_story_to_dxf(sd, s.get("dxf_file", ""))
+    master_payload["stories"] = stories; master_payload["stories_meta"] = stories
+    master_payload["story_heights"] = {"ground_floor_height_m": ground_h, "basement_height_m": basement_h,
+                                       "upper_floor_height_m": upper_h, "penthouse_height_m": penthouse_h, "foundation_depth_m": found_d}
+    mats = master_payload.setdefault("materials_and_soil", {})
+    for k in ("fc_mpa", "fy_mpa", "soil_bearing_qall_kn_m2"):
+        if k in config: mats[k] = float(config[k])
+    mf = master_payload.get("master_file", "")
+    if mf:
+        with open(mf, "w", encoding="utf-8") as f: json.dump(master_payload, f, indent=2)
+    log_studio_event("PROJECT_DATA_UPDATED", f"Story configuration updated: {len(stories)} stories, upper={n_upper}")
+    return master_payload

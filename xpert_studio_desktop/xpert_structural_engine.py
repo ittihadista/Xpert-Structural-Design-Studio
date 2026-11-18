@@ -505,6 +505,7 @@ def solve_continuous_beam_analytical(beam: Dict[str, Any], fc_mpa: float = 20.0,
         "max_pos_mu_knm": max_pos_val,
         "max_pos_moment": max_pos_val,
         "max_neg_face_mu_knm": min([s["face_neg_mu_knm"] for s in support_critical_table] or [0.0]),
+        "max_neg_center_mu_knm": min([s["centerline_neg_mu_knm"] for s in support_critical_table] or [0.0]),
         "max_face_vu_kn": max([s["face_vu_kn"] for s in support_critical_table] or [0.0]),
         "x_full": x_full,
         "v_full": v_full,
@@ -1003,6 +1004,9 @@ def analyze_all_story_beams_and_columns(
     # Synchronize Hollow-Block (Hordi) parameters from story's adopted_slab_thickness_cm (default 30.0 cm)
     # using fixed commercial block height (20 cm for h >= 25 cm, 16 cm for h < 25 cm) and hs = h - block_h
     adopted_t_cm = float(story_data.get("adopted_slab_thickness_cm", 30.0))
+    is_tie_story = str(story_data.get("story_type", "")).lower() == "tie_beams" or "tie" in str(story_data.get("story_id", "")).lower()
+    if is_tie_story:
+        adopted_t_cm = 0.0
     hb_prev = story_data.get("hollow_block", {})
     raw_blk_h = hb_prev.get("block_height_cm", None)
     if raw_blk_h is not None and abs(float(raw_blk_h) - 16.0) < 0.5:
@@ -1057,11 +1061,19 @@ def analyze_all_story_beams_and_columns(
         "factored_wu_kpa": auto_slab_wu_kpa,
     }
     story_data["hollow_block"] = hb_summary
-    _log_eng("HORDI_CALC", f"Slab h={adopted_t_cm:.1f}cm (block={block_h_cm:.0f}cm, hs={hs_cm:.1f}cm) -> Wu_rib={round(wu_rib_kn_m, 2):.2f} kN/m'/rib, Wu_m2={auto_slab_wu_kpa:.2f} kN/m²", hb_summary)
+    if not is_tie_story:
+        _log_eng("HORDI_CALC", f"Slab h={adopted_t_cm:.1f}cm (block={block_h_cm:.0f}cm, hs={hs_cm:.1f}cm) -> Wu_rib={round(wu_rib_kn_m, 2):.2f} kN/m'/rib, Wu_m2={auto_slab_wu_kpa:.2f} kN/m²", hb_summary)
 
+    if is_tie_story:
+        auto_slab_wu_kpa = 0.0
+        hb_summary["factored_wu_kpa"] = 0.0
+        hb_summary["total_thickness_cm"] = 0.0
+        hb_summary["wu_rib_kn_m"] = 0.0
+        story_data["hollow_block"] = hb_summary
+        story_data["slab_factored_wu_kpa"] = 0.0
     if not story_data.get("custom_slab_wu_override", False):
         story_data["slab_factored_wu_kpa"] = auto_slab_wu_kpa
-    slab_wu_kpa = float(story_data.get("slab_factored_wu_kpa", auto_slab_wu_kpa))
+    slab_wu_kpa = 0.0 if is_tie_story else float(story_data.get("slab_factored_wu_kpa", auto_slab_wu_kpa))
 
     default_t_wall_cm = float(story_data.get("default_wall_thickness_cm", 20.0))
     eff_wall_h = resolve_effective_wall_height_for_story(story_data)
@@ -1158,7 +1170,7 @@ def analyze_all_story_beams_and_columns(
     # Hidden beam minimum width = 0.40m (or story hb_cfg min_b_hidden), depth = slab thickness
     # Drop beam width = wall thickness (0.20m), minimum depth = 0.40m
     hb_cfg = story_data.get("hollow_block", {})
-    min_b_hidden_m = max(0.30, float(hb_cfg.get("min_b_hidden_mm", 400.0)) / 1000.0)
+    min_b_hidden_m = max(0.30, float(hb_cfg.get("min_b_hidden_mm", 300.0)) / 1000.0)
     min_h_drop_m = max(0.30, float(hb_cfg.get("min_h_drop_mm", 400.0)) / 1000.0)
     slab_h_m = max(0.15, float(story_data.get("adopted_slab_thickness_cm", 30.0)) / 100.0)
     wall_b_m = max(0.15, default_t_wall_cm / 100.0)
@@ -1174,6 +1186,8 @@ def analyze_all_story_beams_and_columns(
             else:
                 init_w = float(b_copy.get("initial_width_m", b_copy.get("width_m", wall_b_m)))
                 raw_init_h = float(b_copy.get("initial_depth_m", b_copy.get("depth_m", min_h_drop_m)))
+                if is_tie_story:
+                    raw_init_h = min_h_drop_m
                 init_h = _snap_drop_depth_m(max(min_h_drop_m, raw_init_h), min_h_drop_m)
             b_copy["initial_width_m"] = round(init_w, 3)
             b_copy["initial_depth_m"] = round(init_h, 3)
@@ -1395,11 +1409,11 @@ def analyze_all_story_beams_and_columns(
                             w_wall_seg = round(default_wall_w, 2)
                             wall_eq_str = f"{w_wall_seg:.2f} kN/m"
                         else:
-                            w_wall_seg = round(2.5 * (t_wall_span_cm / 20.0) * story_h * 1.4, 2)
+                            w_wall_seg = round(2.5 * (t_wall_span_cm / 20.0) * eff_wall_h * 1.4, 2)
                             if abs(t_wall_span_cm - 20.0) < 0.1:
-                                wall_eq_str = f"2.5×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
+                                wall_eq_str = f"2.5×{eff_wall_h:.1f}×1.4 = {w_wall_seg:.2f}"
                             else:
-                                wall_eq_str = f"2.5×({t_wall_span_cm:.0f}/20)×{story_h:.1f}×1.4 = {w_wall_seg:.2f}"
+                                wall_eq_str = f"2.5×({t_wall_span_cm:.0f}/20)×{eff_wall_h:.1f}×1.4 = {w_wall_seg:.2f}"
 
                     sub_records: List[Dict[str, Any]] = []
                     for k_sub in range(len(clean_cuts) - 1):
@@ -1513,7 +1527,7 @@ def analyze_all_story_beams_and_columns(
         if "main_bar_dia_mm" not in bm:
             bm["main_bar_dia_mm"] = story_main_db
         if "stirrup_dia_mm" not in bm:
-            bm["stirrup_dia_mm"] = story_stir_db
+            bm["stirrup_dia_mm"] = int(story_data.get("default_stirrup_dia_mm", 6 if str(bm.get("beam_kind", "hidden")) == "hidden" else 8))
 
         prev_w = float(bm.get("width_m", 0.40))
         prev_h = float(bm.get("depth_m", 0.30))
@@ -1763,11 +1777,11 @@ def design_beam_aci318(
 
     # Baseline dimensions for iterative sizing (reset to initial baseline if auto_size_section is True and not locked)
     if auto_size_section and not beam.get("lock_section_dimensions", False):
-        init_w_m = float(beam.get("initial_width_m", 0.40 if b_kind == "hidden" else 0.20))
+        init_w_m = float(beam.get("initial_width_m", 0.30 if b_kind == "hidden" else 0.20))
         init_h_m = float(beam.get("initial_depth_m", beam.get("depth_m", 0.30 if b_kind == "hidden" else 0.40)))
         if b_kind == "drop":
             init_h_m = _snap_drop_depth_m(init_h_m, 0.40)
-        b_mm = round(max(400.0 if b_kind == "hidden" else 150.0, init_w_m * 1000.0))
+        b_mm = round(max(300.0 if b_kind == "hidden" else 150.0, init_w_m * 1000.0))
         h_mm = round(max(200.0 if b_kind == "hidden" else 400.0, init_h_m * 1000.0))
     else:
         b_mm = round(float(beam.get("width_m", 0.40 if b_kind == "hidden" else 0.20)) * 1000.0)
@@ -1789,13 +1803,13 @@ def design_beam_aci318(
 
     # Governing moment M_max across all support faces and span mid-spans
     pos_mu = float(analysis_res.get("max_pos_mu_knm", 0.0))
-    neg_mu = abs(float(analysis_res.get("max_neg_face_mu_knm", 0.0)))
+    neg_mu = abs(float(analysis_res.get("max_neg_center_mu_knm", analysis_res.get("max_neg_face_mu_knm", 0.0))))
     sup_table = analysis_res.get("support_critical_table", [])
     span_pos_list = analysis_res.get("span_positive_moments", analysis_res.get("span_critical_table", []))
 
     all_station_moments: List[float] = [abs(pos_mu), abs(neg_mu)]
     for sup in sup_table:
-        all_station_moments.append(abs(float(sup.get("face_neg_mu_knm", sup.get("mu_face_neg_knm", 0.0)))))
+        all_station_moments.append(abs(float(sup.get("centerline_neg_mu_knm", sup.get("m_center_knm", sup.get("face_neg_mu_knm", 0.0))))))
     for sp_info in span_pos_list:
         all_station_moments.append(abs(float(sp_info.get("max_pos_mu_knm", 0.0))))
     m_max_gov = max(all_station_moments) if all_station_moments else 0.0
@@ -2108,7 +2122,7 @@ def design_beam_aci318(
 
     support_designs = []
     for sup in sup_table:
-        m_neg = abs(float(sup.get("face_neg_mu_knm", sup.get("mu_face_neg_knm", 0.0))))
+        m_neg = abs(float(sup.get("centerline_neg_mu_knm", sup.get("m_center_knm", sup.get("face_neg_mu_knm", 0.0)))))
         v_f = float(sup.get("face_vu_kn", sup.get("vu_face_max_kn", 0.0)))
         s_flex = calc_flexural_section(m_neg)
         s_stir = calc_stirrups_detail(v_f)
@@ -2117,8 +2131,10 @@ def design_beam_aci318(
             "target_id": sup.get("target_id", "C1"),
             "x_m": sup.get("x_m", 0.0),
             "reaction_ru_kn": sup.get("reaction_ru_kn", 0.0),
-            "face_neg_mu_knm": m_neg,
-            "mu_neg_face_knm": m_neg,
+            "face_neg_mu_knm": abs(float(sup.get("face_neg_mu_knm", 0.0))),
+            "mu_neg_face_knm": abs(float(sup.get("face_neg_mu_knm", 0.0))),
+            "centerline_neg_mu_knm": m_neg,
+            "mu_neg_center_knm": m_neg,
             "face_vu_kn": v_f,
             "top_ast_mm2": s_flex["as_req_mm2"],
             "top_as_prov_mm2": s_flex["as_prov_mm2"],
@@ -2144,8 +2160,8 @@ def design_beam_aci318(
         left_sup = support_designs[idx] if idx < len(support_designs) else None
         right_sup = support_designs[idx + 1] if (idx + 1) < len(support_designs) else None
         neg_ctrl = max(
-            abs(float(left_sup["face_neg_mu_knm"])) if left_sup else 0.0,
-            abs(float(right_sup["face_neg_mu_knm"])) if right_sup else 0.0,
+            abs(float(left_sup.get("centerline_neg_mu_knm", left_sup["face_neg_mu_knm"]))) if left_sup else 0.0,
+            abs(float(right_sup.get("centerline_neg_mu_knm", right_sup["face_neg_mu_knm"]))) if right_sup else 0.0,
         )
         t_flex_sp = calc_flexural_section(neg_ctrl)
         span_designs.append({
@@ -2188,7 +2204,7 @@ def design_beam_aci318(
     for idx_s in range(max(len(support_designs), len(span_designs))):
         if idx_s < len(support_designs):
             sd = support_designs[idx_s]
-            m_signed = -round(abs(float(sd["face_neg_mu_knm"])), 2) if abs(float(sd["face_neg_mu_knm"])) > 0.05 else 0.0
+            m_signed = -round(abs(float(sd.get("centerline_neg_mu_knm", sd["face_neg_mu_knm"]))), 2) if abs(float(sd.get("centerline_neg_mu_knm", sd["face_neg_mu_knm"]))) > 0.05 else 0.0
             station_design_table.append({
                 "station_type": "support",
                 "station_label": f"moment at support {sd['target_id']}",
@@ -4915,9 +4931,9 @@ def _beam_lies_between_openings(
                         bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
                         bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
                         if abs(bex - bsx) < abs(bey - bsy):
-                            if abs(bsx - shared_x) <= max(0.25, float(bm.get("width_m", 0.30)) / 2.0 + 0.12):
+                            if abs(bsx - shared_x) <= max(0.30, float(bm.get("width_m", 0.30)) / 2.0 + 0.15):
                                 b_ov = min(max(bsy, bey), ov_y2) - max(min(bsy, bey), ov_y1)
-                                if b_ov >= (ov_y2 - ov_y1) * 0.50:
+                                if b_ov >= (ov_y2 - ov_y1) * 0.40:
                                     return True
             # Shared horizontal interface
             if abs(ra[3] - rb[1]) <= 0.18 or abs(rb[3] - ra[1]) <= 0.18:
@@ -4929,9 +4945,9 @@ def _beam_lies_between_openings(
                         bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
                         bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
                         if abs(bex - bsx) >= abs(bey - bsy):
-                            if abs(bsy - shared_y) <= max(0.25, float(bm.get("width_m", 0.30)) / 2.0 + 0.12):
+                            if abs(bsy - shared_y) <= max(0.30, float(bm.get("width_m", 0.30)) / 2.0 + 0.15):
                                 b_ov = min(max(bsx, bex), ov_x2) - max(min(bsx, bex), ov_x1)
-                                if b_ov >= (ov_x2 - ov_x1) * 0.50:
+                                if b_ov >= (ov_x2 - ov_x1) * 0.40:
                                     return True
     return False
 
@@ -5592,7 +5608,7 @@ def convert_beam_kind_and_section(
             bm["width_m"] = 0.20
             bm["depth_m"] = _snap_drop_depth_m(max(0.40, slab_t_m, min_supported_depth), 0.40)
         else:
-            bm["width_m"] = 0.40
+            bm["width_m"] = 0.30
             bm["depth_m"] = max(0.25, slab_t_m, min_supported_depth)
 
     bm["initial_width_m"] = bm["width_m"]

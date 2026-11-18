@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.4.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.4.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -749,7 +749,7 @@ class NewProjectSetupDialog(QDialog):
         self.sp_live.setSuffix(" kN/m²")
         form_mat.addRow("Live Load:", self.sp_live)
 
-        lbl_col_note = QLabel("Initial Column Section: 0.20 × 0.40 m | Hidden Beam Width: 0.40 m | Drop Beam Width: 0.20 m")
+        lbl_col_note = QLabel("Initial Column Section: 0.20 × 0.40 m | Hidden Beam Width: 0.30 m | Drop Beam Width: 0.20 m")
         lbl_col_note.setStyleSheet("color: #059669; font-weight: bold;")
         form_mat.addRow("Section Defaults:", lbl_col_note)
 
@@ -2566,7 +2566,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 beams = story.setdefault("beams", [])
                 next_bid = f"B{len(beams) + 1}"
                 b_kind = "hidden" if (tool == "DRAW_BEAM_HID" and not is_tie_story) else "drop"
-                w_m = 0.40 if b_kind == "hidden" else 0.20
+                w_m = 0.30 if b_kind == "hidden" else 0.20
                 d_m = round(self.studio.sp_adopted_thick.value() / 100.0, 2) if b_kind == "hidden" else 0.40
                 ok, bm_obj, msg = validate_and_build_beam_with_cantilevers(
                     next_bid,
@@ -3554,7 +3554,7 @@ class BeamDiagramsViewWidget(QWidget):
         r_str = ", ".join(f"R{i+1}={r:.1f}kN" for i, r in enumerate(reactions))
         self.lbl_beam_summary.setText(
             f"Beam {bid}: {r_str} | Max +Mu = {res['max_pos_mu_knm']:.2f} kN.m | "
-            f"Face -Mu = {res['max_neg_face_mu_knm']:.2f} kN.m | Max Vu = {res['max_face_vu_kn']:.2f} kN"
+            f"Center -Mu = {res.get('max_neg_center_mu_knm', res['max_neg_face_mu_knm']):.2f} kN.m | Max Vu = {res['max_face_vu_kn']:.2f} kN"
         )
 
         # Populate Left Project Data Table & Legend
@@ -4412,7 +4412,7 @@ class BeamDesignDetailWidget(QWidget):
                 QPen(QColor("#DC2626"), 3.8),
             )
             tlbl = sc.addText(
-                f"{sup['target_id']} Top: {top_txt}{top_add_str}\n(-Mu={s_des.get('mu_neg_face_knm', 0.0):.1f}kNm)",
+                f"{sup['target_id']} Top: {top_txt}{top_add_str}\n(-Mu={s_des.get('mu_neg_center_knm', s_des.get('mu_neg_face_knm', 0.0)):.1f}kNm)",
                 QFont("Arial", 8, QFont.Weight.Bold),
             )
             tlbl.setDefaultTextColor(QColor("#B91C1C"))
@@ -4507,7 +4507,7 @@ class SchedulesAndReportsWidget(QWidget):
             "Wall Load",
             "Max +Mu (kN.m)",
             "Bottom Steel (ACI 318)",
-            "Support Face -Mu (kN.m)",
+            "Support Center -Mu (kN.m)",
             "Top Steel (ACI 318)",
             "Critical Vu (kN) & Stirrups",
         ])
@@ -4565,7 +4565,7 @@ class SchedulesAndReportsWidget(QWidget):
                 wall_on = "YES" if flags.get(skey, True) else "NO"
                 mu_pos = float(sp_des.get("mu_pos_knm", res.get("max_pos_mu_knm", 0.0)))
                 bot_bars = str(sp_des.get("bottom_bars", des.get("bottom_bars", "-")))
-                mu_neg = float(res.get("max_neg_face_mu_knm", 0.0))
+                mu_neg = float(res.get("max_neg_center_mu_knm", res.get("max_neg_face_mu_knm", 0.0)))
                 top_bars = str(des.get("top_bars", "-"))
                 vu_val = float(sp_des.get("vu_kn", res.get("max_face_vu_kn", 0.0)))
                 stir_str = f"{vu_val:.1f} kN — {sp_des.get('stirrups', des.get('stirrups', '-'))}"
@@ -4593,7 +4593,7 @@ class SchedulesAndReportsWidget(QWidget):
                 f"<td>{btype_str}</td>"
                 f"<td>{', '.join(f'{float(s):.2f}m' for s in res.get('spans', []))}</td>"
                 f"<td>{res.get('max_pos_mu_knm', 0.0):.2f}</td>"
-                f"<td>{res.get('max_neg_face_mu_knm', 0.0):.2f}</td>"
+                f"<td>{res.get('max_neg_center_mu_knm', res.get('max_neg_face_mu_knm', 0.0)):.2f}</td>"
                 f"<td>{res.get('max_face_vu_kn', 0.0):.2f}</td>"
                 f"<td>Bot: {des.get('bottom_bars', '-')} | Top: {des.get('top_bars', '-')} | {des.get('stirrups', '-')}</td>"
                 f"</tr>"
@@ -4647,7 +4647,7 @@ class SchedulesAndReportsWidget(QWidget):
             f"<table border='1' cellspacing='0' cellpadding='6' width='100%'>"
             f"<tr style='background:#1E293B; color:white;'>"
             f"<th>Beam ID</th><th>No. of Spans (Excl. Cantilevers)</th><th>Section (b × h)</th><th>Type</th><th>Spans (m)</th>"
-            f"<th>Max +Mu (kN.m)</th><th>Face -Mu (kN.m)</th><th>Face Vu (kN)</th><th>ACI 318 Reinforcement</th></tr>"
+            f"<th>Max +Mu (kN.m)</th><th>Center -Mu (kN.m)</th><th>Face Vu (kN)</th><th>ACI 318 Reinforcement</th></tr>"
             f"{beam_report_rows_html}</table>"
             f"<h3>2. Columns Load Takedown, Moments & ACI 318 Interaction Design</h3>"
             f"<table border='1' cellspacing='0' cellpadding='6' width='100%'>"
@@ -4655,6 +4655,41 @@ class SchedulesAndReportsWidget(QWidget):
             f"<th>Moments (Mux, Muy)</th><th>Main Bars</th><th>Capacity φPn,max</th></tr>"
             f"{col_rows_html}</table></div>"
         )
+
+
+class ProjectDataDialog(QDialog):
+    """v2.4.1: Edit story count / heights / foundation depth / materials after project creation."""
+    def __init__(self, parent_studio, master_project):
+        super().__init__(parent_studio)
+        self.studio = parent_studio; self.master = master_project
+        self.setWindowTitle("Project Data — Stories, Heights & Materials")
+        self.setMinimumWidth(560); self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        sh = master_project.get("story_heights", {})
+        vb = QVBoxLayout(self); form = QFormLayout()
+        self.sp_floors = QSpinBox(); self.sp_floors.setRange(0, 50)
+        self.sp_floors.setValue(sum(1 for s in master_project.get("stories", []) if s.get("story_type") in ("typical", "standard")))
+        form.addRow("Floors Above Ground:", self.sp_floors)
+        self.sp_ground = QDoubleSpinBox(); self.sp_ground.setRange(2.5, 12.0); self.sp_ground.setValue(float(sh.get("ground_floor_height_m", 3.2))); self.sp_ground.setSuffix(" m"); form.addRow("Ground Floor Height:", self.sp_ground)
+        self.sp_upper = QDoubleSpinBox(); self.sp_upper.setRange(2.5, 10.0); self.sp_upper.setValue(float(sh.get("upper_floor_height_m", 3.0))); self.sp_upper.setSuffix(" m"); form.addRow("Upper Floor Height:", self.sp_upper)
+        self.sp_found = QDoubleSpinBox(); self.sp_found.setRange(0.5, 25.0); self.sp_found.setValue(float(sh.get("foundation_depth_m", 1.5))); self.sp_found.setSuffix(" m"); form.addRow("Foundation Depth:", self.sp_found)
+        self.chk_pent = QCheckBox("Include Roof Annex / Penthouse"); self.chk_pent.setChecked(any(s.get("story_type") == "penthouse" for s in master_project.get("stories", []))); form.addRow(self.chk_pent)
+        mats = master_project.get("materials_and_soil", {})
+        self.sp_fc = QDoubleSpinBox(); self.sp_fc.setRange(15, 100); self.sp_fc.setValue(float(mats.get("fc_mpa", 20))); self.sp_fc.setSuffix(" MPa"); form.addRow("f'c:", self.sp_fc)
+        self.sp_fy = QDoubleSpinBox(); self.sp_fy.setRange(200, 1000); self.sp_fy.setValue(float(mats.get("fy_mpa", 350))); self.sp_fy.setSuffix(" MPa"); form.addRow("Fy:", self.sp_fy)
+        self.sp_qall = QDoubleSpinBox(); self.sp_qall.setRange(50, 2000); self.sp_qall.setValue(float(mats.get("soil_bearing_qall_kn_m2", 150))); self.sp_qall.setSuffix(" kN/m²"); form.addRow("q_all:", self.sp_qall)
+        vb.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._save); bb.rejected.connect(self.reject); vb.addWidget(bb)
+    def _save(self):
+        import xpert_project_io as _pio
+        cfg = {"floors_above_ground": self.sp_floors.value(), "ground_floor_height_m": self.sp_ground.value(),
+               "upper_floor_height_m": self.sp_upper.value(), "foundation_depth_m": self.sp_found.value(),
+               "include_penthouse": self.chk_pent.isChecked(), "fc_mpa": self.sp_fc.value(), "fy_mpa": self.sp_fy.value(),
+               "soil_bearing_qall_kn_m2": self.sp_qall.value()}
+        _pio.update_project_story_configuration(self.master, cfg)
+        self.studio._populate_story_selector(); self.studio.refresh_story_ui()
+        self.studio.update_contextual_prompt("Project Data updated (stories, heights & materials).")
+        self.accept()
 
 
 class XpertStudioMainWindow(QMainWindow):
@@ -4714,6 +4749,12 @@ class XpertStudioMainWindow(QMainWindow):
             self.update_contextual_prompt(
                 f"Loaded Project: {self.master_project.get('project_name')} — Active Story: 02_Ground_Floor."
             )
+
+    def open_project_data_dialog(self) -> None:
+        if not self.master_project:
+            QMessageBox.information(self, "Project Data", "Open or create a project first.")
+            return
+        ProjectDataDialog(self, self.master_project).exec()
 
     def is_tie_beams_story(self) -> bool:
         return str(self.current_story_data.get("story_id", "")) == "00_TieBeams"
@@ -4804,7 +4845,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("Select / Box-Select Elements", "SELECT"),
             ("Step 1: Draw Building Boundary Polyline (00-XD-EDGE)", "DRAW_SLAB_EDGE"),
             ("Step 2: Place Structural Column 0.20×0.40m (00-XD-COL)", "DRAW_COL"),
-            ("Step 3A: Draw Hidden Beam 0.40m Width", "DRAW_BEAM_HID"),
+            ("Step 3A: Draw Hidden Beam 0.30m Width", "DRAW_BEAM_HID"),
             ("Step 3B: Draw Drop Beam 0.20×0.40m Width", "DRAW_BEAM_DROP"),
             ("Step 4A: Pick Area -> Create Slab", "PICK_SLAB"),
             ("Step 4B: Flip Selected or Picked Slab Rib (0° ↔ 90°)", "FLIP_RIB"),
@@ -4891,6 +4932,9 @@ class XpertStudioMainWindow(QMainWindow):
         act_opt_mat = QAction("Materials && Hollow-Block Slab Options...", self)
         act_opt_mat.triggered.connect(self.open_studio_options_dialog)
         m_options.addAction(act_opt_mat)
+        act_proj_data = QAction("Project Data (Stories, Heights & Materials)...", self)
+        act_proj_data.triggered.connect(self.open_project_data_dialog)
+        m_options.addAction(act_proj_data)
 
     def _build_separated_toolbars(self) -> None:
         # ======================================================================
@@ -5652,7 +5696,8 @@ class XpertStudioMainWindow(QMainWindow):
                 bm["beam_kind"] = "drop"
                 bm["kind"] = "drop"
                 bm["width_m"] = float(bm.get("width_m", 0.20)) if float(bm.get("width_m", 0.20)) <= 0.30 else 0.20
-                bm["depth_m"] = max(0.40, float(bm.get("depth_m", 0.50)))
+                bm["depth_m"] = 0.40
+                bm["initial_depth_m"] = 0.40
             if self.cad_canvas.active_tool in ("DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "DRAW_OPENING"):
                 self.cad_canvas.active_tool = "SELECT"
                 self.cad_canvas.update_cursor_for_active_tool()
@@ -5958,8 +6003,8 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B2", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
-                    "initial_width_m": 0.40, "initial_depth_m": 0.30, "room_bounding": True,
+                    "id": "B2", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.30, "depth_m": 0.30,
+                    "initial_width_m": 0.30, "initial_depth_m": 0.30, "room_bounding": True,
                     "start_x": 0.0, "start_y": 4.20, "end_x": 10.0, "end_y": 4.20,
                     "spans": [5.1, 4.7],
                     "supports": [
@@ -5991,8 +6036,8 @@ class XpertStudioMainWindow(QMainWindow):
                     ],
                 },
                 {
-                    "id": "B5", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.40, "depth_m": 0.30,
-                    "initial_width_m": 0.40, "initial_depth_m": 0.30, "room_bounding": True,
+                    "id": "B5", "beam_kind": "hidden", "kind": "hidden", "width_m": 0.30, "depth_m": 0.30,
+                    "initial_width_m": 0.30, "initial_depth_m": 0.30, "room_bounding": True,
                     "start_x": 5.20, "start_y": 0.0, "end_x": 5.20, "end_y": 8.5,
                     "spans": [4.0, 4.1],
                     "supports": [
@@ -6046,7 +6091,7 @@ class XpertStudioMainWindow(QMainWindow):
             "MEASURE_DIST": "Measure [DI]: Click First Point -> Click Second Point to measure L, ΔX, ΔY, and Angle.",
             "DRAW_SLAB_EDGE": "Step 1 (Boundary Polyline): Click vertices around the building perimeter.",
             "DRAW_COL": "Step 2 (Place Column): Move cursor to preview column, press [Space] to flip orientation, click to place.",
-            "DRAW_BEAM_HID": "Step 3A (Hidden Beam 0.40m): Click Start Column Center -> Click End Column Center.",
+            "DRAW_BEAM_HID": "Step 3A (Hidden Beam 0.30m): Click Start Column Center -> Click End Column Center.",
             "DRAW_BEAM_DROP": "Step 3B (Drop Beam 0.20×0.40m): Click Start Column Center -> Click End Column Center.",
             "PICK_SLAB": "Step 4A (Pick Slab): Click inside any beam-bounded bay to create/update its Hollow-Block Slab.",
             "FLIP_RIB": "Step 4B (Flip Rib): Click inside any Slab or on its yellow tag to flip its rib orientation (0° <-> 90°).",
