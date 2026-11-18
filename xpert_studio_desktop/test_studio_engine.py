@@ -1657,6 +1657,159 @@ class TestXpertStudioEngine(unittest.TestCase):
         ok_b8_hid, _ = eng.convert_beam_kind_and_section(story_bim, "B8", "hidden")
         self.assertTrue(ok_b8_hid)
 
+    def test_column_boundary_clamp_and_expand_modes(self):
+        poly = [[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]]
+        col_outside = {"id": "C1", "x": 10.5, "y": 8.2, "b_m": 0.20, "h_m": 0.40, "active": True}
+
+        # Mode A: Clamp flush inside boundary (max_x - 0.10 = 9.90, max_y - 0.20 = 7.80)
+        clamped_col, same_poly, _ = enforce_column_inside_slab_boundary(col_outside, poly, mode="clamp")
+        self.assertAlmostEqual(clamped_col["x"], 9.90, places=2)
+        self.assertAlmostEqual(clamped_col["y"], 7.80, places=2)
+        self.assertEqual(same_poly, poly)
+
+        # Mode B: Expand slab boundary to contain column outer faces (10.5 + 0.10 = 10.60, 8.2 + 0.20 = 8.40)
+        kept_col, exp_poly, _ = enforce_column_inside_slab_boundary(col_outside, poly, mode="expand")
+        self.assertAlmostEqual(kept_col["x"], 10.5, places=2)
+        self.assertAlmostEqual(max(p[0] for p in exp_poly), 10.60, places=2)
+        self.assertAlmostEqual(max(p[1] for p in exp_poly), 8.40, places=2)
+
+    def test_duplicate_column_and_beam_prevention(self):
+        poly = [[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]]
+        cols = [
+            {"id": "C1", "x": 0.10, "y": 7.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C2", "x": 5.00, "y": 7.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        dup_col_id = check_duplicate_column(0.12, 7.78, 0.20, 0.40, cols)
+        self.assertEqual(dup_col_id, "C1")
+
+        ok1, bm1, _ = validate_and_build_beam_with_cantilevers(
+            "B1", (0.10, 7.80), (5.00, 7.80), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok1)
+
+        # Attempt to draw another beam right over B1 -> Must be blocked!
+        ok_dup, bm_dup, msg_dup = validate_and_build_beam_with_cantilevers(
+            "B2", (0.10, 7.80), (5.00, 7.80), "drop", 0.20, 0.50, cols, [bm1], poly
+        )
+        self.assertFalse(ok_dup)
+        self.assertIsNone(bm_dup)
+        self.assertIn("Duplicate", msg_dup)
+
+    def test_zero_sliver_bays_and_dynamic_9m_to_4_5m_slab_splitting(self):
+        # 1. Start with a single 9.0m x 5.0m bay with perimeter beams shifted inward by half-width
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [9.0, 0.0], [9.0, 5.0], [0.0, 5.0]],
+            "columns": [
+                {"id": "C1", "x": 0.10, "y": 4.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 4.50, "y": 4.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 8.90, "y": 4.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 4.50, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C6", "x": 8.90, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 0.10, "start_y": 4.80, "end_x": 8.90, "end_y": 4.80, "width_m": 0.40, "beam_kind": "hidden"},
+                {"id": "B2", "start_x": 0.10, "start_y": 0.20, "end_x": 8.90, "end_y": 0.20, "width_m": 0.40, "beam_kind": "hidden"},
+                {"id": "B3", "start_x": 0.10, "start_y": 0.20, "end_x": 0.10, "end_y": 4.80, "width_m": 0.20, "beam_kind": "drop"},
+                {"id": "B4", "start_x": 8.90, "start_y": 0.20, "end_x": 8.90, "end_y": 4.80, "width_m": 0.20, "beam_kind": "drop"},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+
+        # Verify zero sliver bays: only 1 structural bay (9.0m x 5.0m) exists!
+        bays_before = detect_story_grid_bays(story)
+        self.assertEqual(len(bays_before), 1)
+        self.assertAlmostEqual(bays_before[0]["lx_m"], 9.0, places=2)
+        self.assertAlmostEqual(bays_before[0]["ly_m"], 5.0, places=2)
+
+        # Create 9.0m horizontal rib slab (0 deg)
+        ok_s1, _, s1 = pick_area_create_or_update_slab(story, 4.5, 2.5, target_mode="SLAB")
+        self.assertTrue(ok_s1)
+        s1["rib_direction_deg"] = 0
+        s1["axis_span_m"] = 9.0
+        self.assertEqual(len(story["slabs"]), 1)
+
+        # 2. Now draw a new intermediate vertical beam at x = 4.50m dividing the 9.0m slab in half!
+        story["beams"].append(
+            {"id": "B5", "start_x": 4.50, "start_y": 0.20, "end_x": 4.50, "end_y": 4.80, "width_m": 0.40, "beam_kind": "hidden"}
+        )
+        split_count, split_msg = reconcile_and_split_slabs_after_beam_change(story)
+        self.assertEqual(split_count, 2)
+        self.assertIn("Automatically split", split_msg)
+        self.assertEqual(len(story["slabs"]), 2)
+        self.assertAlmostEqual(story["slabs"][0]["lx_m"], 4.5, places=2)
+        self.assertAlmostEqual(story["slabs"][1]["lx_m"], 4.5, places=2)
+        self.assertAlmostEqual(story["slabs"][0]["axis_span_m"], 4.5, places=2)
+        self.assertAlmostEqual(story["slabs"][1]["axis_span_m"], 4.5, places=2)
+
+    def test_rotate_column_and_auto_fill_slabs(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]],
+            "columns": [
+                {"id": "C1", "x": 0.10, "y": 7.80, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 0.10, "start_y": 7.80, "end_x": 9.90, "end_y": 7.80, "width_m": 0.40, "beam_kind": "hidden"},
+                {"id": "B2", "start_x": 0.10, "start_y": 4.00, "end_x": 9.90, "end_y": 4.00, "width_m": 0.40, "beam_kind": "hidden"},
+                {"id": "B3", "start_x": 0.10, "start_y": 0.20, "end_x": 9.90, "end_y": 0.20, "width_m": 0.40, "beam_kind": "hidden"},
+                {"id": "B4", "start_x": 0.10, "start_y": 0.20, "end_x": 0.10, "end_y": 7.80, "width_m": 0.20, "beam_kind": "drop"},
+                {"id": "B5", "start_x": 5.00, "start_y": 0.20, "end_x": 5.00, "end_y": 7.80, "width_m": 0.20, "beam_kind": "drop"},
+                {"id": "B6", "start_x": 9.90, "start_y": 0.20, "end_x": 9.90, "end_y": 7.80, "width_m": 0.20, "beam_kind": "drop"},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+
+        ok_rot, _ = rotate_column_90_deg(story, "C1")
+        self.assertTrue(ok_rot)
+        self.assertAlmostEqual(story["columns"][0]["b_m"], 0.40, places=2)
+        self.assertAlmostEqual(story["columns"][0]["h_m"], 0.20, places=2)
+
+        added, _ = auto_fill_all_story_slabs(story)
+        self.assertEqual(added, 4)
+        self.assertEqual(len(story["slabs"]), 4)
+
+    def test_pick_area_and_direct_click_on_rib_label_and_delete_selected(self):
+        story = {
+            "slab_edge_polygon": [[0.0, 0.0], [6.0, 0.0], [6.0, 6.5], [0.0, 6.5]],
+            "columns": [
+                {"id": "C1", "x": 0.10, "y": 0.20, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 0.0, "start_y": 0.10, "end_x": 6.0, "end_y": 0.10, "width_m": 0.20, "beam_kind": "drop"},
+                {"id": "B2", "start_x": 0.0, "start_y": 4.50, "end_x": 6.0, "end_y": 4.50, "width_m": 0.20, "beam_kind": "drop"},
+                {"id": "B3", "start_x": 0.10, "start_y": 0.0, "end_x": 0.10, "end_y": 6.50, "width_m": 0.20, "beam_kind": "drop"},
+                {"id": "B4", "start_x": 5.90, "start_y": 0.0, "end_x": 5.90, "end_y": 6.50, "width_m": 0.20, "beam_kind": "drop"},
+            ],
+            "slabs": [],
+            "openings": [],
+        }
+
+        # 1. Pick lower 4-beam bay (Lx=6.0m, Ly=4.5m) -> default rib direction = 90 deg (shorter span)
+        ok1, _, slb1 = pick_area_create_or_update_slab(story, 3.0, 2.0, target_mode="SLAB")
+        self.assertTrue(ok1)
+        self.assertEqual(slb1["rib_direction_deg"], 90)
+
+        # 2. Click directly on/near the Slab Rib Label at center (3.0, 2.25) -> flips to 0 deg!
+        ok_lbl, _, slb_flipped = toggle_slab_rib_by_label_click(story, 3.0, 2.25)
+        self.assertTrue(ok_lbl)
+        self.assertEqual(slb_flipped["rib_direction_deg"], 0)
+
+        # 3. Pick upper 3-beam bay -> default 0 deg; then click its label at (3.0, 5.5) -> flips to 90 deg Cantilever
+        # and automatically aligns lower back-span slab back to 90 deg!
+        pick_area_create_or_update_slab(story, 3.0, 5.5, target_mode="SLAB")
+        ok_cant, _, slb2_cant = toggle_slab_rib_by_label_click(story, 3.0, 5.5)
+        self.assertTrue(ok_cant)
+        self.assertEqual(slb2_cant["rib_direction_deg"], 90)
+        self.assertTrue(slb2_cant["is_cantilever"])
+        self.assertEqual(story["slabs"][0]["rib_direction_deg"], 90)
+
+        # 4. Delete Selected Column C1
+        ok_del, _ = delete_selected_element_from_story(story, "column", "C1")
+        self.assertTrue(ok_del)
+        self.assertEqual(len(story["columns"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
