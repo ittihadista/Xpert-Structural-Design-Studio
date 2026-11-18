@@ -598,37 +598,6 @@ def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
     return master_payload
 
 
-MASTER_FILE_EXT = ".xpert"
-
-
-def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
-    """
-    Loads an existing project from its custom `<ProjectName>-00_Project_Master.xpert`
-    (or `.json`) file and resolves relative story paths if the project folder was moved.
-    """
-    abs_path = os.path.abspath(master_path)
-    if not os.path.isfile(abs_path):
-        raise FileNotFoundError(f"Master project file not found: {abs_path}")
-
-    with open(abs_path, "r", encoding="utf-8") as f:
-        master_payload = json.load(f)
-
-    project_dir = os.path.dirname(abs_path)
-    master_payload["project_dir"] = project_dir
-    master_payload["master_file"] = abs_path
-
-    clean_name = master_payload.get("project_name", "Project")
-    stories_dir = os.path.join(project_dir, "Stories_Data")
-    cad_dir = os.path.join(project_dir, "CAD_Drawings")
-
-    for sm in master_payload.get("stories", []):
-        sid = sm["story_id"]
-        sm["json_file"] = os.path.join(stories_dir, f"{clean_name}-{sid}.json")
-        sm["dxf_file"] = os.path.join(cad_dir, f"{clean_name}-{sid}.dxf")
-
-    return master_payload
-
-
 def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Creates Stractural-<ProjectName> and generates the custom `<ProjectName>-00_Project_Master.xsd`
