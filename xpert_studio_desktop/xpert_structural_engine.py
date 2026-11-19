@@ -5798,3 +5798,15 @@ def delete_selected_element_from_story(story_data, kind, element_id):
         if col is not None and not _col_edit_allowed_v244(story_data, col):
             return False, _COL_LOCK_MSG
     return _orig_del_v244(story_data, kind, element_id)
+
+
+# ===== v2.4.5 additive: refined column edit policy (basement-local editable, inherited locked) =====
+def _col_edit_allowed_v244(story_data, col):
+    sid = str(story_data.get("story_id", "")); st = str(story_data.get("story_type", ""))
+    if col.get("neck"):
+        return st == "tie_beams" or sid.startswith("00_")
+    if col.get("basement_local"):
+        return st == "basement" or sid.startswith("01_")
+    if st in ("tie_beams", "typical", "standard", "penthouse", "basement") or (sid and not sid.startswith("02_")):
+        return False
+    return True

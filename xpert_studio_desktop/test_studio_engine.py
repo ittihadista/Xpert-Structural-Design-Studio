@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1913,6 +1913,59 @@ class TestXpertStudioEngine(unittest.TestCase):
         rec = next(r for r in bundle["column_records"] if r["column_id"] == "C1")
         self.assertAlmostEqual(rec["b_m"], 0.4, places=2)
         self.assertIn("B1", bundle["beam_results"])
+
+
+    def test_v245_zoom_override_restores_large_scene(self):
+        p = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
+        src = open(p, encoding="utf-8").read()
+        self.assertIn("def _zoom_v245", src)
+        self.assertIn("setSceneRect(-10000.0, -10000.0, 20000.0, 20000.0)", src)
+        self.assertIn("StructuralCadCanvas2D.resizeEvent = QGraphicsView.resizeEvent", src)
+        self.assertLess(src.index("v2.4.5-structural-bim-pro additive"), src.index('if __name__ == "__main__":'))
+
+    def test_v245_basement_local_and_neck_policy(self):
+        from xpert_structural_engine import move_column_and_sync_connected_beams
+        bas = {"story_id": "01_Basement_Slab", "story_type": "basement",
+               "columns": [{"id": "C1", "x": 1.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                           {"id": "BC1", "x": 3.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True, "basement_local": True}],
+               "beams": []}
+        ok, _ = move_column_and_sync_connected_beams(bas, "C1", 2.0, 1.0)
+        self.assertFalse(ok)
+        ok2, _ = move_column_and_sync_connected_beams(bas, "BC1", 3.5, 1.0)
+        self.assertTrue(ok2)
+
+    def test_v245_continuity_cascade_lock(self):
+        import xpert_project_io as pio
+        m = {"stories": []}
+        ids = ["03_Typical_Floor", "04_Upper_Floor_2"]
+        ok, _ = pio.set_column_continuity_cascade(m, "C1", "03_Typical_Floor", False, ids)
+        self.assertTrue(ok)
+        self.assertFalse(m["column_overrides"]["C1"]["04_Upper_Floor_2"]["active"])
+        ok2, msg = pio.set_column_continuity_cascade(m, "C1", "04_Upper_Floor_2", True, ids)
+        self.assertFalse(ok2)
+        ok3, _ = pio.set_column_continuity_cascade(m, "C1", "03_Typical_Floor", True, ids)
+        self.assertTrue(ok3)
+        ok4, _ = pio.set_column_continuity_cascade(m, "C1", "04_Upper_Floor_2", True, ids)
+        self.assertTrue(ok4)
+
+    def test_v245_propagate_preserves_neck_and_basement_local(self):
+        import xpert_project_io as pio, json
+        cfg = {"project_name": "Preserve245", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.2,
+               "floors_above_ground": 1, "include_basement": True, "include_penthouse": False}
+        m = pio.initialize_studio_project(cfg)
+        tie = next(s for s in m["stories"] if s["story_id"] == "00_TieBeams")
+        bas = next(s for s in m["stories"] if s["story_id"] == "01_Basement_Slab")
+        for meta, col in ((tie, {"id": "NC1", "x": 2.0, "y": 2.0, "b_m": 0.2, "h_m": 0.4, "active": True, "neck": True}),
+                          (bas, {"id": "BC1", "x": 4.0, "y": 2.0, "b_m": 0.2, "h_m": 0.4, "active": True, "basement_local": True})):
+            sd = json.load(open(meta["json_file"], encoding="utf-8"))
+            sd["columns"].append(col)
+            json.dump(sd, open(meta["json_file"], "w", encoding="utf-8"), indent=2)
+        pio.propagate_ground_columns_to_all_stories(m, [{"id": "C1", "x": 0.2, "y": 0.2, "b_m": 0.2, "h_m": 0.4, "active": True}])
+        t = json.load(open(tie["json_file"], encoding="utf-8"))
+        b = json.load(open(bas["json_file"], encoding="utf-8"))
+        self.assertIn("NC1", [c["id"] for c in t["columns"]])
+        self.assertIn("C1", [c["id"] for c in t["columns"]])
+        self.assertIn("BC1", [c["id"] for c in b["columns"]])
 
 
 if __name__ == "__main__":

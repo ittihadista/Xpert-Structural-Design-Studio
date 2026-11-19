@@ -6834,5 +6834,184 @@ def _rcsel_v244(self, idx):
         self.sp_beam_min_w.blockSignals(False); self.sp_beam_min_h.blockSignals(False)
 BeamDesignDetailWidget._on_beam_selected = _rcsel_v244
 
+
+# ===== v2.4.5-structural-bim-pro additive: per-story column tools + zoom revert =====
+_orig_tb_v245 = XpertStudioMainWindow._build_separated_toolbars
+def _tb_v245(self):
+    _orig_tb_v245(self)
+    tb = self.draw_tb
+    place = getattr(self, "_btn_place_col", None)
+    neck = getattr(self, "_btn_neck_col", None)
+    target = None
+    for a in tb.actions():
+        if tb.widgetForAction(a) is place:
+            target = a; break
+    if neck is not None and target is not None:
+        na = None
+        for a in tb.actions():
+            if tb.widgetForAction(a) is neck:
+                na = a; break
+        if na is not None:
+            tb.removeAction(na)
+        tb.insertWidget(target, neck)
+    self._btn_edit_cols = QPushButton("2. Edit Columns")
+    self._btn_edit_cols.setMinimumHeight(30); self._btn_edit_cols.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    self._btn_edit_cols.setStyleSheet("background-color:#7C3AED;color:white;font-weight:bold;")
+    self._btn_edit_cols.clicked.connect(self.open_edit_columns_dialog)
+    if target is not None:
+        tb.insertWidget(target, self._btn_edit_cols)
+    else:
+        tb.addWidget(self._btn_edit_cols)
+    self._btn_edit_cols.setVisible(False)
+XpertStudioMainWindow._build_separated_toolbars = _tb_v245
+
+_orig_story_v245 = XpertStudioMainWindow._on_story_changed
+def _story_v245(self, idx):
+    _orig_story_v245(self, idx)
+    st = str(self.current_story_data.get("story_type", "")); sid = str(self.current_story_data.get("story_id", ""))
+    tie = self.is_tie_beams_story()
+    ground = sid == "02_Ground_Floor" or st == "ground"
+    basement = st == "basement" or sid.startswith("01_")
+    upper = not (tie or ground or basement)
+    if getattr(self, "_btn_place_col", None) is not None:
+        self._btn_place_col.setVisible(ground or basement)
+        self._btn_place_col.setText("2. Column (Basement-only)" if basement else "2. Place Column")
+    if getattr(self, "_btn_neck_col", None) is not None:
+        self._btn_neck_col.setVisible(tie)
+    if getattr(self, "_btn_edit_cols", None) is not None:
+        self._btn_edit_cols.setVisible(upper)
+XpertStudioMainWindow._on_story_changed = _story_v245
+
+_orig_click_v245 = StructuralCadCanvas2D._handle_left_click_at
+def _click_v245(self, sx, sy, raw_x, raw_y, snap_type):
+    t = self.active_tool; story = self.studio.current_story_data
+    st = str(story.get("story_type", "")); sid = str(story.get("story_id", ""))
+    basement = st == "basement" or sid.startswith("01_")
+    if t == "DRAW_COL" and basement:
+        cols = story.setdefault("columns", [])
+        is_vert = self.studio.cb_col_orient.currentIndex() == 0
+        b = 0.20 if is_vert else 0.40; h = 0.40 if is_vert else 0.20
+        nid = f"BC{sum(1 for c in cols if str(c.get('id','')).startswith('BC')) + 1}"
+        cols.append({"id": nid, "x": sx, "y": sy, "b_m": b, "h_m": h, "active": True, "basement_local": True, "room_bounding": True})
+        self.studio.save_and_sync_current_story(); self.studio.refresh_story_ui()
+        self.studio.update_contextual_prompt(f"Placed Basement-only Column {nid} (does NOT continue above basement). Inherited ground columns stay locked.")
+        return
+    if t == "DRAW_NECK_COL":
+        if not self.studio.is_tie_beams_story():
+            self.studio.update_contextual_prompt("Neck Columns are allowed ONLY on the Tie-Beams story."); return
+        cols = story.setdefault("columns", [])
+        is_vert = self.studio.cb_col_orient.currentIndex() == 0
+        b = 0.20 if is_vert else 0.40; h = 0.40 if is_vert else 0.20
+        nid = f"NC{sum(1 for c in cols if str(c.get('id','')).startswith('NC')) + 1}"
+        cols.append({"id": nid, "x": sx, "y": sy, "b_m": b, "h_m": h, "active": True, "neck": True, "room_bounding": True})
+        self.studio.save_and_sync_current_story(); self.studio.refresh_story_ui()
+        self.studio.update_contextual_prompt(f"Placed Neck Column {nid} ({b:.2f}x{h:.2f} m). [Space] flips orientation before placing.")
+        return
+    _orig_click_v245(self, sx, sy, raw_x, raw_y, snap_type)
+StructuralCadCanvas2D._handle_left_click_at = _click_v245
+
+_orig_key_v245 = StructuralCadCanvas2D.keyPressEvent
+def _key_v245(self, event):
+    if event.key() == Qt.Key.Key_Space and self.active_tool in ("DRAW_COL", "DRAW_NECK_COL"):
+        idx = self.studio.cb_col_orient.currentIndex()
+        self.studio.cb_col_orient.setCurrentIndex(1 if idx == 0 else 0)
+        self.render_story(self.studio.current_story_data)
+        self.studio.update_contextual_prompt(f"Column orientation: {self.studio.cb_col_orient.currentText()}  [Space to flip]")
+        event.accept(); return
+    _orig_key_v245(self, event)
+StructuralCadCanvas2D.keyPressEvent = _key_v245
+
+_orig_render_v245 = StructuralCadCanvas2D.render_story
+def _render_v245(self, story_data):
+    _orig_render_v245(self, story_data)
+    if self.active_tool == "DRAW_NECK_COL" and self._current_snap_info is not None:
+        s = self.scale_px
+        gx, gy = self._current_snap_info["x"], self._current_snap_info["y"]
+        iv = self.studio.cb_col_orient.currentIndex() == 0
+        gb = 0.20 if iv else 0.40; gh = 0.40 if iv else 0.20
+        self.scene_2d.addRect(QRectF((gx - gb / 2) * s, -(gy + gh / 2) * s, gb * s, gh * s), QPen(QColor("#2DD4BF"), 2.0, Qt.PenStyle.DashLine), QBrush(QColor(45, 212, 191, 70)))
+        gl = self.scene_2d.addText(f"NC {gb:.2f}x{gh:.2f}m [Space: Flip]", QFont("Consolas", 8, QFont.Weight.Bold))
+        gl.setDefaultTextColor(QColor("#2DD4BF")); gl.setPos((gx + gb / 2 + 0.08) * s, -(gy + gh / 2 + 0.12) * s)
+StructuralCadCanvas2D.render_story = _render_v245
+
+def _zoom_v245(self):
+    self.scene_2d.setSceneRect(-10000.0, -10000.0, 20000.0, 20000.0)
+    story = self.studio.current_story_data
+    s = self.scale_px
+    xs, ys = [], []
+    for p in story.get("slab_edge_polygon", []):
+        xs.append(float(p[0])); ys.append(float(p[1]))
+    for c in story.get("columns", []):
+        if c.get("active", True):
+            xs.append(float(c["x"])); ys.append(float(c["y"]))
+    for b in story.get("beams", []):
+        xs += [float(b.get("start_x", 0)), float(b.get("end_x", 0))]
+        ys += [float(b.get("start_y", 0)), float(b.get("end_y", 0))]
+    self.resetTransform()
+    if xs and ys:
+        r = QRectF((min(xs) - 1.8) * s, -(max(ys) + 1.8) * s, max(4.0, (max(xs) - min(xs) + 3.6)) * s, max(4.0, (max(ys) - min(ys) + 3.6)) * s)
+    else:
+        r = QRectF(-2 * s, -12 * s, 16 * s, 14 * s)
+    self.fitInView(r, Qt.AspectRatioMode.KeepAspectRatio)
+    self.centerOn(r.center())
+    self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+StructuralCadCanvas2D.zoom_extents = _zoom_v245
+StructuralCadCanvas2D.resizeEvent = QGraphicsView.resizeEvent
+
+class EditColumnsDialog(QDialog):
+    def __init__(self, studio):
+        super().__init__(studio)
+        self.studio = studio
+        self.setWindowTitle("Edit Columns Continuity - " + str(studio.current_story_data.get("story_label", "")))
+        self.setMinimumSize(440, 480); self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        m = studio.master_project
+        self._ov_backup = copy.deepcopy(m.get("column_overrides", {}))
+        self.upper_ids = [s["story_id"] for s in m.get("stories", []) if s.get("story_type") in ("typical", "standard", "penthouse")]
+        self.sid = str(studio.current_story_data.get("story_id", ""))
+        g = next((s for s in m.get("stories", []) if s.get("story_id") == "02_Ground_Floor"), None)
+        self.gcols = []
+        if g and os.path.isfile(g.get("json_file", "")):
+            with open(g["json_file"], encoding="utf-8") as f:
+                self.gcols = [c for c in json.load(f).get("columns", []) if c.get("active", True)]
+        vb = QVBoxLayout(self)
+        vb.addWidget(QLabel("Continue column into THIS story?  (No = discontinued here AND in all higher stories)"))
+        self.tbl = QTableWidget(len(self.gcols), 2)
+        self.tbl.setHorizontalHeaderLabels(["Column", "Continue (Yes/No)"])
+        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        ov_all = m.get("column_overrides", {})
+        for i, c in enumerate(self.gcols):
+            cid = str(c.get("id"))
+            it = QTableWidgetItem(cid); it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.tbl.setItem(i, 0, it)
+            cb = QComboBox(); cb.addItems(["Yes", "No"])
+            cur = ov_all.get(cid, {}).get(self.sid, {}).get("active", True)
+            cb.setCurrentIndex(0 if cur else 1)
+            cb.currentIndexChanged.connect(lambda _i, k=cid, combo=cb: self._on_change(k, combo))
+            self.tbl.setCellWidget(i, 1, cb)
+        vb.addWidget(self.tbl, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._save); bb.rejected.connect(self._cancel); vb.addWidget(bb)
+    def _on_change(self, cid, combo):
+        import xpert_project_io as _pio
+        want = (combo.currentIndex() == 0)
+        ok, msg = _pio.set_column_continuity_cascade(self.studio.master_project, cid, self.sid, want, self.upper_ids)
+        if not ok:
+            combo.blockSignals(True); combo.setCurrentIndex(1); combo.blockSignals(False)
+            QMessageBox.information(self, "Continuity Lock", msg)
+    def _save(self):
+        import xpert_project_io as _pio
+        _pio.propagate_ground_columns_to_all_stories(self.studio.master_project, self.gcols)
+        self.studio.refresh_story_ui()
+        self.accept()
+    def _cancel(self):
+        self.studio.master_project["column_overrides"] = self._ov_backup
+        self.reject()
+def _open_edit_cols(self):
+    if not self.master_project:
+        QMessageBox.information(self, "Edit Columns", "Open a project first."); return
+    EditColumnsDialog(self).exec()
+XpertStudioMainWindow.open_edit_columns_dialog = _open_edit_cols
+
 if __name__ == "__main__":
     main()

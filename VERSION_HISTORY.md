@@ -429,3 +429,10 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 - Circular column tool (Draw menu only, ground floor), rendered as circle with sky-blue tag.
 - Tab 3 per-beam MIN hidden width / MIN drop depth inputs (0 = project default) with Apply & Re-Design.
 - 37 regression tests.
+
+## v2.4.5-structural-bim-pro (2026-11-19)
+- Per-story column tool slot: Tie=Neck Column only (same position as Place Column); Ground=Place Column; Basement=Place Column creating basement-only BC# columns (never propagate up); Upper=Edit Columns dialog (Yes/No continuity with cascade lock: No at a lower upper story forbids Yes above).
+- Neck columns honor Spacebar orientation flip + teal ghost preview; inherited ground columns remain locked in basement/tie/upper.
+- Ground->stories propagation now PRESERVES neck (NC#) and basement-local (BC#) columns instead of wiping them.
+- ZOOM REVERT: restored unbounded 20000x20000 sceneRect + removed fit-on-resize; free wheel zoom-in/out and pan restored (undo of v2.4.3 bounded-canvas change).
+- 41 regression tests.

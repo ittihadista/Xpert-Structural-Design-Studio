@@ -29,7 +29,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.4.4-structural-bim-pro"
+STUDIO_VERSION = "v2.4.5-structural-bim-pro"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
@@ -1554,3 +1554,50 @@ def import_arch_dxf_underlay(dxf_file_path):
         pass
     res["circles"] = circles
     return res
+
+
+# ===== v2.4.5 additive: preserve neck/basement-local columns + continuity cascade =====
+_orig_prop_v245 = propagate_ground_columns_to_all_stories
+def propagate_ground_columns_to_all_stories(master_payload, ground_columns):
+    import json as _j
+    extras = {}
+    for s in (master_payload or {}).get("stories", []):
+        sid = s.get("story_id", ""); jp = s.get("json_file", "")
+        if sid == "02_Ground_Floor" or not jp or not os.path.isfile(jp):
+            continue
+        with open(jp, encoding="utf-8") as f:
+            sd = _j.load(f)
+        keep = [c for c in sd.get("columns", []) if c.get("neck") or c.get("basement_local")]
+        if keep:
+            extras[sid] = keep
+    _orig_prop_v245(master_payload, ground_columns)
+    for s in (master_payload or {}).get("stories", []):
+        sid = s.get("story_id", ""); jp = s.get("json_file", ""); dp = s.get("dxf_file", "")
+        if sid not in extras or not jp or not os.path.isfile(jp):
+            continue
+        with open(jp, encoding="utf-8") as f:
+            sd = _j.load(f)
+        ids = {str(c.get("id")) for c in sd.get("columns", [])}
+        for c in extras[sid]:
+            if str(c.get("id")) not in ids:
+                sd.setdefault("columns", []).append(c)
+        with open(jp, "w", encoding="utf-8") as f:
+            _j.dump(sd, f, indent=2)
+        if dp:
+            sync_story_to_dxf(sd, dp)
+    return None
+
+def set_column_continuity_cascade(master, col_id, story_id, active, upper_story_ids):
+    ov = master.setdefault("column_overrides", {}).setdefault(str(col_id), {})
+    if story_id not in upper_story_ids:
+        return False, "Story is not an upper story."
+    idx = upper_story_ids.index(story_id)
+    if active:
+        for lower in upper_story_ids[:idx]:
+            if ov.get(lower, {}).get("active", True) is False:
+                return False, f"Cannot continue {col_id} at {story_id}: it is discontinued at lower story {lower}."
+        ov.setdefault(story_id, {})["active"] = True
+        return True, "Continued."
+    for sid in upper_story_ids[idx:]:
+        ov.setdefault(sid, {})["active"] = False
+    return True, "Discontinued here and in ALL higher stories."
