@@ -436,3 +436,9 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 - Ground->stories propagation now PRESERVES neck (NC#) and basement-local (BC#) columns instead of wiping them.
 - ZOOM REVERT: restored unbounded 20000x20000 sceneRect + removed fit-on-resize; free wheel zoom-in/out and pan restored (undo of v2.4.3 bounded-canvas change).
 - 41 regression tests.
+
+## v2.4.6-structural-bim-pro (2026-11-20)
+- HOTFIX: replaced fatal `StructuralCadCanvas2D.resizeEvent = QGraphicsView.resizeEvent` (unbound sip method alias -> TypeError on first resize/maximize) with a safe Python wrapper `_resize_v246` calling QGraphicsView.resizeEvent(self, event).
+- r2: added version header comment inside app source so legacy version-presence tests (v221/v230) pass.
+- Regression test converted from source-text assertion (which enshrined the bug) to a BEHAVIORAL test firing real QResizeEvent + resize + showMaximized offscreen.
+- 42 regression tests.

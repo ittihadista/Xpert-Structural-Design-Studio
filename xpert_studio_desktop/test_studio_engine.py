@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1920,7 +1920,8 @@ class TestXpertStudioEngine(unittest.TestCase):
         src = open(p, encoding="utf-8").read()
         self.assertIn("def _zoom_v245", src)
         self.assertIn("setSceneRect(-10000.0, -10000.0, 20000.0, 20000.0)", src)
-        self.assertIn("StructuralCadCanvas2D.resizeEvent = QGraphicsView.resizeEvent", src)
+        self.assertNotIn("StructuralCadCanvas2D.resizeEvent = QGraphicsView.resizeEvent", src)
+        self.assertIn("StructuralCadCanvas2D.resizeEvent = _resize_v246", src)
         self.assertLess(src.index("v2.4.5-structural-bim-pro additive"), src.index('if __name__ == "__main__":'))
 
     def test_v245_basement_local_and_neck_policy(self):
@@ -1966,6 +1967,27 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertIn("NC1", [c["id"] for c in t["columns"]])
         self.assertIn("C1", [c["id"] for c in t["columns"]])
         self.assertIn("BC1", [c["id"] for c in b["columns"]])
+
+
+    def test_v246_resize_event_behavioral_no_typeerror(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.QtCore import QSize
+            from PyQt6.QtGui import QResizeEvent
+            import xpert_project_io as pio
+            from xpert_studio_app import XpertStudioMainWindow
+            _app = QApplication.instance() or QApplication([])
+            cfg = {"project_name": "Resize246", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.0,
+                   "floors_above_ground": 1, "include_basement": False, "include_penthouse": False}
+            m = pio.initialize_studio_project(cfg)
+            win = XpertStudioMainWindow(initial_master_project=m)
+            win.cad_canvas.resizeEvent(QResizeEvent(QSize(900, 700), QSize(800, 600)))
+            win.cad_canvas.resize(960, 720)
+            win.showMaximized()
+            win.hide()
+        except ModuleNotFoundError:
+            pass
 
 
 if __name__ == "__main__":

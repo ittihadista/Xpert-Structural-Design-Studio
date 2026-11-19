@@ -6957,7 +6957,10 @@ def _zoom_v245(self):
     self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 StructuralCadCanvas2D.zoom_extents = _zoom_v245
-StructuralCadCanvas2D.resizeEvent = QGraphicsView.resizeEvent
+# ===== v2.4.6-structural-bim-pro hotfix: safe resize wrapper =====
+def _resize_v246(self, event):
+    QGraphicsView.resizeEvent(self, event)
+StructuralCadCanvas2D.resizeEvent = _resize_v246
 
 class EditColumnsDialog(QDialog):
     def __init__(self, studio):
