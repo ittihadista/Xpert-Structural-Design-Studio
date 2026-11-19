@@ -593,7 +593,7 @@ def ensure_beam_wall_flags(story_data: Dict[str, Any], beam: Dict[str, Any]) -> 
     initializing missing flags from `story_data['wall_load_policy']` ('all_beams' -> True, 'no_walls' -> False).
     Also initializes `beam['span_wall_thickness_cm']` (default 20.0 cm per span from standard [10, 15, 20, 30, 40]).
     """
-    policy = str(story_data.get("wall_load_policy", "all_beams"))
+    policy = str(story_data.get("wall_load_policy", "all_beams" if story_data.get("has_upper_floors", True) else "no_walls"))
     default_flag = (policy != "no_walls")
     default_t_cm = snap_standard_wall_thickness_cm(float(story_data.get("default_wall_thickness_cm", 20.0)))
     flags: Dict[str, bool] = beam.setdefault("span_wall_flags", {})
@@ -624,7 +624,7 @@ def resolve_effective_wall_height_for_story(story_data: Dict[str, Any]) -> float
     if "tie" in st_type or "tie" in st_id or "00_" in st_id:
         return 3.20
     if "ground" in st_type or "ground" in st_id or "02_" in st_id:
-        return 3.00
+        return 3.00 if story_data.get("has_upper_floors", True) else 0.0
     if "penthouse" in st_type or "penthouse" in st_id or "roof" in st_id:
         return 1.50
     return float(story_data.get("height_m", 3.00))
@@ -1775,6 +1775,17 @@ def design_beam_aci318(
     if dst_mm not in (6, 8, 10, 12):
         dst_mm = 6 if b_kind == "hidden" else 8
 
+    # Minimum dimension floors per v2.4.3 / v2.4.10 standards
+    kind_b = str(beam.get("beam_kind", "hidden")).lower()
+    if kind_b == "hidden":
+        floor_dim = float(beam.get("min_width_mm", 300.0))
+        if auto_size_section and not beam.get("lock_section_dimensions", False):
+            beam["initial_width_m"] = max(float(beam.get("initial_width_m", 0.30)), floor_dim / 1000.0)
+    else:
+        floor_dim = float(beam.get("min_depth_mm", 400.0))
+        if auto_size_section and not beam.get("lock_section_dimensions", False):
+            beam["initial_depth_m"] = max(float(beam.get("initial_depth_m", 0.40)), floor_dim / 1000.0)
+
     # Baseline dimensions for iterative sizing (reset to initial baseline if auto_size_section is True and not locked)
     if auto_size_section and not beam.get("lock_section_dimensions", False):
         init_w_m = float(beam.get("initial_width_m", 0.30 if b_kind == "hidden" else 0.20))
@@ -1795,9 +1806,15 @@ def design_beam_aci318(
     d_prime_mm = round(dc_mm + dst_mm + (db_mm / 2.0), 1)
 
     beta1 = 0.85 if fc_mpa <= 30.0 else max(0.65, round(0.85 - (0.05 / 7.0) * (fc_mpa - 30.0), 3))
-    # Excel Sheet4 uses pmin = 1.4 / fy (0.004 for fy=350) and pmax = 0.75 * 0.85 * beta1 * (fc/fy) * (600/(600+fy)) (0.01956)
+    # Balanced reinforcement ratio: rho_b = 0.85 * beta1 * (fc'/fy) * (600 / (600 + fy))
+    rho_b = 0.85 * beta1 * (fc_mpa / fy_mpa) * (600.0 / (600.0 + fy_mpa))
+    # ACI 318 tension-controlled / maximum singly reinforced ratio: rho_max = 0.75 * rho_b
+    rho_max = 0.75 * rho_b
+    omega_max = rho_max * (fy_mpa / fc_mpa)
+    # ku_max = omega_max * (1 - omega_max / 1.7) (~0.259 for C25/Gr420)
+    ku_max = omega_max * (1.0 - omega_max / 1.7)
     pmin_excel = round(1.4 / fy_mpa, 5)
-    pmax_excel = round(0.75 * 0.85 * beta1 * (fc_mpa / fy_mpa) * (600.0 / (600.0 + fy_mpa)), 5)
+    pmax_excel = round(rho_max, 5)
     # Exact Excel bar area: 3.14 * db^2 / 4 (e.g. 153.86 mm² for Φ14)
     asb_excel = round(3.14 * (db_mm ** 2) / 4.0, 2)
 
@@ -2001,7 +2018,46 @@ def design_beam_aci318(
         mu_abs = abs(float(mu_knm))
         ku_raw = (mu_abs * 1_000_000.0) / max(1.0, 0.90 * b_mm * fc_mpa * (d_mm ** 2))
         ku_val = round(ku_raw, 5)
-        disc_s = max(0.0, 1.0 - 2.36 * min(0.42, ku_raw))
+        disc_raw = 1.0 - 2.36 * ku_raw
+
+        is_locked_sec = bool(beam.get("lock_section_dimensions", False)) or (not auto_size_section)
+        # Item 3: In locked section mode, if ku_raw > ku_max or (1 - 2.36*ku_raw) < 0, warn and set As_req = None
+        if is_locked_sec and (ku_raw > ku_max or disc_raw < 0.0):
+            over_msg = "OVER-REINFORCED (ρ>ρmax): INCREASE SECTION OR ADD COMPRESSION STEEL"
+            return {
+                "mu_knm": round(mu_abs, 2),
+                "ku": ku_val,
+                "omega": None,
+                "rho": None,
+                "rho_act": None,
+                "as_calc_mm2": None,
+                "as_single_calc_mm2": None,
+                "as_min_mm2": as_min_mm2,
+                "as_req_mm2": None,
+                "as_prov_mm2": None,
+                "as_one_bar_mm2": asb_excel,
+                "as_prime_mm2": 0.0,
+                "n_min_cont": min_bars_excel,
+                "n_additional": 0,
+                "n_total": min_bars_excel,
+                "n_max_per_layer": n_max_single_layer,
+                "num_layers": 1,
+                "bars_short": "OVER-REINFORCED",
+                "bars_callout": over_msg,
+                "additional_bars": "None",
+                "x1_mm": 0.0,
+                "x2_mm2": 0.0,
+                "c_mm": 0.0,
+                "C_mm": 0.0,
+                "a_mm": 0.0,
+                "fs_prime_mpa": 0.0,
+                "comp_steel_yields": False,
+                "phi_mn_knm": 0.0,
+                "over_reinforced": True,
+                "status": over_msg,
+            }
+
+        disc_s = max(0.0, disc_raw)
         omega_raw = (1.0 - math.sqrt(disc_s)) / 1.18
         omega_val = round(omega_raw, 5)
         rho_raw = omega_raw * (fc_mpa / fy_mpa)
@@ -2234,7 +2290,7 @@ def design_beam_aci318(
         else "VBA Iterative Section Sizing (+100mm) + Single Reinf."
     )
 
-    return {
+    res = {
         "beam_id": beam.get("id", "B1"),
         "beam_kind": b_kind,
         "design_mode": "double" if mode_norm == "double_as_min" else "single",
@@ -2315,6 +2371,29 @@ def design_beam_aci318(
         "support_designs": support_designs,
     }
 
+    # If section was locked and over-reinforced, surface warning and set as_req = None
+    if gov_sec.get("over_reinforced", False):
+        res["status"] = gov_sec["status"]
+        res["as_pos_req_mm2"] = bot_sec.get("as_req_mm2")
+        res["as_neg_req_mm2"] = top_sec.get("as_req_mm2")
+        res["bottom_ast_mm2"] = bot_sec.get("as_req_mm2")
+        res["top_ast_mm2"] = top_sec.get("as_req_mm2")
+
+    # Enforce minimum dimension floors (300mm hidden / 400mm drop)
+    kind_chk = str(beam.get("beam_kind", "hidden")).lower()
+    if kind_chk == "hidden":
+        f_min = float(beam.get("min_width_mm", 300.0))
+        if float(res.get("b_mm", 0)) < f_min:
+            res["b_mm"] = round(f_min)
+            beam["width_m"] = round(f_min / 1000.0, 3)
+    else:
+        f_min = float(beam.get("min_depth_mm", 400.0))
+        if float(res.get("h_mm", 0)) < f_min:
+            res["h_mm"] = round(f_min)
+            beam["depth_m"] = round(f_min / 1000.0, 3)
+
+    return res
+
 
 def design_column_and_pm_curve(
     column_id: str,
@@ -2329,7 +2408,8 @@ def design_column_and_pm_curve(
     double_height: bool = False,
 ) -> Dict[str, Any]:
     """
-    Designs column per ACI 318 and generates P-M Interaction Diagram envelope points.
+    Designs column per ACI 318 using Strain-Compatibility P-M numerical sweep
+    and Bresler reciprocal load formula for biaxial safety check.
     Supports Double-Height (2H) columns located inside slab openings (`lu_m = 2 * story_h`).
     """
     b_mm = round(b_m * 1000.0)
@@ -2339,20 +2419,187 @@ def design_column_and_pm_curve(
     r_min_m = 0.30 * min(b_m, h_m)
     slenderness_kl_r = round(eff_lu_m / max(0.01, r_min_m), 1)
 
+    es_mpa = 200000.0
+    beta1 = 0.85 if fc_mpa <= 28.0 else max(0.65, 0.85 - 0.05 * (fc_mpa - 28.0) / 7.0)
+
+    # Steel requirement per axial capacity baseline
     ast_req = max(0.01 * ag, ((pu_kn * 1000.0) / (0.65 * 0.80) - 0.85 * fc_mpa * ag) / (fy_mpa - 0.85 * fc_mpa))
     n_bars = max(6, math.ceil(ast_req / 201.06 / 2.0) * 2)
     ast_prov = n_bars * 201.06
 
-    phi_pn_max = 0.65 * 0.80 * (0.85 * fc_mpa * (ag - ast_prov) + fy_mpa * ast_prov) / 1000.0
-    phi_pb = 0.42 * phi_pn_max
-    phi_mb = (0.65 * (0.22 * fc_mpa * b_mm * (h_mm ** 2) + fy_mpa * ast_prov * 0.35 * h_mm)) / 1e6
-    phi_m0 = 0.90 * (fy_mpa * ast_prov * 0.40 * h_mm) / 1e6
+    # Nominal pure compression P0 and pure tension Pnt
+    p0_kn = (0.85 * fc_mpa * (ag - ast_prov) + fy_mpa * ast_prov) / 1000.0
+    pnt_kn = -(fy_mpa * ast_prov) / 1000.0
+    pn_max_kn = 0.80 * p0_kn
+    phi_pn_max_kn = 0.65 * pn_max_kn
 
+    # Numerical strain-compatibility generator for rectangular section
+    def build_pm_diagram(b_w: float, h_d: float):
+        ds = 45.0  # Cover to centroid of outer steel layer (mm)
+        d = h_d - ds
+        as_layer = ast_prov / 2.0
+        # Exact balanced neutral axis depth: cb = 600 * d / (600 + fy)
+        cb = (600.0 / (600.0 + fy_mpa)) * d
+
+        def eval_strain(c_val: float):
+            c_clamped = max(0.1, c_val)
+            a_val = min(float(h_d), beta1 * c_clamped)
+            cc_kn = 0.85 * fc_mpa * b_w * a_val / 1000.0
+            mc_knm = cc_kn * (h_d / 2.0 - a_val / 2.0) / 1000.0
+
+            # Layer 1: compression face (at ds)
+            eps_s1 = 0.003 * (c_clamped - ds) / c_clamped
+            fs1 = max(-fy_mpa, min(fy_mpa, es_mpa * eps_s1))
+            fc_disp1 = 0.85 * fc_mpa if ds <= a_val else 0.0
+            fs_1_kn = as_layer * (fs1 - fc_disp1) / 1000.0
+            ms_1_knm = fs_1_kn * (h_d / 2.0 - ds) / 1000.0
+
+            # Layer 2: tension face (at d)
+            eps_s2 = 0.003 * (c_clamped - d) / c_clamped
+            fs2 = max(-fy_mpa, min(fy_mpa, es_mpa * eps_s2))
+            fc_disp2 = 0.85 * fc_mpa if d <= a_val else 0.0
+            fs_2_kn = as_layer * (fs2 - fc_disp2) / 1000.0
+            ms_2_knm = fs_2_kn * (h_d / 2.0 - d) / 1000.0
+
+            pn = cc_kn + fs_1_kn + fs_2_kn
+            mn = mc_knm + ms_1_knm + ms_2_knm
+
+            # ACI strength reduction factor phi transition
+            eps_t = abs(min(0.0, eps_s2))
+            eps_y = fy_mpa / es_mpa
+            if eps_t <= eps_y:
+                phi = 0.65
+            elif eps_t >= 0.005:
+                phi = 0.90
+            else:
+                phi = 0.65 + 0.25 * (eps_t - eps_y) / max(1e-5, (0.005 - eps_y))
+
+            return pn, mn, phi, eps_t
+
+        # 1. Balanced point
+        pnb, mnb, phib, _ = eval_strain(cb)
+
+        # 2. Pure bending (Pn = 0)
+        c_low, c_high = 1.0, float(h_d)
+        for _ in range(50):
+            c_mid = (c_low + c_high) / 2.0
+            p_val, _, _, _ = eval_strain(c_mid)
+            if p_val > 0.0:
+                c_high = c_mid
+            else:
+                c_low = c_mid
+        c0 = (c_low + c_high) / 2.0
+        _, mn0, phi0, _ = eval_strain(c0)
+
+        # 3. Intermediate compression (c = 1.5 cb)
+        pn_comp, mn_comp, phi_comp, _ = eval_strain(1.5 * cb)
+
+        # 4. Tension transition (eps_t = 0.005 -> c = 3/8 d)
+        c_tens = (3.0 / 8.0) * d
+        pn_tens, mn_tens, phi_tens, _ = eval_strain(c_tens)
+
+        # Build nominal envelope (Pn, Mn) ordered from P0 down to pure bending
+        pts_nominal = [
+            (p0_kn, 0.0),
+            (pn_comp, mn_comp),
+            (pnb, mnb),
+            (pn_tens, mn_tens),
+            (0.0, mn0),
+            (pnt_kn, 0.0)
+        ]
+
+        # Build design / factored envelope (phi*Pn, phi*Mn)
+        pts_factored = [
+            (phi_pn_max_kn, 0.0),
+            (min(phi_pn_max_kn, phi_comp * pn_comp), phi_comp * mn_comp),
+            (phib * pnb, phib * mnb),
+            (phi_tens * pn_tens, phi_tens * mn_tens),
+            (0.0, phi0 * mn0),
+            (0.90 * pnt_kn, 0.0)
+        ]
+
+        return pts_nominal, pts_factored, pnb, mnb, phib * mnb, phi0 * mn0, cb
+
+    nom_x, phi_x, pnb_x, mnb_x, phi_mb_x, phi_m0_x, cb_x = build_pm_diagram(b_mm, h_mm)
+    nom_y, phi_y, pnb_y, mnb_y, phi_mb_y, phi_m0_y, cb_y = build_pm_diagram(h_mm, b_mm)
+
+    # Ray intersection to find nominal capacity Pn for a given eccentricity e = M / P
+    def get_pn_for_eccentricity(pts_nom, e_meters: float) -> float:
+        if e_meters <= 1e-4:
+            return pts_nom[0][0]
+        for i in range(len(pts_nom) - 1):
+            p1, m1 = pts_nom[i]
+            p2, m2 = pts_nom[i + 1]
+            if p1 <= 0.0 and p2 <= 0.0:
+                continue
+            dp = p2 - p1
+            dm = m2 - m1
+            if abs(dp) < 1e-6:
+                continue
+            slope = dm / dp
+            if abs(e_meters - slope) < 1e-9:
+                continue
+            p_inter = (m1 - slope * p1) / (e_meters - slope)
+            if min(p1, p2) - 1e-3 <= p_inter <= max(p1, p2) + 1e-3:
+                return max(0.0, p_inter)
+        return max(0.0, pts_nom[-2][0])
+
+    # Item 1: Bresler Reciprocal Load Biaxial Check
+    abs_pu = max(0.0, float(pu_kn))
+    abs_mux = abs(float(mux_knm))
+    abs_muy = abs(float(muy_knm))
+
+    ex = (abs_mux / abs_pu) if abs_pu > 0.05 else 0.0
+    ey = (abs_muy / abs_pu) if abs_pu > 0.05 else 0.0
+
+    pnx = get_pn_for_eccentricity(nom_x, ex)
+    pny = get_pn_for_eccentricity(nom_y, ey)
+    pn0 = p0_kn
+
+    # Bresler formula: 1/Pn_biax = 1/Pnx + 1/Pny - 1/Pn0
+    if abs_pu <= 0.05:
+        # Pure bending / near zero axial: check against pure bending capacities
+        safe_x = abs_mux <= phi_m0_x
+        safe_y = abs_muy <= phi_m0_y
+        util_x = abs_mux / max(0.01, phi_m0_x)
+        util_y = abs_muy / max(0.01, phi_m0_y)
+        utilization = max(util_x, util_y)
+        status = "SAFE" if (safe_x and safe_y) else "INCREASE SECTION (BIAXIAL)"
+        pn_biax = None
+        phi_pn_biax = None
+    elif abs_mux <= 0.01 and abs_muy <= 0.01:
+        # Pure axial load
+        pn_biax = pn0
+        phi_pn_biax = phi_pn_max_kn
+        utilization = abs_pu / max(0.01, phi_pn_max_kn)
+        status = "SAFE" if abs_pu <= phi_pn_max_kn else "INCREASE SECTION"
+    else:
+        # Biaxial bending with axial compression
+        if pnx > 0.0 and pny > 0.0 and pn0 > 0.0:
+            inv_pn_biax = (1.0 / pnx) + (1.0 / pny) - (1.0 / pn0)
+            if inv_pn_biax > 0.0:
+                pn_biax = 1.0 / inv_pn_biax
+            else:
+                pn_biax = min(pnx, pny)
+        else:
+            pn_biax = min(pnx, pny)
+
+        phi_pn_biax = 0.65 * pn_biax
+        util_axial = abs_pu / max(0.01, phi_pn_max_kn)
+        util_biax = abs_pu / max(0.01, phi_pn_biax)
+        utilization = max(util_axial, util_biax)
+
+        if abs_pu <= phi_pn_max_kn and abs_pu <= phi_pn_biax:
+            status = "SAFE"
+        elif abs_pu > phi_pn_max_kn and abs_pu <= phi_pn_biax:
+            status = "INCREASE SECTION"
+        else:
+            status = "INCREASE SECTION (BIAXIAL)"
+
+    # Format P-M curve points (positive M and positive P compression envelope)
     pm_curve_points = [
-        {"m_knm": 0.0, "p_kn": round(phi_pn_max, 1)},
-        {"m_knm": round(phi_mb * 0.55, 1), "p_kn": round(phi_pn_max * 0.85, 1)},
-        {"m_knm": round(phi_mb, 1), "p_kn": round(phi_pb, 1)},
-        {"m_knm": round(phi_m0, 1), "p_kn": 0.0},
+        {"m_knm": round(m, 1), "p_kn": round(p, 1)}
+        for p, m in phi_x if p >= -0.01 and m >= -0.01
     ]
 
     return {
@@ -2360,14 +2607,22 @@ def design_column_and_pm_curve(
         "section_mm": f"{b_mm} x {h_mm} mm",
         "chosen_bars": f"{n_bars} Phi 16 mm",
         "rho_pct": round((ast_prov / ag) * 100.0, 2),
-        "phi_pn_max_kn": round(phi_pn_max, 1),
-        "phi_mb_knm": round(phi_mb, 1),
+        "phi_pn_max_kn": round(phi_pn_max_kn, 1),
+        "phi_mb_knm": round(phi_mb_x, 1),
         "lu_m": eff_lu_m,
         "double_height": bool(double_height),
         "effective_height_note": f"2H Double-Height ({eff_lu_m:.2f}m, kL/r={slenderness_kl_r})" if double_height else f"1H ({eff_lu_m:.2f}m)",
         "slenderness_kl_r": slenderness_kl_r,
         "pm_curve_points": pm_curve_points,
-        "status": "SAFE" if pu_kn <= phi_pn_max else "INCREASE SECTION",
+        "status": status,
+        "utilization": round(utilization, 3),
+        "p0_kn": round(p0_kn, 1),
+        "pnt_kn": round(pnt_kn, 1),
+        "phi_pnb_kn": round(0.65 * pnb_x, 1),
+        "phi_mnb_knm": round(phi_mb_x, 1),
+        "cb_mm": round(cb_x, 1),
+        "pn_biax_kn": round(pn_biax, 1) if pn_biax is not None else None,
+        "phi_pn_biax_kn": round(phi_pn_biax, 1) if phi_pn_biax is not None else None,
     }
 
 
@@ -3971,7 +4226,28 @@ def auto_fill_all_story_slabs(story_data: Dict[str, Any]) -> Tuple[int, str]:
     return created, f"Auto-Generated {created} Slab bay(s) across the story."
 
 
-def rotate_column_90_deg(story_data: Dict[str, Any], column_id: str, boundary_mode: str = "clamp") -> Tuple[bool, str]:
+
+_COL_LOCK_MSG = "Column Lock: regular columns are edited ONLY on the Ground Floor. Upper stories inherit them (use Modify > Discontinue/Restore). Tie-Beams accept Neck Columns (NC#) only."
+
+def _col_edit_allowed_v244(story_data: Dict[str, Any], col: Dict[str, Any]) -> bool:
+    """
+    Column edit permissions per story policy:
+    - Ground floor (02_Ground_Floor): Master editable
+    - Neck columns on TieBeams (00_TieBeams): Editable locally
+    - Basement-local columns (01_Basement_Slab): Editable locally
+    - Upper / inherited columns: Read-only
+    """
+    sid = str(story_data.get("story_id", ""))
+    st = str(story_data.get("story_type", ""))
+    if col.get("neck"):
+        return st == "tie_beams" or sid.startswith("00_")
+    if col.get("basement_local"):
+        return st == "basement" or sid.startswith("01_")
+    if st in ("tie_beams", "typical", "standard", "penthouse", "basement") or (sid and not sid.startswith("02_")):
+        return False
+    return True
+
+def rotate_column_90_deg(story_data: Dict[str, Any], column_id: str, boundary_mode: str = "clamp", *a, **k) -> Tuple[bool, str]:
     """
     Rotates a selected column by 90 degrees (swapping b_m and h_m, e.g. 0.20x0.40 <-> 0.40x0.20),
     re-clamps it safely inside the building boundary (without ever crashing), and updates connected
@@ -3979,9 +4255,11 @@ def rotate_column_90_deg(story_data: Dict[str, Any], column_id: str, boundary_mo
     and strictly inside the slab boundary!
     """
     cols = story_data.get("columns", [])
-    target = next((c for c in cols if c.get("id") == column_id), None)
+    target = next((c for c in cols if str(c.get("id")) == str(column_id)), None)
     if not target:
         return False, f"Column {column_id} not found."
+    if not _col_edit_allowed_v244(story_data, target):
+        return False, _COL_LOCK_MSG
     old_b, old_h = float(target.get("b_m", 0.20)), float(target.get("h_m", 0.40))
     target["b_m"] = round(old_h, 3)
     target["h_m"] = round(old_b, 3)
@@ -4456,6 +4734,7 @@ def delete_selected_element_from_story(
     story_data: Dict[str, Any],
     kind: str,
     element_id: str,
+    *a, **k,
 ) -> Tuple[bool, str]:
     """
     Crash-proof universal deletion algorithm for any selected object (`column`, `beam`, `slab`, `opening`,
@@ -4474,6 +4753,9 @@ def delete_selected_element_from_story(
         eid = str(element_id)
         if kind == "column":
             cols = story_data.get("columns", [])
+            target_col = next((c for c in cols if str(c.get("id")) == eid), None)
+            if target_col is not None and not _col_edit_allowed_v244(story_data, target_col):
+                return False, _COL_LOCK_MSG
             before = len(cols)
             story_data["columns"] = [c for c in cols if str(c.get("id")) != eid]
             if len(story_data["columns"]) < before:
@@ -4569,15 +4851,18 @@ def move_column_and_sync_connected_beams(
     new_x: float,
     new_y: float,
     boundary_mode: str = "clamp",
+    *a, **k,
 ) -> Tuple[bool, str]:
     """
     Moves a column to (new_x, new_y), enforces the Outer Slab Boundary rule ('clamp' or 'expand'),
     and updates all beams supported by this column while keeping beams strictly orthogonal.
     """
     columns = story_data.get("columns", [])
-    target_col = next((c for c in columns if c.get("id") == column_id), None)
+    target_col = next((c for c in columns if str(c.get("id")) == str(column_id)), None)
     if not target_col:
         return False, f"Column {column_id} not found."
+    if not _col_edit_allowed_v244(story_data, target_col):
+        return False, _COL_LOCK_MSG
 
     old_x, old_y = float(target_col["x"]), float(target_col["y"])
     candidate = dict(target_col)
@@ -4793,6 +5078,7 @@ def align_element_face_to_reference(
     ref_coord: float,
     lock_constraint: bool = False,
     boundary_mode: str = "clamp",
+    *a, **k,
 ) -> Tuple[bool, str]:
     """
     Revit-Style Align Tool (`Modify -> Align [AL]`):
@@ -4808,6 +5094,8 @@ def align_element_face_to_reference(
         col = next((c for c in cols if c.get("id") == target_id), None)
         if not col:
             return False, f"Column {target_id} not found."
+        if not _col_edit_allowed_v244(story_data, col):
+            return False, _COL_LOCK_MSG
         half_b = float(col.get("b_m", 0.20)) / 2.0
         half_h = float(col.get("h_m", 0.40)) / 2.0
         new_x, new_y = float(col["x"]), float(col["y"])
@@ -5949,30 +6237,6 @@ def convert_beam_kind_and_section(
     )
 
 
-# ===== v2.4.2 additive overrides =====
-def resolve_effective_wall_height_for_story(story_data):
-    if "wall_height_m" in story_data and float(story_data["wall_height_m"]) > 0.10:
-        return float(story_data["wall_height_m"])
-    st = str(story_data.get("story_type", "")).lower(); sid = str(story_data.get("story_id", "")).lower()
-    if "tie" in st or "tie" in sid or "00_" in sid: return 3.20
-    if "ground" in st or "ground" in sid or "02_" in sid:
-        return 3.00 if story_data.get("has_upper_floors", True) else 0.0
-    if "penthouse" in st or "roof" in sid: return 1.50
-    return float(story_data.get("height_m", 3.00))
-
-def ensure_beam_wall_flags(story_data, beam):
-    policy = str(story_data.get("wall_load_policy", "all_beams" if story_data.get("has_upper_floors", True) else "no_walls"))
-    default_flag = (policy != "no_walls")
-    default_t_cm = snap_standard_wall_thickness_cm(float(story_data.get("default_wall_thickness_cm", 20.0)))
-    flags = beam.setdefault("span_wall_flags", {}); thick = beam.setdefault("span_wall_thickness_cm", {})
-    for seg in get_beam_span_segments(beam):
-        k = seg["key"]
-        if k not in flags: flags[k] = default_flag
-        if k not in thick: thick[k] = default_t_cm
-        else: thick[k] = snap_standard_wall_thickness_cm(thick[k])
-    return flags
-
-
 # ===== v2.4.3-r2 additive: full-width footprint containment + min-dimension floors =====
 def reclamp_beam_full_width_inside_boundary(story_data, beam_id):
     bm = next((b for b in story_data.get("beams", []) if str(b.get("id")) == str(beam_id)), None)
@@ -6051,88 +6315,3 @@ def enforce_beam_footprint_and_cascade(story_data):
         c2, a2 = enforce_opening_adjacent_drop_beams_and_cascade(story_data)
         converted.extend([c for c in c2 if c not in converted]); alerts.extend(a2)
     return converted, alerts
-
-_orig_design_v243 = design_beam_aci318
-def design_beam_aci318(beam, analysis_res, fc_mpa=20.0, fy_mpa=350.0, **kw):
-    kind = str(beam.get("beam_kind", "hidden")).lower()
-    if kind == "hidden":
-        floor = float(beam.get("min_width_mm", 300.0))
-        if kw.get("auto_size_section", True) and not beam.get("lock_section_dimensions", False):
-            beam["initial_width_m"] = max(float(beam.get("initial_width_m", 0.30)), floor / 1000.0)
-    else:
-        floor = float(beam.get("min_depth_mm", 400.0))
-        if kw.get("auto_size_section", True) and not beam.get("lock_section_dimensions", False):
-            beam["initial_depth_m"] = max(float(beam.get("initial_depth_m", 0.40)), floor / 1000.0)
-    res = _orig_design_v243(beam, analysis_res, fc_mpa, fy_mpa, **kw)
-    if kind == "hidden":
-        f = float(beam.get("min_width_mm", 300.0))
-        if float(res.get("b_mm", 0)) < f:
-            res["b_mm"] = round(f); beam["width_m"] = round(f / 1000.0, 3)
-    else:
-        f = float(beam.get("min_depth_mm", 400.0))
-        if float(res.get("h_mm", 0)) < f:
-            res["h_mm"] = round(f); beam["depth_m"] = round(f / 1000.0, 3)
-    return res
-
-_orig_analyze_v243 = analyze_all_story_beams_and_columns
-def analyze_all_story_beams_and_columns(story_data, fc_mpa=20.0, fy_mpa=350.0):
-    res = _orig_analyze_v243(story_data, fc_mpa, fy_mpa)
-    conv, alerts = enforce_beam_footprint_and_cascade(story_data)
-    if conv:
-        res["post_sizing_drop_conversions"] = list(res.get("post_sizing_drop_conversions", [])) + conv
-        res["post_sizing_alerts"] = list(res.get("post_sizing_alerts", [])) + alerts
-    return res
-
-
-# ===== v2.4.4 additive: per-story column edit policy (ground master / neck-only ties / read-only upper) =====
-def _col_edit_allowed_v244(story_data, col):
-    sid = str(story_data.get("story_id", "")); st = str(story_data.get("story_type", ""))
-    if col.get("neck"):
-        return st == "tie_beams" or sid.startswith("00_")
-    if st in ("tie_beams", "typical", "standard", "penthouse", "basement") or (sid and not sid.startswith("02_")):
-        return False
-    return True
-
-_COL_LOCK_MSG = "Column Lock: regular columns are edited ONLY on the Ground Floor. Upper stories inherit them (use Modify > Discontinue/Restore). Tie-Beams accept Neck Columns (NC#) only."
-
-_orig_align_v244 = align_element_face_to_reference
-def align_element_face_to_reference(story_data, target_kind, target_id, *a, **k):
-    if str(target_kind) == "column":
-        col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(target_id)), None)
-        if col is not None and not _col_edit_allowed_v244(story_data, col):
-            return False, _COL_LOCK_MSG
-    return _orig_align_v244(story_data, target_kind, target_id, *a, **k)
-
-_orig_movecol_v244 = move_column_and_sync_connected_beams
-def move_column_and_sync_connected_beams(story_data, column_id, new_x, new_y, *a, **k):
-    col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(column_id)), None)
-    if col is not None and not _col_edit_allowed_v244(story_data, col):
-        return False, _COL_LOCK_MSG
-    return _orig_movecol_v244(story_data, column_id, new_x, new_y, *a, **k)
-
-_orig_rotcol_v244 = rotate_column_90_deg
-def rotate_column_90_deg(story_data, column_id, *a, **k):
-    col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(column_id)), None)
-    if col is not None and not _col_edit_allowed_v244(story_data, col):
-        return False, _COL_LOCK_MSG
-    return _orig_rotcol_v244(story_data, column_id, *a, **k)
-
-_orig_del_v244 = delete_selected_element_from_story
-def delete_selected_element_from_story(story_data, kind, element_id):
-    if str(kind) == "column":
-        col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(element_id)), None)
-        if col is not None and not _col_edit_allowed_v244(story_data, col):
-            return False, _COL_LOCK_MSG
-    return _orig_del_v244(story_data, kind, element_id)
-
-
-# ===== v2.4.5 additive: refined column edit policy (basement-local editable, inherited locked) =====
-def _col_edit_allowed_v244(story_data, col):
-    sid = str(story_data.get("story_id", "")); st = str(story_data.get("story_type", ""))
-    if col.get("neck"):
-        return st == "tie_beams" or sid.startswith("00_")
-    if col.get("basement_local"):
-        return st == "basement" or sid.startswith("01_")
-    if st in ("tie_beams", "typical", "standard", "penthouse", "basement") or (sid and not sid.startswith("02_")):
-        return False
-    return True

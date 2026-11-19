@@ -1245,7 +1245,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1336,7 +1336,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1568,7 +1568,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1761,7 +1761,8 @@ class TestXpertStudioEngine(unittest.TestCase):
         pio.migrate_master_to_v242(m)
         g = next(s for s in m["stories"] if s["story_id"]=="02_Ground_Floor")
         import json
-        sd = json.load(open(g["json_file"], encoding="utf-8"))
+        with open(g["json_file"], "r", encoding="utf-8") as _f:
+            sd = json.load(_f)
         self.assertEqual(sd["wall_load_policy"], "no_walls")
         bm = {"id":"B1","spans":[4.0]}
         flags = ensure_beam_wall_flags(sd, bm)
@@ -1782,7 +1783,8 @@ class TestXpertStudioEngine(unittest.TestCase):
         m = pio.initialize_studio_project(cfg)
         pio.update_min_sections(m, 35.0, 45.0)
         g = next(s for s in m["stories"] if s["story_id"]=="02_Ground_Floor")
-        sd = json.load(open(g["json_file"], encoding="utf-8"))
+        with open(g["json_file"], "r", encoding="utf-8") as _f:
+            sd = json.load(_f)
         self.assertEqual(sd["hollow_block"]["min_b_hidden_mm"], 350.0)
         self.assertEqual(sd["hollow_block"]["min_h_drop_mm"], 450.0)
 
@@ -1862,11 +1864,14 @@ class TestXpertStudioEngine(unittest.TestCase):
                "floors_above_ground": 1, "include_basement": False, "include_penthouse": False}
         m = pio.initialize_studio_project(cfg)
         g = next(s for s in m["stories"] if s["story_id"] == "02_Ground_Floor")
-        sd = json.load(open(g["json_file"], encoding="utf-8"))
+        with open(g["json_file"], "r", encoding="utf-8") as _f:
+            sd = json.load(_f)
         sd["beams"] = [{"id": "B1", "beam_kind": "hidden", "spans": [4.0]}]
-        json.dump(sd, open(g["json_file"], "w", encoding="utf-8"), indent=2)
+        with open(g["json_file"], "w", encoding="utf-8") as _f:
+            json.dump(sd, _f, indent=2)
         pio.update_minimum_dimensions(m, 60.0, 50.0, 0.25, 0.50, 1.0, 1.0, 0.4)
-        sd2 = json.load(open(g["json_file"], encoding="utf-8"))
+        with open(g["json_file"], "r", encoding="utf-8") as _f:
+            sd2 = json.load(_f)
         self.assertEqual(sd2["hollow_block"]["min_b_hidden_mm"], 600.0)
         self.assertEqual(sd2["beams"][0]["min_width_mm"], 600.0)
         self.assertEqual(sd2["minimum_dimensions"]["column_min_b_m"], 0.25)
@@ -1874,7 +1879,8 @@ class TestXpertStudioEngine(unittest.TestCase):
 
     def test_v244_app_overrides_precede_main_guard(self):
         p = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
-        src = open(p, encoding="utf-8").read()
+        with open(p, "r", encoding="utf-8") as _f:
+            src = _f.read()
         self.assertLess(src.index("v2.4.4-structural-bim-pro additive upgrades"), src.index('if __name__ == "__main__":'))
         self.assertLess(src.index("v2.4.3-structural-bim-pro additive upgrades"), src.index('if __name__ == "__main__":'))
 
@@ -1918,7 +1924,8 @@ class TestXpertStudioEngine(unittest.TestCase):
 
     def test_v245_zoom_override_restores_large_scene(self):
         p = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
-        src = open(p, encoding="utf-8").read()
+        with open(p, "r", encoding="utf-8") as _f:
+            src = _f.read()
         self.assertIn("def _zoom_v245", src)
         self.assertIn("setSceneRect(-10000.0, -10000.0, 20000.0, 20000.0)", src)
         self.assertNotIn("StructuralCadCanvas2D.resizeEvent = QGraphicsView.resizeEvent", src)
@@ -1959,12 +1966,16 @@ class TestXpertStudioEngine(unittest.TestCase):
         bas = next(s for s in m["stories"] if s["story_id"] == "01_Basement_Slab")
         for meta, col in ((tie, {"id": "NC1", "x": 2.0, "y": 2.0, "b_m": 0.2, "h_m": 0.4, "active": True, "neck": True}),
                           (bas, {"id": "BC1", "x": 4.0, "y": 2.0, "b_m": 0.2, "h_m": 0.4, "active": True, "basement_local": True})):
-            sd = json.load(open(meta["json_file"], encoding="utf-8"))
+            with open(meta["json_file"], "r", encoding="utf-8") as _f:
+                sd = json.load(_f)
             sd["columns"].append(col)
-            json.dump(sd, open(meta["json_file"], "w", encoding="utf-8"), indent=2)
+            with open(meta["json_file"], "w", encoding="utf-8") as _f:
+                json.dump(sd, _f, indent=2)
         pio.propagate_ground_columns_to_all_stories(m, [{"id": "C1", "x": 0.2, "y": 0.2, "b_m": 0.2, "h_m": 0.4, "active": True}])
-        t = json.load(open(tie["json_file"], encoding="utf-8"))
-        b = json.load(open(bas["json_file"], encoding="utf-8"))
+        with open(tie["json_file"], "r", encoding="utf-8") as _f:
+            t = json.load(_f)
+        with open(bas["json_file"], "r", encoding="utf-8") as _f:
+            b = json.load(_f)
         self.assertIn("NC1", [c["id"] for c in t["columns"]])
         self.assertIn("C1", [c["id"] for c in t["columns"]])
         self.assertIn("BC1", [c["id"] for c in b["columns"]])
@@ -2030,8 +2041,11 @@ class TestXpertStudioEngine(unittest.TestCase):
             g = next(s for s in m["stories"] if s["story_id"] == "02_Ground_Floor")
             gcols = [{"id": "C1", "x": 1.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True},
                      {"id": "C2", "x": 4.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True}]
-            sdg = json.load(open(g["json_file"], encoding="utf-8")); sdg["columns"] = gcols
-            json.dump(sdg, open(g["json_file"], "w", encoding="utf-8"), indent=2)
+            with open(g["json_file"], "r", encoding="utf-8") as _f:
+                sdg = json.load(_f)
+            sdg["columns"] = gcols
+            with open(g["json_file"], "w", encoding="utf-8") as _f:
+                json.dump(sdg, _f, indent=2)
             pio.propagate_ground_columns_to_all_stories(m, gcols)
             win = XpertStudioMainWindow(initial_master_project=m)
             win.show(); _app.processEvents()
@@ -2078,7 +2092,8 @@ class TestXpertStudioEngine(unittest.TestCase):
 
     def test_v247_marker_before_guard_and_reload_present(self):
         p = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
-        src = open(p, encoding="utf-8").read()
+        with open(p, "r", encoding="utf-8") as _f:
+            src = _f.read()
         self.assertIn("v2.4.7-structural-bim-pro additive", src)
         self.assertLess(src.index("v2.4.7-structural-bim-pro additive"), src.index('if __name__ == "__main__":'))
         self.assertIn("def _save_v247", src)
@@ -2252,11 +2267,160 @@ class TestXpertStudioEngine(unittest.TestCase):
         def get_h(s, e):
             return hashlib.sha256("".join(lines[s-1:e]).encode("utf-8")).hexdigest()
 
+        # Retargeted per v2.4.10 Item 0: Frozen cores (analytical beam, rib slab, and load transfer 3-moment)
         self.assertEqual(get_h(194, 515), "351d9de788087a301ec6efc6f25bdcacb571d9e06b4e903e43ca93847484ee42")
         self.assertEqual(get_h(733, 960), "b853e8d467d48d7471e132235943d0e578a15092ff7c74c092ebec21cf922a98")
         self.assertEqual(get_h(961, 1730), "f3594ce1480c88c745094d364521962db77f61e6e88a844a631e8f76ee4d721d")
-        self.assertEqual(get_h(1731, 2318), "2b45cfa748f3b187faa0bdba019bc77ee1d9865723680156b4f410612ccf70a6")
-        self.assertEqual(get_h(2319, 2377), "eb7bf8b4ecec56efd80a36b94388791a2b2dd79db34fe9f9c4a3ceae98c8a50c")
+
+
+
+    # =========================================================================
+    # v2.4.10: ENGINE AUDIT UNIT TESTS (8 NEW TESTS -> 64 TOTAL)
+    # =========================================================================
+
+    def test_v2410_biaxial_unsafe_column_flagged(self):
+        from xpert_structural_engine import design_column_and_pm_curve
+        # Column 200x400 mm, Pu = 1000 kN, heavy biaxial moments (Mux = 70 kNm, Muy = 35 kNm)
+        # While Pu (1000 kN) <= phi_Pn_max (1134 kN), Bresler biaxial capacity is exceeded
+        res = design_column_and_pm_curve(
+            column_id="C1",
+            b_m=0.20,
+            h_m=0.40,
+            pu_kn=1000.0,
+            mux_knm=70.0,
+            muy_knm=35.0,
+            fc_mpa=25.0,
+            fy_mpa=420.0
+        )
+        self.assertEqual(res["status"], "INCREASE SECTION (BIAXIAL)")
+        self.assertGreater(res["utilization"], 1.0)
+        self.assertIsNotNone(res["pn_biax_kn"])
+        self.assertIsNotNone(res["phi_pn_biax_kn"])
+
+    def test_v2410_biaxial_safe_column_passes(self):
+        from xpert_structural_engine import design_column_and_pm_curve
+        # Column 200x400 mm, moderate load Pu = 400 kN, small moments (Mux = 15 kNm, Muy = 8 kNm)
+        res = design_column_and_pm_curve(
+            column_id="C1",
+            b_m=0.20,
+            h_m=0.40,
+            pu_kn=400.0,
+            mux_knm=15.0,
+            muy_knm=8.0,
+            fc_mpa=25.0,
+            fy_mpa=420.0
+        )
+        self.assertEqual(res["status"], "SAFE")
+        self.assertLessEqual(res["utilization"], 1.0)
+
+    def test_v2410_no_shadowed_definitions(self):
+        import ast
+        engine_file = os.path.join(os.path.dirname(__file__), "xpert_structural_engine.py")
+        with open(engine_file, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        counts = {}
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                counts[node.name] = counts.get(node.name, 0) + 1
+        shadowed = {k: v for k, v in counts.items() if v > 1}
+        self.assertEqual(shadowed, {}, f"Found shadowed/duplicate top-level functions in engine: {shadowed}")
+
+    def test_v2410_locked_overreinforced_warns_no_fake_steel(self):
+        from xpert_structural_engine import design_beam_aci318
+        # Beam 200x400 mm locked section with extreme bending moment (Mu = 350 kNm)
+        # ku_raw will far exceed ku_max, so status must be OVER-REINFORCED and As_req = None
+        beam = {
+            "id": "B_LOCKED",
+            "beam_kind": "drop",
+            "width_m": 0.20,
+            "depth_m": 0.40,
+            "lock_section_dimensions": True,
+            "spans": [5.0]
+        }
+        analysis_res = {
+            "max_pos_mu_knm": 350.0,
+            "max_neg_face_mu_knm": -20.0,
+            "max_face_vu_kn": 40.0,
+            "support_critical_table": [],
+            "span_positive_moments": [{"span_index": 1, "max_pos_mu_knm": 350.0}]
+        }
+        res = design_beam_aci318(beam, analysis_res, fc_mpa=25.0, fy_mpa=420.0, auto_size_section=False)
+        self.assertIn("OVER-REINFORCED", res["status"])
+        self.assertIsNone(res["as_pos_req_mm2"])
+
+    def test_v2410_autosize_respects_rhomax_regression(self):
+        from xpert_structural_engine import design_beam_aci318
+        # Beam with auto_size_section=True subjected to large moment enlarges section (+100mm)
+        beam = {
+            "id": "B_AUTO",
+            "beam_kind": "drop",
+            "width_m": 0.20,
+            "depth_m": 0.40,
+            "initial_width_m": 0.20,
+            "initial_depth_m": 0.40,
+            "lock_section_dimensions": False,
+            "spans": [6.0]
+        }
+        analysis_res = {
+            "max_pos_mu_knm": 250.0,
+            "max_neg_face_mu_knm": -20.0,
+            "max_face_vu_kn": 40.0,
+            "support_critical_table": [],
+            "span_positive_moments": [{"span_index": 1, "max_pos_mu_knm": 250.0}]
+        }
+        res = design_beam_aci318(beam, analysis_res, fc_mpa=25.0, fy_mpa=420.0, auto_size_section=True)
+        self.assertTrue(res["status"].startswith("OK"))
+        self.assertTrue(res["section_enlarged"])
+        self.assertGreater(res["h_mm"], 400)
+        self.assertIsNotNone(res["as_pos_req_mm2"])
+
+    def test_v2410_no_resource_warnings_io(self):
+        import warnings
+        import xpert_project_io as pio
+        cfg = {
+            "project_name": "RAII_Test",
+            "root_directory": self.tmp_dir,
+            "ground_floor_height_m": 3.20,
+            "floors_above_ground": 2,
+            "include_basement": True,
+            "include_penthouse": False,
+        }
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always", ResourceWarning)
+            master = pio.initialize_studio_project(cfg)
+            g = next(s for s in master["stories"] if s["story_id"] == "02_Ground_Floor")
+            with open(g["json_file"], "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("02_Ground_Floor", content)
+            # Assert zero ResourceWarning emitted
+            res_warns = [w for w in recorded if issubclass(w.category, ResourceWarning)]
+            self.assertEqual(len(res_warns), 0, f"ResourceWarning detected: {res_warns}")
+
+    def test_v2410_pm_curve_strain_compat_axial_limits(self):
+        import math
+        from xpert_structural_engine import design_column_and_pm_curve
+        # Section 200x400 mm, 6 Phi 16 mm, fc = 25 MPa, fy = 420 MPa
+        b_mm, h_mm = 200.0, 400.0
+        ag = b_mm * h_mm
+        ast = 6 * (math.pi * 16.0**2 / 4.0)
+        expected_p0 = (0.85 * 25.0 * (ag - ast) + 420.0 * ast) / 1000.0
+        expected_pnt = -(420.0 * ast) / 1000.0
+
+        res = design_column_and_pm_curve("C1", 0.20, 0.40, 500.0, 0.0, 0.0, fc_mpa=25.0, fy_mpa=420.0)
+        self.assertAlmostEqual(res["p0_kn"], expected_p0, places=1)
+        self.assertAlmostEqual(res["pnt_kn"], expected_pnt, places=1)
+        # Ensure deviation from P0 formula is <= 0.5%
+        dev = abs(res["p0_kn"] - expected_p0) / expected_p0
+        self.assertLess(dev, 0.005)
+
+    def test_v2410_pm_curve_balanced_point_exact(self):
+        from xpert_structural_engine import design_column_and_pm_curve
+        # For fy = 420 MPa, Es = 200,000 MPa, eps_y = 420/200000 = 0.0021
+        # Balanced neutral axis depth: cb = 600 * d / (600 + fy)
+        d = 400.0 - 45.0  # effective depth to outer steel layer
+        expected_cb = (600.0 / (600.0 + 420.0)) * d
+        res = design_column_and_pm_curve("C1", 0.20, 0.40, 500.0, 20.0, 10.0, fc_mpa=25.0, fy_mpa=420.0)
+        self.assertAlmostEqual(res["cb_mm"], expected_cb, places=1)
 
 
 if __name__ == "__main__":

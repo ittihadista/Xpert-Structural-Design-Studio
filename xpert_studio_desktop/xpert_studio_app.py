@@ -1,4 +1,4 @@
-# Xpert Structural Design Studio (v2.4.8-structural-bim-pro)
+# Xpert Structural Design Studio (v2.4.10-structural-bim-pro)
 """
 Xpert Structural Design Studio (v2.4.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
@@ -76,6 +76,7 @@ from xpert_project_io import (
 from xpert_structural_engine import (
     STANDARD_WALL_THICKNESSES_CM,
     analyze_all_story_beams_and_columns,
+    enforce_beam_footprint_and_cascade,
     evaluate_story_thickness_and_optimization,
     get_slab_bounding_box,
     enforce_column_inside_slab_boundary,
@@ -6180,6 +6181,10 @@ class XpertStudioMainWindow(QMainWindow):
         fc = float(self.master_project["materials_and_soil"]["fc_mpa"])
         fy = float(self.master_project["materials_and_soil"]["fy_mpa"])
         self.last_analysis_bundle = analyze_all_story_beams_and_columns(self.current_story_data, fc, fy)
+        conv, alerts = enforce_beam_footprint_and_cascade(self.current_story_data)
+        if conv:
+            self.last_analysis_bundle["post_sizing_drop_conversions"] = list(self.last_analysis_bundle.get("post_sizing_drop_conversions", [])) + conv
+            self.last_analysis_bundle["post_sizing_alerts"] = list(self.last_analysis_bundle.get("post_sizing_alerts", [])) + alerts
 
         self.beam_diagrams_view.populate_results(self.current_story_data, self.last_analysis_bundle, select_beam_id=select_beam_id)
         self.beam_design_view.populate_results(self.current_story_data, self.last_analysis_bundle, select_beam_id=select_beam_id)

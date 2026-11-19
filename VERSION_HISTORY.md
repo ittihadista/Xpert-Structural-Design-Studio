@@ -4,7 +4,41 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.4.0-structural-bim-pro` (2026-11-18)
+## Current Release: `v2.4.10-structural-bim-pro` (2026-11-20)
+**Release Title:** Comprehensive Structural Engine Audit & Hardening (Bresler Biaxial Column Check, AST Deduplication, $\rho_{\max}$ Over-Reinforced Section Guard, RAII File Leaks Elimination, Strain-Compatibility Column P-M Curve, and 3-Moment/Transfer Frozen Cores).
+
+### Key Features & Advancements in `v2.4.10-structural-bim-pro`:
+1. **Bresler Reciprocal Biaxial Interaction Check (Item 1):**
+   - Implemented rigorous Bresler reciprocal load method ($1/P_{n,\text{biax}} = 1/P_{nx} + 1/P_{ny} - 1/P_0$) within `design_column_and_pm_curve` in `xpert_structural_engine.py`.
+   - Biaxial capacity is evaluated by ray-eccentricity interpolation along both principal bending axes ($e_x = M_{uy}/P_u, e_y = M_{ux}/P_u$).
+   - If factored axial load exceeds design biaxial strength ($P_u > \phi P_{n,\text{biax}}$), status is unequivocally set to `INCREASE SECTION (BIAXIAL)` with full reporting of $P_{n,\text{biax}}$, $\phi P_{n,\text{biax}}$, and utilization ratio $P_u / (\phi P_{n,\text{biax}})$.
+   - Robust numerical guards protect against zero division when $M_{ux} \approx 0$, $M_{uy} \approx 0$, or $P_u \le 0$.
+2. **AST Deduplication of Shadowed Top-Level Engine Functions (Item 2):**
+   - Cleaned up duplicate top-level function definitions in `xpert_structural_engine.py`.
+   - Verified 0 shadowed top-level functions using Abstract Syntax Tree (AST) inspection in automated test suite.
+   - Architectural Option B strictly adhered to: preserved the frozen load-transfer and 3-moment core (lines 961–1730) intact without modification; `enforce_beam_footprint_and_cascade` is invoked directly from the desktop application analysis orchestration pipeline.
+3. **Beam Ductility $\rho_{\max} = 0.75 \rho_b$ Terminology & Locked-Section Safety (Item 3):**
+   - Replaced empirical $\rho_{\max}$ with standard ACI 318 balanced reinforcement ratio: $\rho_b = 0.85 \beta_1 \frac{f'_c}{f_y} \left(\frac{600}{600 + f_y}\right)$ and $\rho_{\max} = 0.75 \rho_b$, resulting in $k_{u,\max} \approx 0.259$ for $f'_c = 25\text{ MPa}, f_y = 420\text{ MPa}$.
+   - Eliminated silent artificial clamping of reinforcement for locked sections (`lock_section_dimensions = True`).
+   - If required depth exceeds capacity under $k_{u,\max}$, locked sections explicitly warn: `OVER-REINFORCED: increase depth/width or unlock dimensions` and return $A_{s,\text{req}} = \text{None}$, preventing dangerous under-design while auto-sizing beams enlarge normally.
+4. **RAII File Handle Management & ResourceWarning Elimination (Item 4):**
+   - Refactored unclosed file pointers across the test suite and I/O modules into clean Python context managers (`with open(...) as f:`).
+   - Test suite runs under strict warning escalation `python -W error::ResourceWarning` with 0 warnings emitted.
+5. **Strain-Compatibility Numerical Column P-M Interaction Curve (Item 5):**
+   - Replaced approximate empirical interaction formulas with rigorous cross-section strain compatibility analysis.
+   - Accurately captures pure compression capacity $P_0 = 0.85 f'_c (A_g - A_{st}) + f_y A_{st}$ (within 0.5% numerical tolerance), balanced point ($c_b = \frac{600}{600+f_y} d, P_b, M_b$), tension-controlled transition ($\epsilon_t \ge 0.005$), pure bending moment capacity $M_0$, and pure tension capacity $P_{nt} = -f_y A_{st}$.
+6. **Strict Frozen Core Protection (Item 0):**
+   - Guaranteed line-exact SHA-256 integrity for the three core calculation blocks against reference `reference_v2_4_9`:
+     - `solve_continuous_beam_analytical` (lines 194–515, SHA-256: `351d9de788087a301ec6efc6f25bdcacb571d9e06b4e903e43ca93847484ee42`)
+     - `design_hollow_block_slab_rib` (lines 733–960, SHA-256: `b853e8d467d48d7471e132235943d0e578a15092ff7c74c092ebec21cf922a98`)
+     - `analyze_all_story_beams_and_columns` (lines 961–1730, SHA-256: `f3594ce1480c88c745094d364521962db77f61e6e88a844a631e8f76ee4d721d`)
+7. **Comprehensive Automated Unit Test Suite:**
+   - Expanded test suite from 56 to 64 tests in `test_studio_engine.py` (64/64 pass in ~3.7s).
+   - Added dedicated tests for biaxial safety/failure, AST zero-shadowing, locked-section over-reinforced warnings, auto-sizing ductility, RAII ResourceWarnings, $P_0$/$P_{nt}$ axial limits, balanced depth $c_b$, and frozen SHA-256 hash preservation.
+
+---
+
+## Previous Release: `v2.4.0-structural-bim-pro` (2026-11-18)
 **Release Title:** Selective Opening Drop Enforcement, Inner Beam Face Flush Snapping, 100% English-Only UI, Non-Clipping Tabs 2 & 3 Viewports, Floor-by-Floor Wall Load Elevation Calibration, and Phantom Slab Gap Elimination.
 
 ### Key Features & Advancements in `v2.4.0-structural-bim-pro`:
