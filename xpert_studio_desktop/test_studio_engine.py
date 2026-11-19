@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1869,6 +1869,50 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertEqual(sd2["hollow_block"]["min_b_hidden_mm"], 600.0)
         self.assertEqual(sd2["beams"][0]["min_width_mm"], 600.0)
         self.assertEqual(sd2["minimum_dimensions"]["column_min_b_m"], 0.25)
+
+
+    def test_v244_app_overrides_precede_main_guard(self):
+        p = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
+        src = open(p, encoding="utf-8").read()
+        self.assertLess(src.index("v2.4.4-structural-bim-pro additive upgrades"), src.index('if __name__ == "__main__":'))
+        self.assertLess(src.index("v2.4.3-structural-bim-pro additive upgrades"), src.index('if __name__ == "__main__":'))
+
+    def test_v244_column_edit_policy_per_story(self):
+        from xpert_structural_engine import align_element_face_to_reference, move_column_and_sync_connected_beams, delete_selected_element_from_story
+        upper = {"story_id": "03_Typical_Floor", "story_type": "typical",
+                 "columns": [{"id": "C1", "x": 1.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True}], "beams": []}
+        ok, msg = move_column_and_sync_connected_beams(upper, "C1", 2.0, 1.0)
+        self.assertFalse(ok); self.assertIn("Column Lock", msg)
+        ok2, _ = delete_selected_element_from_story(upper, "column", "C1")
+        self.assertFalse(ok2)
+        tie = {"story_id": "00_TieBeams", "story_type": "tie_beams",
+               "columns": [{"id": "C1", "x": 1.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                           {"id": "NC1", "x": 3.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True, "neck": True}], "beams": []}
+        ok3, _ = move_column_and_sync_connected_beams(tie, "C1", 2.0, 1.0)
+        self.assertFalse(ok3)
+        ok4, _ = move_column_and_sync_connected_beams(tie, "NC1", 3.5, 1.0)
+        self.assertTrue(ok4)
+        ground = {"story_id": "02_Ground_Floor", "story_type": "ground",
+                  "columns": [{"id": "C1", "x": 1.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True}], "beams": []}
+        ok5, _ = move_column_and_sync_connected_beams(ground, "C1", 1.5, 1.0)
+        self.assertTrue(ok5)
+
+    def test_v244_circular_column_analysis_and_neck_isolation(self):
+        from xpert_structural_engine import analyze_all_story_beams_and_columns
+        st = {"story_id": "02_Ground_Floor", "story_type": "ground", "height_m": 3.0,
+              "adopted_slab_thickness_cm": 30.0, "slab_factored_wu_kpa": 11.71,
+              "slab_edge_polygon": [[0, 0], [6, 0], [6, 4], [0, 4]],
+              "columns": [{"id": "C1", "x": 0.2, "y": 2.0, "b_m": 0.4, "h_m": 0.4, "d_m": 0.4, "shape": "circle", "active": True},
+                          {"id": "C2", "x": 5.8, "y": 2.0, "b_m": 0.2, "h_m": 0.4, "active": True}],
+              "beams": [{"id": "B1", "beam_kind": "drop", "width_m": 0.2, "depth_m": 0.4,
+                         "start_x": 0.0, "start_y": 2.0, "end_x": 6.0, "end_y": 2.0, "spans": [5.6],
+                         "supports": [{"support_index": 1, "kind": "column", "target_id": "C1", "width_m": 0.4, "center_coord_m": 0.2},
+                                      {"support_index": 2, "kind": "column", "target_id": "C2", "width_m": 0.2, "center_coord_m": 5.8}]}],
+              "slabs": [], "openings": []}
+        bundle = analyze_all_story_beams_and_columns(st, 20.0, 350.0)
+        rec = next(r for r in bundle["column_records"] if r["column_id"] == "C1")
+        self.assertAlmostEqual(rec["b_m"], 0.4, places=2)
+        self.assertIn("B1", bundle["beam_results"])
 
 
 if __name__ == "__main__":

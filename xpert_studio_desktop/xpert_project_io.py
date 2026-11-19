@@ -29,7 +29,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.4.3-structural-bim-pro"
+STUDIO_VERSION = "v2.4.4-structural-bim-pro"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
@@ -1537,3 +1537,20 @@ def propagate_ground_columns_to_all_stories(master_payload, ground_columns):
             with open(jp, "w", encoding="utf-8") as f: _j.dump(sd, f, indent=2)
             if s.get("dxf_file"): sync_story_to_dxf(sd, s["dxf_file"])
     return None
+
+
+# ===== v2.4.4 additive: arch circle centers for OSNAP =====
+_orig_imp_v244 = import_arch_dxf_underlay
+def import_arch_dxf_underlay(dxf_file_path):
+    res = _orig_imp_v244(dxf_file_path)
+    circles = []
+    try:
+        if ezdxf is not None:
+            doc = ezdxf.readfile(dxf_file_path)
+            for e in doc.modelspace():
+                if e.dxftype() in ("CIRCLE", "ARC"):
+                    circles.append({"x": round(float(e.dxf.center.x), 3), "y": round(float(e.dxf.center.y), 3), "r": round(float(e.dxf.radius), 3)})
+    except Exception:
+        pass
+    res["circles"] = circles
+    return res

@@ -6308,8 +6308,6 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-if __name__ == "__main__":
-    main()
 
 
 # ===== v2.4.2-structural-bim-pro additive upgrades =====
@@ -6624,3 +6622,217 @@ def _rc_v243(self, bid, bm, res, des):
         x += sc_w + 40
     sc.setSceneRect(sc.itemsBoundingRect().adjusted(-20, -20, 20, 60))
 BeamDesignDetailWidget._draw_beam_rc_canvas = _rc_v243
+
+
+# ===== v2.4.4-structural-bim-pro additive upgrades =====
+_orig_solve_v244 = XpertStudioMainWindow._solve_story_and_refresh_views
+def _solve_v244(self, select_beam_id=None):
+    ok = _orig_solve_v244(self, select_beam_id=select_beam_id)
+    if ok:
+        self.save_and_sync_current_story(record_undo=False)
+        self.cad_canvas.render_story(self.current_story_data)
+    return ok
+XpertStudioMainWindow._solve_story_and_refresh_views = _solve_v244
+
+_orig_story_v244 = XpertStudioMainWindow._on_story_changed
+def _story_v244(self, idx):
+    _orig_story_v244(self, idx)
+    tie = self.is_tie_beams_story()
+    self.sp_adopted_thick.blockSignals(True)
+    if tie:
+        self.sp_adopted_thick.setRange(0.0, 100.0); self.sp_adopted_thick.setValue(0.0); self.sp_adopted_thick.setEnabled(False)
+    else:
+        self.sp_adopted_thick.setRange(14.0, 100.0)
+        self.sp_adopted_thick.setValue(float(self.current_story_data.get("adopted_slab_thickness_cm", 30.0)))
+        self.sp_adopted_thick.setEnabled(True)
+    self.sp_adopted_thick.blockSignals(False)
+XpertStudioMainWindow._on_story_changed = _story_v244
+
+_orig_click_v244 = StructuralCadCanvas2D._handle_left_click_at
+def _click_v244(self, sx, sy, raw_x, raw_y, snap_type):
+    t = self.active_tool; story = self.studio.current_story_data
+    tie = self.studio.is_tie_beams_story()
+    ground = str(story.get("story_id", "")) == "02_Ground_Floor" or str(story.get("story_type", "")) == "ground"
+    if t == "DRAW_COL":
+        if tie:
+            self.studio.update_contextual_prompt("Tie-Beams Story: use '2. Neck Column (Ties)' (NC#) - regular columns are locked here."); return
+        if not ground:
+            self.studio.update_contextual_prompt("Columns are placed ONLY on the Ground Floor; upper stories inherit them automatically."); return
+    if t == "DRAW_COL_CIRC":
+        if not ground:
+            self.studio.update_contextual_prompt("Circular columns are placed ONLY on the Ground Floor."); return
+        from PyQt6.QtWidgets import QInputDialog
+        d, ok = QInputDialog.getDouble(self, "Circular Column", "Diameter (m):", 0.40, 0.20, 2.00, 2)
+        if not ok: return
+        cols = story.setdefault("columns", [])
+        nid = f"C{sum(1 for c in cols if not c.get('neck')) + 1}"
+        cols.append({"id": nid, "x": sx, "y": sy, "b_m": d, "h_m": d, "d_m": d, "shape": "circle", "active": True, "room_bounding": True})
+        self.studio.save_and_sync_current_story(); self.studio.refresh_story_ui()
+        self.studio.update_contextual_prompt(f"Placed Circular Column {nid} (D={d:.2f} m).")
+        return
+    _orig_click_v244(self, sx, sy, raw_x, raw_y, snap_type)
+StructuralCadCanvas2D._handle_left_click_at = _click_v244
+
+_orig_render_v244 = StructuralCadCanvas2D.render_story
+def _render_v244(self, story_data):
+    hidden = [c for c in story_data.get("columns", []) if c.get("neck") or c.get("shape") == "circle"]
+    for c in hidden:
+        c["_act244"] = c.get("active", True); c["active"] = False
+    try:
+        _orig_render_v244(self, story_data)
+    finally:
+        for c in hidden:
+            c["active"] = c.pop("_act244", True)
+    s = self.scale_px
+    for c in hidden:
+        if not c.get("active", True): continue
+        cx, cy = float(c["x"]), float(c["y"])
+        if c.get("neck"):
+            b, h = float(c.get("b_m", 0.20)), float(c.get("h_m", 0.40))
+            self.scene_2d.addRect(QRectF((cx - b / 2) * s, -(cy + h / 2) * s, b * s, h * s), QPen(QColor("#0D9488"), 2.4), QBrush(QColor(13, 148, 136, 150)))
+            tag = str(c["id"]); colr = "#2DD4BF"
+        else:
+            d = float(c.get("d_m", c.get("b_m", 0.40)))
+            self.scene_2d.addEllipse(QRectF((cx - d / 2) * s, -(cy + d / 2) * s, d * s, d * s), QPen(QColor("#0EA5E9"), 2.4), QBrush(QColor(14, 165, 233, 120)))
+            tag = str(c["id"]); colr = "#7DD3FC"; b = d; h = d
+        t = self.scene_2d.addText(tag, QFont("Arial", 9, QFont.Weight.Bold))
+        t.setDefaultTextColor(QColor(colr)); t.setPos((cx + b / 2 + 0.10) * s, -(cy + h / 2 + 0.10) * s - 10)
+StructuralCadCanvas2D.render_story = _render_v244
+
+_orig_osnap_v244 = StructuralCadCanvas2D.compute_osnap_point
+def _osnap_v244(self, raw_x, raw_y, story_data):
+    base = _orig_osnap_v244(self, raw_x, raw_y, story_data)
+    modes = getattr(self, "osnap_extra", None)
+    if modes is None:
+        modes = self.osnap_extra = {"INT": True, "CEN": True, "PER": True, "EXT": True, "CIR": True}
+    lines = []
+    poly = story_data.get("slab_edge_polygon", [])
+    for i in range(len(poly)):
+        x1, y1 = float(poly[i][0]), float(poly[i][1]); x2, y2 = float(poly[(i + 1) % len(poly)][0]), float(poly[(i + 1) % len(poly)][1])
+        lines.append((x1, y1, x2, y2))
+    for bm in story_data.get("beams", []):
+        lines.append((float(bm.get("start_x", 0)), float(bm.get("start_y", 0)), float(bm.get("end_x", 0)), float(bm.get("end_y", 0))))
+    ab = story_data.get("arch_underlay_block")
+    if isinstance(ab, dict) and ab.get("visible", True):
+        for seg in ab.get("segments", [])[:200]:
+            lines.append((float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3])))
+    best = None
+    def consider(d, x, y, kind, label):
+        nonlocal best
+        if d <= 0.42 and modes.get(kind, True) and (best is None or d < best[0]):
+            best = (d, x, y, kind, label)
+    if modes.get("INT", True):
+        for i in range(len(lines)):
+            x1, y1, x2, y2 = lines[i]
+            for j in range(i + 1, len(lines)):
+                x3, y3, x4, y4 = lines[j]
+                den = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3)
+                if abs(den) < 1e-9: continue
+                t = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / den
+                u = ((x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)) / den
+                if -0.02 <= t <= 1.02 and -0.02 <= u <= 1.02:
+                    px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+                    consider(math.hypot(raw_x - px, raw_y - py), px, py, "INT", f"OSNAP [Intersection]: ({px:.2f}, {py:.2f})")
+    if modes.get("CEN", True):
+        for slb in story_data.get("slabs", []) + story_data.get("openings", []):
+            if "min_x" in slb:
+                px = (float(slb["min_x"]) + float(slb["max_x"])) / 2; py = (float(slb["min_y"]) + float(slb["max_y"])) / 2
+                consider(math.hypot(raw_x - px, raw_y - py), px, py, "CEN", f"OSNAP [Center]: {slb.get('id','')} ({px:.2f}, {py:.2f})")
+        if isinstance(ab, dict):
+            for rc in ab.get("candidate_columns", []):
+                consider(math.hypot(raw_x - float(rc["x"]), raw_y - float(rc["y"])), float(rc["x"]), float(rc["y"]), "CEN", f"OSNAP [Center]: Arch rect ({float(rc['x']):.2f}, {float(rc['y']):.2f})")
+    if modes.get("CIR", True) and isinstance(ab, dict):
+        for cc in ab.get("circles", []):
+            consider(math.hypot(raw_x - float(cc["x"]), raw_y - float(cc["y"])), float(cc["x"]), float(cc["y"]), "CIR", f"OSNAP [Circle Center]: ({float(cc['x']):.2f}, {float(cc['y']):.2f})")
+    ref = self._first_click_pt or (self._polyline_pts[-1] if self._polyline_pts else None)
+    for (x1, y1, x2, y2) in lines:
+        dx, dy = x2 - x1, y2 - y1; L2 = dx * dx + dy * dy
+        if L2 < 1e-9: continue
+        if modes.get("PER", True) and ref is not None:
+            t = max(0.0, min(1.0, ((ref[0] - x1) * dx + (ref[1] - y1) * dy) / L2))
+            px, py = x1 + t * dx, y1 + t * dy
+            consider(math.hypot(raw_x - px, raw_y - py), px, py, "PER", f"OSNAP [Perpendicular]: ({px:.2f}, {py:.2f})")
+        if modes.get("EXT", True):
+            t = ((raw_x - x1) * dx + (raw_y - y1) * dy) / L2
+            if t < -0.02 or t > 1.02:
+                px, py = x1 + t * dx, y1 + t * dy
+                if math.hypot(raw_x - px, raw_y - py) <= 0.20:
+                    consider(math.hypot(raw_x - px, raw_y - py), px, py, "EXT", f"OSNAP [Extension]: ({px:.2f}, {py:.2f})")
+    if best is not None:
+        d0 = math.hypot(raw_x - float(base["x"]), raw_y - float(base["y"]))
+        if best[0] < d0 - 0.02:
+            return {"x": round(best[1], 3), "y": round(best[2], 3), "snap_type": best[3], "label": best[4]}
+    return base
+StructuralCadCanvas2D.compute_osnap_point = _osnap_v244
+
+_orig_ws_v244 = XpertStudioMainWindow._build_main_workspace
+def _ws_v244(self):
+    _orig_ws_v244(self)
+    lay = self.bot_frame.layout()
+    self._osnap_extra_btns = {}
+    for i, (key, lbl) in enumerate([("INT", "Int"), ("CEN", "Cen2"), ("PER", "Perp"), ("EXT", "Ext"), ("CIR", "Circ")]):
+        b = QPushButton(lbl); b.setCheckable(True); b.setChecked(True); b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.setStyleSheet("QPushButton { background:#E2E8F0; color:#475569; border:1px solid #94A3B8; border-radius:4px; padding:3px 8px; font-weight:bold; font-size:11px; } QPushButton:checked { background:#0284C7; color:#FFFFFF; }")
+        b.toggled.connect(lambda chk, k=key: self.cad_canvas.osnap_extra.__setitem__(k, chk) if hasattr(self.cad_canvas, "osnap_extra") else None)
+        lay.insertWidget(7 + i, b)
+        self._osnap_extra_btns[key] = b
+XpertStudioMainWindow._build_main_workspace = _ws_v244
+
+_orig_menu_v244 = XpertStudioMainWindow._build_classic_menu_bar
+def _menu_v244(self):
+    _orig_menu_v244(self)
+    for a in self.menuBar().actions():
+        if a.text().replace("&", "").lower() == "draw":
+            m = a.menu()
+            if m is not None:
+                m.addSeparator()
+                act = QAction("Place Circular Column (Ground Floor only)...", self)
+                act.triggered.connect(lambda: self.activate_cad_tool("DRAW_COL_CIRC"))
+                m.addAction(act)
+XpertStudioMainWindow._build_classic_menu_bar = _menu_v244
+
+_orig_rcui_v244 = BeamDesignDetailWidget._build_ui
+def _rcui_v244(self):
+    _orig_rcui_v244(self)
+    row = self.rc_splitter.parentWidget().layout()
+    bar = QHBoxLayout()
+    bar.addWidget(QLabel("Per-Beam MIN Hidden Width (cm):"))
+    self.sp_beam_min_w = QDoubleSpinBox(); self.sp_beam_min_w.setRange(0, 120); self.sp_beam_min_w.setDecimals(0); self.sp_beam_min_w.setSpecialValueText("Project Default"); bar.addWidget(self.sp_beam_min_w)
+    bar.addWidget(QLabel("MIN Drop Depth (cm):"))
+    self.sp_beam_min_h = QDoubleSpinBox(); self.sp_beam_min_h.setRange(0, 150); self.sp_beam_min_h.setDecimals(0); self.sp_beam_min_h.setSpecialValueText("Project Default"); bar.addWidget(self.sp_beam_min_h)
+    btn = QPushButton("Apply Beam Minimums && Re-Design")
+    btn.setStyleSheet("background-color:#0D9488;color:white;font-weight:bold;padding:4px 10px;")
+    btn.clicked.connect(self._apply_beam_mins_v244)
+    bar.addWidget(btn); bar.addStretch(1)
+    w = QWidget(); w.setLayout(bar)
+    row.insertWidget(1, w)
+def _apply_beam_mins_v244(self):
+    idx = self.cb_beam_select.currentIndex()
+    if idx < 0: return
+    bid = str(self.cb_beam_select.itemData(idx))
+    bm = next((b for b in self.studio.current_story_data.get("beams", []) if str(b.get("id")) == bid), None)
+    if bm is None: return
+    wv, hv = self.sp_beam_min_w.value(), self.sp_beam_min_h.value()
+    if wv > 0: bm["min_width_mm"] = wv * 10.0; bm["min_width_mm_user"] = True
+    else: bm.pop("min_width_mm_user", None); bm.pop("min_width_mm", None)
+    if hv > 0: bm["min_depth_mm"] = hv * 10.0; bm["min_depth_mm_user"] = True
+    else: bm.pop("min_depth_mm_user", None); bm.pop("min_depth_mm", None)
+    self.studio.save_and_sync_current_story()
+    self.studio._solve_story_and_refresh_views(select_beam_id=bid)
+BeamDesignDetailWidget._build_ui = _rcui_v244
+BeamDesignDetailWidget._apply_beam_mins_v244 = _apply_beam_mins_v244
+
+_orig_rcsel_v244 = BeamDesignDetailWidget._on_beam_selected
+def _rcsel_v244(self, idx):
+    _orig_rcsel_v244(self, idx)
+    if idx >= 0 and hasattr(self, "sp_beam_min_w"):
+        bid = str(self.cb_beam_select.itemData(idx))
+        bm = next((b for b in self.studio.current_story_data.get("beams", []) if str(b.get("id")) == bid), None)
+        self.sp_beam_min_w.blockSignals(True); self.sp_beam_min_h.blockSignals(True)
+        self.sp_beam_min_w.setValue(float(bm.get("min_width_mm", 0)) / 10.0 if bm and bm.get("min_width_mm_user") else 0)
+        self.sp_beam_min_h.setValue(float(bm.get("min_depth_mm", 0)) / 10.0 if bm and bm.get("min_depth_mm_user") else 0)
+        self.sp_beam_min_w.blockSignals(False); self.sp_beam_min_h.blockSignals(False)
+BeamDesignDetailWidget._on_beam_selected = _rcsel_v244
+
+if __name__ == "__main__":
+    main()

@@ -5756,3 +5756,45 @@ def analyze_all_story_beams_and_columns(story_data, fc_mpa=20.0, fy_mpa=350.0):
         res["post_sizing_drop_conversions"] = list(res.get("post_sizing_drop_conversions", [])) + conv
         res["post_sizing_alerts"] = list(res.get("post_sizing_alerts", [])) + alerts
     return res
+
+
+# ===== v2.4.4 additive: per-story column edit policy (ground master / neck-only ties / read-only upper) =====
+def _col_edit_allowed_v244(story_data, col):
+    sid = str(story_data.get("story_id", "")); st = str(story_data.get("story_type", ""))
+    if col.get("neck"):
+        return st == "tie_beams" or sid.startswith("00_")
+    if st in ("tie_beams", "typical", "standard", "penthouse", "basement") or (sid and not sid.startswith("02_")):
+        return False
+    return True
+
+_COL_LOCK_MSG = "Column Lock: regular columns are edited ONLY on the Ground Floor. Upper stories inherit them (use Modify > Discontinue/Restore). Tie-Beams accept Neck Columns (NC#) only."
+
+_orig_align_v244 = align_element_face_to_reference
+def align_element_face_to_reference(story_data, target_kind, target_id, *a, **k):
+    if str(target_kind) == "column":
+        col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(target_id)), None)
+        if col is not None and not _col_edit_allowed_v244(story_data, col):
+            return False, _COL_LOCK_MSG
+    return _orig_align_v244(story_data, target_kind, target_id, *a, **k)
+
+_orig_movecol_v244 = move_column_and_sync_connected_beams
+def move_column_and_sync_connected_beams(story_data, column_id, new_x, new_y, *a, **k):
+    col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(column_id)), None)
+    if col is not None and not _col_edit_allowed_v244(story_data, col):
+        return False, _COL_LOCK_MSG
+    return _orig_movecol_v244(story_data, column_id, new_x, new_y, *a, **k)
+
+_orig_rotcol_v244 = rotate_column_90_deg
+def rotate_column_90_deg(story_data, column_id, *a, **k):
+    col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(column_id)), None)
+    if col is not None and not _col_edit_allowed_v244(story_data, col):
+        return False, _COL_LOCK_MSG
+    return _orig_rotcol_v244(story_data, column_id, *a, **k)
+
+_orig_del_v244 = delete_selected_element_from_story
+def delete_selected_element_from_story(story_data, kind, element_id):
+    if str(kind) == "column":
+        col = next((c for c in story_data.get("columns", []) if str(c.get("id")) == str(element_id)), None)
+        if col is not None and not _col_edit_allowed_v244(story_data, col):
+            return False, _COL_LOCK_MSG
+    return _orig_del_v244(story_data, kind, element_id)

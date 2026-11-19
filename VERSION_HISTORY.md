@@ -419,3 +419,13 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 - CAD canvas sceneRect bounded to structural items only + fit-on-load/resize (no off-screen overflow).
 - Beam R.C. tab: additional cross-sections under every support and at mid of every span.
 - 34 regression tests (r2: QAction styleSheet guard + flush-contact tolerance & strict clearance in footprint reclamp).
+
+## v2.4.4-structural-bim-pro (2026-11-19)
+- CRITICAL: relocated ALL appended UI overrides BEFORE the `if __name__ == "__main__"` guard so they actually activate at runtime (v2.4.1-v2.4.3 UI features were dead code when launched as script).
+- Post-F5 save + CAD re-render so footprint reclamp / TB renaming persist visually and in DXF.
+- Per-story column policy (r2: legacy-fixture tolerant): ground = master edit; typical/standard/penthouse/basement/ties = locked for regular columns (Discontinue/Restore only); ties accept Neck Columns (NC#, teal, independent counter); Align/Move/Rotate/Delete rejected on locked columns.
+- Tie story slab-thickness spinbox forced 0/disabled; Place Column hidden, Neck Column shown (now effective at runtime).
+- OSNAP extras: Intersection, Shape/Rect Center, Perpendicular foot, Line Extension, Arch Circle Center (+ bottom-bar toggles Int/Cen2/Perp/Ext/Circ).
+- Circular column tool (Draw menu only, ground floor), rendered as circle with sky-blue tag.
+- Tab 3 per-beam MIN hidden width / MIN drop depth inputs (0 = project default) with Apply & Re-Design.
+- 37 regression tests.
