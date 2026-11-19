@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1796,6 +1796,79 @@ class TestXpertStudioEngine(unittest.TestCase):
         s = st["slabs"][0]
         self.assertAlmostEqual(s["clear_min_x"], 0.15, places=3)
         self.assertAlmostEqual(s["clear_max_x"], 4.85, places=3)
+
+
+    def test_v243_min_dimension_floors_hidden_and_drop(self):
+        from xpert_structural_engine import design_beam_aci318
+        bm_h = {"id": "BH", "beam_kind": "hidden", "min_width_mm": 600.0, "initial_width_m": 0.30, "initial_depth_m": 0.30, "spans": [4.0]}
+        res_h = {"max_pos_mu_knm": 20.0, "max_neg_face_mu_knm": -20.0, "max_face_vu_kn": 30.0,
+                 "support_critical_table": [], "span_positive_moments": [{"span_index": 1, "max_pos_mu_knm": 20.0}]}
+        d = design_beam_aci318(bm_h, res_h, 20.0, 350.0, auto_size_section=True)
+        self.assertGreaterEqual(d["b_mm"], 600)
+        bm_d = {"id": "BD", "beam_kind": "drop", "min_depth_mm": 500.0, "initial_width_m": 0.20, "initial_depth_m": 0.40, "spans": [4.0]}
+        d2 = design_beam_aci318(bm_d, res_h, 20.0, 350.0, auto_size_section=True)
+        self.assertGreaterEqual(d2["h_mm"], 500)
+
+    def test_v243_footprint_reclamp_and_drop_when_trapped(self):
+        from xpert_structural_engine import reclamp_beam_full_width_inside_boundary, enforce_beam_footprint_and_cascade
+        st = {"slab_edge_polygon": [[0, 0], [10, 0], [10, 8], [0, 8]],
+              "openings": [{"min_x": 4.0, "max_x": 6.0, "min_y": 3.0, "max_y": 5.0}],
+              "beams": [{"id": "B1", "beam_kind": "hidden", "width_m": 0.40, "start_x": 0.0, "start_y": 3.2, "end_x": 10.0, "end_y": 3.2}],
+              "adopted_slab_thickness_cm": 30.0}
+        ok, shifted, msg = reclamp_beam_full_width_inside_boundary(st, "B1")
+        self.assertTrue(ok)
+        b = st["beams"][0]
+        self.assertTrue(b["start_y"] <= 2.8 or b["start_y"] >= 5.2)
+        st2 = {"slab_edge_polygon": [[0, 0], [10, 0], [10, 8], [0, 8]],
+               "openings": [{"min_x": 0.0, "max_x": 10.0, "min_y": 0.0, "max_y": 7.6}],
+               "beams": [{"id": "B2", "beam_kind": "hidden", "width_m": 0.40, "start_x": 0.0, "start_y": 7.8, "end_x": 10.0, "end_y": 7.8}],
+               "adopted_slab_thickness_cm": 30.0}
+        conv, alerts = enforce_beam_footprint_and_cascade(st2)
+        self.assertIn("B2", conv)
+        self.assertEqual(st2["beams"][0]["beam_kind"], "drop")
+
+    def test_v243_tie_rename_TB_and_purge_and_wall_height(self):
+        import xpert_project_io as pio
+        st = {"story_id": "00_TieBeams", "story_type": "tie_beams",
+              "slabs": [{"id": "S1"}], "openings": [{"id": "OP1"}],
+              "beams": [{"id": "B1", "supports": [{"target_id": "B2"}]}, {"id": "B2", "supports": []}]}
+        master = {"stories": [{"story_type": "standard"}], "story_heights": {"ground_floor_height_m": 3.20}, "loads_and_defaults": {}}
+        pio.migrate_story_to_v243(st, master)
+        self.assertEqual(st["slabs"], []); self.assertEqual(st["openings"], [])
+        self.assertEqual([b["id"] for b in st["beams"]], ["TB1", "TB2"])
+        self.assertEqual(st["beams"][0]["supports"][0]["target_id"], "TB2")
+        self.assertAlmostEqual(st["wall_height_m"], 3.20, places=2)
+
+    def test_v243_no_upper_floor_default_no_walls(self):
+        import xpert_project_io as pio
+        from xpert_structural_engine import ensure_beam_wall_flags
+        st = {"story_id": "02_Ground_Floor", "story_type": "ground", "beams": [{"id": "B1", "spans": [4.0]}]}
+        pio.migrate_story_to_v243(st, {"stories": [], "story_heights": {}, "loads_and_defaults": {}})
+        self.assertEqual(st["wall_load_policy"], "no_walls")
+        self.assertFalse(ensure_beam_wall_flags(st, st["beams"][0])["span_1"])
+
+    def test_v243_column_override_discontinue_and_restore(self):
+        import xpert_project_io as pio
+        m = {"stories": [{"story_id": "02_Ground_Floor"}, {"story_id": "03_Typical_Floor"}], "loads_and_defaults": {}}
+        pio.set_column_story_override(m, "C1", "03_Typical_Floor", active=False)
+        self.assertFalse(m["column_overrides"]["C1"]["03_Typical_Floor"]["active"])
+        pio.restore_column_in_upper_stories(m, "C1")
+        self.assertTrue(m["column_overrides"]["C1"]["03_Typical_Floor"]["active"])
+
+    def test_v243_minimum_dimensions_persist_to_stories_and_beams(self):
+        import xpert_project_io as pio, json, os
+        cfg = {"project_name": "MinDim243", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.2,
+               "floors_above_ground": 1, "include_basement": False, "include_penthouse": False}
+        m = pio.initialize_studio_project(cfg)
+        g = next(s for s in m["stories"] if s["story_id"] == "02_Ground_Floor")
+        sd = json.load(open(g["json_file"], encoding="utf-8"))
+        sd["beams"] = [{"id": "B1", "beam_kind": "hidden", "spans": [4.0]}]
+        json.dump(sd, open(g["json_file"], "w", encoding="utf-8"), indent=2)
+        pio.update_minimum_dimensions(m, 60.0, 50.0, 0.25, 0.50, 1.0, 1.0, 0.4)
+        sd2 = json.load(open(g["json_file"], encoding="utf-8"))
+        self.assertEqual(sd2["hollow_block"]["min_b_hidden_mm"], 600.0)
+        self.assertEqual(sd2["beams"][0]["min_width_mm"], 600.0)
+        self.assertEqual(sd2["minimum_dimensions"]["column_min_b_m"], 0.25)
 
 
 if __name__ == "__main__":

@@ -409,3 +409,13 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 - Slab clear bounds flush to ACTUAL beam widths (closes rib/beam gaps).
 - CAD canvas sceneRect bounded + fit-on-load (no off-screen overflow).
 - 28 regression tests.
+
+## v2.4.3-structural-bim-pro (2026-11-19)
+- Full-width beam footprint containment inside boundary AND outside openings after every width change; trapped hidden beams auto-convert to Drop + carrier cascade.
+- Minimum Dimensions dialog under Options (hidden width 30cm, drop depth 40cm, column 0.20x0.40, footing dims) project-wide + per-element floor respected by design.
+- Tie-beam plan: beams renamed TB#, slabs/openings purged, wall height = ground floor height; slab tools visually frozen (QAction-safe); Place Column swapped to Neck Column (ties only, own footing).
+- Ground roof wall load defaults OFF when no upper floors (per-span checkbox still available); wall heights read from master story heights.
+- Column lifecycle: discontinue/restore in upper stories via Modify menu; cross-story Undo/Redo re-propagation.
+- CAD canvas sceneRect bounded to structural items only + fit-on-load/resize (no off-screen overflow).
+- Beam R.C. tab: additional cross-sections under every support and at mid of every span.
+- 34 regression tests (r2: QAction styleSheet guard + flush-contact tolerance & strict clearance in footprint reclamp).

@@ -5645,3 +5645,114 @@ def ensure_beam_wall_flags(story_data, beam):
         if k not in thick: thick[k] = default_t_cm
         else: thick[k] = snap_standard_wall_thickness_cm(thick[k])
     return flags
+
+
+# ===== v2.4.3-r2 additive: full-width footprint containment + min-dimension floors =====
+def reclamp_beam_full_width_inside_boundary(story_data, beam_id):
+    bm = next((b for b in story_data.get("beams", []) if str(b.get("id")) == str(beam_id)), None)
+    if bm is None: return True, False, ""
+    has_bnd, minx, miny, maxx, maxy = get_slab_bounding_box(story_data.get("slab_edge_polygon", []))
+    ops = story_data.get("openings", [])
+    hw = float(bm.get("width_m", 0.30)) / 2.0
+    sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+    ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+    horiz = abs(ex - sx) >= abs(ey - sy)
+    shifted = False
+    TOL = 1e-4
+    if horiz:
+        lo = (miny + hw) if has_bnd else sy - hw
+        hi = (maxy - hw) if has_bnd else sy + hw
+        xlo, xhi = min(sx, ex), max(sx, ex)
+        for _pass in range(3):
+            moved = False
+            for op in ops:
+                oxlo, oxhi = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
+                oylo, oyhi = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
+                if min(xhi, oxhi) - max(xlo, oxlo) < 0.30: continue
+                if (sy - hw) <= oyhi + TOL and (sy + hw) >= oylo - TOL:
+                    opts = [c for c in (oylo - hw, oyhi + hw) if lo + TOL <= c <= hi - TOL]
+                    if not opts: return False, shifted, "trapped between boundary/opening"
+                    ny = min(opts, key=lambda c: abs(c - sy))
+                    if abs(ny - sy) > 1e-9:
+                        sy = ny; ey = sy; moved = True; shifted = True
+            if not moved: break
+        if has_bnd:
+            cl = min(max(sy, lo), hi)
+            if abs(cl - sy) > 1e-6: sy = ey = round(cl, 3); shifted = True
+        bm["start_y"] = bm["end_y"] = round(sy, 3)
+    else:
+        lo = (minx + hw) if has_bnd else sx - hw
+        hi = (maxx - hw) if has_bnd else sx + hw
+        ylo, yhi = min(sy, ey), max(sy, ey)
+        for _pass in range(3):
+            moved = False
+            for op in ops:
+                oxlo, oxhi = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
+                oylo, oyhi = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
+                if min(yhi, oyhi) - max(ylo, oylo) < 0.30: continue
+                if (sx - hw) <= oxhi + TOL and (sx + hw) >= oxlo - TOL:
+                    opts = [c for c in (oxlo - hw, oxhi + hw) if lo + TOL <= c <= hi - TOL]
+                    if not opts: return False, shifted, "trapped between boundary/opening"
+                    nx = min(opts, key=lambda c: abs(c - sx))
+                    if abs(nx - sx) > 1e-9:
+                        sx = nx; ex = sx; moved = True; shifted = True
+            if not moved: break
+        if has_bnd:
+            cl = min(max(sx, lo), hi)
+            if abs(cl - sx) > 1e-6: sx = ex = round(cl, 3); shifted = True
+        bm["start_x"] = bm["end_x"] = round(sx, 3)
+    return True, shifted, "shifted full width inside boundary/openings" if shifted else ""
+
+def enforce_beam_footprint_and_cascade(story_data):
+    converted, alerts = [], []
+    slab_h = max(0.25, float(story_data.get("adopted_slab_thickness_cm", 30.0)) / 100.0)
+    for bm in list(story_data.get("beams", [])):
+        bid = str(bm.get("id", ""))
+        ok, shifted, msg = reclamp_beam_full_width_inside_boundary(story_data, bid)
+        kind = "drop" if "drop" in str(bm.get("beam_kind", bm.get("kind", "hidden"))).lower() else "hidden"
+        if not ok and kind == "hidden":
+            bm["beam_kind"] = "drop"; bm["kind"] = "drop"
+            bm["width_m"] = 0.20
+            bm["depth_m"] = _snap_drop_depth_m(max(0.40, slab_h), 0.40)
+            bm["initial_width_m"] = 0.20; bm["initial_depth_m"] = bm["depth_m"]
+            bm.pop("manual_loads_override", None)
+            converted.append(bid)
+            alerts.append(f"Boundary/Opening Footprint Rule: Beam {bid} converted to Drop (0.20x{bm['depth_m']:.2f}m) - no room to expand as Hidden.")
+            _log_eng("FOOTPRINT_DROP_FORCE", alerts[-1], {"beam_id": bid})
+        elif shifted:
+            reconcile_all_story_beams_supports_and_spans(story_data)
+    if converted:
+        c2, a2 = enforce_opening_adjacent_drop_beams_and_cascade(story_data)
+        converted.extend([c for c in c2 if c not in converted]); alerts.extend(a2)
+    return converted, alerts
+
+_orig_design_v243 = design_beam_aci318
+def design_beam_aci318(beam, analysis_res, fc_mpa=20.0, fy_mpa=350.0, **kw):
+    kind = str(beam.get("beam_kind", "hidden")).lower()
+    if kind == "hidden":
+        floor = float(beam.get("min_width_mm", 300.0))
+        if kw.get("auto_size_section", True) and not beam.get("lock_section_dimensions", False):
+            beam["initial_width_m"] = max(float(beam.get("initial_width_m", 0.30)), floor / 1000.0)
+    else:
+        floor = float(beam.get("min_depth_mm", 400.0))
+        if kw.get("auto_size_section", True) and not beam.get("lock_section_dimensions", False):
+            beam["initial_depth_m"] = max(float(beam.get("initial_depth_m", 0.40)), floor / 1000.0)
+    res = _orig_design_v243(beam, analysis_res, fc_mpa, fy_mpa, **kw)
+    if kind == "hidden":
+        f = float(beam.get("min_width_mm", 300.0))
+        if float(res.get("b_mm", 0)) < f:
+            res["b_mm"] = round(f); beam["width_m"] = round(f / 1000.0, 3)
+    else:
+        f = float(beam.get("min_depth_mm", 400.0))
+        if float(res.get("h_mm", 0)) < f:
+            res["h_mm"] = round(f); beam["depth_m"] = round(f / 1000.0, 3)
+    return res
+
+_orig_analyze_v243 = analyze_all_story_beams_and_columns
+def analyze_all_story_beams_and_columns(story_data, fc_mpa=20.0, fy_mpa=350.0):
+    res = _orig_analyze_v243(story_data, fc_mpa, fy_mpa)
+    conv, alerts = enforce_beam_footprint_and_cascade(story_data)
+    if conv:
+        res["post_sizing_drop_conversions"] = list(res.get("post_sizing_drop_conversions", [])) + conv
+        res["post_sizing_alerts"] = list(res.get("post_sizing_alerts", [])) + alerts
+    return res

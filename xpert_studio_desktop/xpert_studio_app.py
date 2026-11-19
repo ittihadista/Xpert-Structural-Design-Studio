@@ -6384,3 +6384,243 @@ def _zoom2(self):
     self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 StructuralCadCanvas2D.zoom_extents = _zoom2
+
+
+# ===== v2.4.3-structural-bim-pro additive upgrades (no visual/style changes to approved elements) =====
+class MinimumDimensionsDialog(QDialog):
+    def __init__(self, parent_studio, master):
+        super().__init__(parent_studio)
+        self.studio = parent_studio; self.master = master
+        self.setWindowTitle("Minimum Dimensions (project-wide defaults, per-element overridable)")
+        self.setMinimumWidth(460); self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        ld = master.get("loads_and_defaults", {})
+        vb = QVBoxLayout(self); form = QFormLayout()
+        def sp(val, lo, hi, step, suf):
+            s = QDoubleSpinBox(); s.setRange(lo, hi); s.setSingleStep(step); s.setValue(float(val)); s.setSuffix(suf); return s
+        self.sp_hw = sp(ld.get("hidden_beam_min_width_cm", 30.0), 20, 80, 5, " cm")
+        self.sp_dd = sp(ld.get("drop_beam_min_depth_cm", 40.0), 30, 100, 5, " cm")
+        self.sp_cb = sp(ld.get("column_min_b_m", 0.20), 0.15, 1.0, 0.05, " m")
+        self.sp_ch = sp(ld.get("column_min_h_m", 0.40), 0.20, 1.5, 0.05, " m")
+        self.sp_fb = sp(ld.get("footing_min_b_m", 0.80), 0.5, 4.0, 0.1, " m")
+        self.sp_fh = sp(ld.get("footing_min_h_m", 0.80), 0.5, 4.0, 0.1, " m")
+        self.sp_ft = sp(ld.get("footing_min_t_m", 0.30), 0.2, 1.5, 0.05, " m")
+        form.addRow("Hidden Beam MIN width:", self.sp_hw)
+        form.addRow("Drop Beam MIN depth:", self.sp_dd)
+        form.addRow("Column MIN b:", self.sp_cb)
+        form.addRow("Column MIN h:", self.sp_ch)
+        form.addRow("Footing MIN B:", self.sp_fb)
+        form.addRow("Footing MIN H:", self.sp_fh)
+        form.addRow("Footing MIN thickness:", self.sp_ft)
+        vb.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._save); bb.rejected.connect(self.reject); vb.addWidget(bb)
+    def _save(self):
+        import xpert_project_io as _pio
+        _pio.update_minimum_dimensions(self.master, self.sp_hw.value(), self.sp_dd.value(),
+                                       self.sp_cb.value(), self.sp_ch.value(),
+                                       self.sp_fb.value(), self.sp_fh.value(), self.sp_ft.value())
+        self.studio._populate_story_selector(); self.studio.refresh_story_ui()
+        self.accept()
+
+def _open_min_dims(self):
+    if not self.master_project:
+        QMessageBox.information(self, "Minimum Dimensions", "Open a project first."); return
+    MinimumDimensionsDialog(self, self.master_project).exec()
+XpertStudioMainWindow.open_minimum_dimensions_dialog = _open_min_dims
+
+def _discontinue_col_upper(self):
+    import xpert_project_io as _pio
+    ids = [i for k, i in self.cad_canvas.selected_items if k == "column"]
+    if not ids:
+        QMessageBox.information(self, "Discontinue Column", "Select a ground-floor column first."); return
+    for cid in ids:
+        for s in self.master_project.get("stories", []):
+            sid = s.get("story_id", "")
+            if not sid.startswith("02_") and not sid.startswith("00_"):
+                _pio.set_column_story_override(self.master_project, cid, sid, active=False)
+    _pio.propagate_ground_columns_to_all_stories(self.master_project, self.current_story_data.get("columns", []))
+    self.refresh_story_ui(); self.update_contextual_prompt(f"Discontinued {', '.join(ids)} in upper stories (Undo restores).")
+XpertStudioMainWindow.discontinue_selected_column_upper = _discontinue_col_upper
+
+def _restore_col_upper(self):
+    import xpert_project_io as _pio
+    ids = [i for k, i in self.cad_canvas.selected_items if k == "column"]
+    if not ids:
+        QMessageBox.information(self, "Restore Column", "Select a ground-floor column first."); return
+    for cid in ids:
+        _pio.restore_column_in_upper_stories(self.master_project, cid)
+    _pio.propagate_ground_columns_to_all_stories(self.master_project, self.current_story_data.get("columns", []))
+    self.refresh_story_ui(); self.update_contextual_prompt(f"Restored {', '.join(ids)} in upper stories.")
+XpertStudioMainWindow.restore_selected_column_upper = _restore_col_upper
+
+_orig_menu_v243 = XpertStudioMainWindow._build_classic_menu_bar
+def _menu_v243(self):
+    _orig_menu_v243(self)
+    for a in self.menuBar().actions():
+        t = a.text().replace("&", "").lower()
+        if t == "options":
+            m = a.menu()
+            if m is not None:
+                m.addSeparator()
+                act = QAction("Minimum Dimensions...", self)
+                act.triggered.connect(self.open_minimum_dimensions_dialog); m.addAction(act)
+        elif t == "modify":
+            m = a.menu()
+            if m is not None:
+                m.addSeparator()
+                a1 = QAction("Discontinue Selected Column in Upper Stories", self)
+                a1.triggered.connect(self.discontinue_selected_column_upper); m.addAction(a1)
+                a2 = QAction("Restore Selected Column in Upper Stories", self)
+                a2.triggered.connect(self.restore_selected_column_upper); m.addAction(a2)
+XpertStudioMainWindow._build_classic_menu_bar = _menu_v243
+
+_orig_tb_v243 = XpertStudioMainWindow._build_separated_toolbars
+def _tb_v243(self):
+    _orig_tb_v243(self)
+    btns = self.draw_tb.findChildren(QPushButton)
+    self._btn_place_col = next((b for b in btns if b.text().strip().startswith("2.")), None)
+    self._btn_neck_col = QPushButton("2. Neck Column (Ties)")
+    self._btn_neck_col.setMinimumHeight(30); self._btn_neck_col.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    self._btn_neck_col.setStyleSheet("background-color:#0D9488;color:white;font-weight:bold;")
+    self._btn_neck_col.clicked.connect(lambda: self.activate_cad_tool("DRAW_NECK_COL"))
+    target = None
+    for a in self.draw_tb.actions():
+        w = a.defaultWidget() if hasattr(a, "defaultWidget") else None
+        if w is self._btn_place_col: target = a; break
+    if target is not None: self.draw_tb.insertWidget(target, self._btn_neck_col)
+    else: self.draw_tb.addWidget(self._btn_neck_col)
+    self._btn_neck_col.setVisible(False)
+XpertStudioMainWindow._build_separated_toolbars = _tb_v243
+
+_orig_story_v243 = XpertStudioMainWindow._on_story_changed
+def _story_v243(self, idx):
+    _orig_story_v243(self, idx)
+    import xpert_project_io as _pio
+    if self.master_project and self.current_story_data:
+        _pio.migrate_story_to_v243(self.current_story_data, self.master_project)
+    tie = self.is_tie_beams_story()
+    if getattr(self, "_btn_place_col", None) is not None: self._btn_place_col.setVisible(not tie)
+    if getattr(self, "_btn_neck_col", None) is not None: self._btn_neck_col.setVisible(tie)
+    for w in self._slab_only_widgets:
+        if hasattr(w, "styleSheet"):
+            if not hasattr(w, "_orig_ss_v243"): w._orig_ss_v243 = w.styleSheet()
+            w.setStyleSheet("background-color:#E2E8F0;color:#94A3B8;border:1px solid #CBD5E1;" if tie else w._orig_ss_v243)
+        w.setEnabled(not tie)
+    self.cad_canvas.zoom_extents()
+XpertStudioMainWindow._on_story_changed = _story_v243
+
+_orig_load_v243 = XpertStudioMainWindow.load_project_from_file
+def _load_v243(self, path):
+    _orig_load_v243(self, path)
+    if self.master_project:
+        import xpert_project_io as _pio
+        _pio.migrate_master_to_v243(self.master_project)
+        self._populate_story_selector()
+XpertStudioMainWindow.load_project_from_file = _load_v243
+
+_orig_undo_v243 = XpertStudioMainWindow.undo_action
+def _undo_v243(self):
+    _orig_undo_v243(self)
+    if self.master_project and str(self.current_story_data.get("story_id", "")) == "02_Ground_Floor":
+        import xpert_project_io as _pio
+        _pio.propagate_ground_columns_to_all_stories(self.master_project, self.current_story_data.get("columns", []))
+XpertStudioMainWindow.undo_action = _undo_v243
+_orig_redo_v243 = XpertStudioMainWindow.redo_action
+def _redo_v243(self):
+    _orig_redo_v243(self)
+    if self.master_project and str(self.current_story_data.get("story_id", "")) == "02_Ground_Floor":
+        import xpert_project_io as _pio
+        _pio.propagate_ground_columns_to_all_stories(self.master_project, self.current_story_data.get("columns", []))
+XpertStudioMainWindow.redo_action = _redo_v243
+
+_orig_click_v243 = StructuralCadCanvas2D._handle_left_click_at
+def _click_v243(self, sx, sy, raw_x, raw_y, snap_type):
+    if self.active_tool == "DRAW_NECK_COL":
+        if not self.studio.is_tie_beams_story():
+            self.studio.update_contextual_prompt("Neck Columns are allowed ONLY on the Tie-Beams story."); return
+        story = self.studio.current_story_data
+        cols = story.setdefault("columns", [])
+        nid = f"NC{sum(1 for c in cols if str(c.get('id','')).startswith('NC')) + 1}"
+        ld = (self.studio.master_project or {}).get("loads_and_defaults", {})
+        b = float(ld.get("column_min_b_m", 0.20)); h = float(ld.get("column_min_h_m", 0.40))
+        cols.append({"id": nid, "x": sx, "y": sy, "b_m": b, "h_m": h, "active": True, "neck": True, "room_bounding": True})
+        self.studio.save_and_sync_current_story(); self.studio.refresh_story_ui()
+        self.studio.update_contextual_prompt(f"Placed Neck Column {nid} (carries tie beams only, stops here, own footing).")
+        return
+    _orig_click_v243(self, sx, sy, raw_x, raw_y, snap_type)
+StructuralCadCanvas2D._handle_left_click_at = _click_v243
+
+def _zoom_v243(self):
+    story = self.studio.current_story_data
+    s = self.scale_px
+    xs, ys = [], []
+    for p in story.get("slab_edge_polygon", []): xs.append(float(p[0])); ys.append(float(p[1]))
+    for c in story.get("columns", []):
+        if c.get("active", True):
+            xs += [float(c["x"]) - float(c.get("b_m", 0.2)) / 2, float(c["x"]) + float(c.get("b_m", 0.2)) / 2]
+            ys += [float(c["y"]) - float(c.get("h_m", 0.4)) / 2, float(c["y"]) + float(c.get("h_m", 0.4)) / 2]
+    for b in story.get("beams", []):
+        xs += [float(b.get("start_x", 0)), float(b.get("end_x", 0))]; ys += [float(b.get("start_y", 0)), float(b.get("end_y", 0))]
+    for sl in story.get("slabs", []):
+        if "min_x" in sl: xs += [float(sl["min_x"]), float(sl["max_x"])]; ys += [float(sl["min_y"]), float(sl["max_y"])]
+    for d in story.get("dimensions", []):
+        xs += [float(d.get("dx1", d.get("x1", 0))), float(d.get("dx2", d.get("x2", 0)))]
+        ys += [float(d.get("dy1", d.get("y1", 0))), float(d.get("dy2", d.get("y2", 0)))]
+    self.resetTransform()
+    if xs and ys:
+        m = 1.5
+        r = QRectF((min(xs) - m) * s, -(max(ys) + m) * s, (max(xs) - min(xs) + 2 * m) * s, (max(ys) - min(ys) + 2 * m) * s)
+    else:
+        r = QRectF(-2 * s, -12 * s, 16 * s, 14 * s)
+    self.scene_2d.setSceneRect(r.adjusted(-2 * s, -2 * s, 2 * s, 2 * s))
+    self.fitInView(r, Qt.AspectRatioMode.KeepAspectRatio)
+    self.centerOn(r.center())
+    self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+StructuralCadCanvas2D.zoom_extents = _zoom_v243
+
+_orig_resize_v243 = StructuralCadCanvas2D.resizeEvent
+def _resize_v243(self, e):
+    _orig_resize_v243(self, e)
+    self.zoom_extents()
+StructuralCadCanvas2D.resizeEvent = _resize_v243
+
+_orig_rc_v243 = BeamDesignDetailWidget._draw_beam_rc_canvas
+def _rc_v243(self, bid, bm, res, des):
+    _orig_rc_v243(self, bid, bm, res, des)
+    sc = self.rc_scene
+    base = sc.sceneRect().bottom() + 40
+    sup = des.get("support_designs", []); spans = des.get("span_designs", [])
+    b_mm = float(des.get("b_mm", 400)); h_mm = float(des.get("h_mm", 300))
+    sc_w = max(90.0, min(150.0, b_mm * 0.22)); sc_h = max(90.0, min(150.0, h_mm * 0.22))
+    nbs = max(2, int(des.get("n_max_per_layer", 6)))
+    nbot_cont = int(des.get("n_bars_min_cont", des.get("bottom_n_bars", 2)))
+    ntop_cont = int(des.get("n_min_cont", des.get("top_n_bars", 2)))
+    x = 40.0
+    seq = []
+    for i in range(max(len(sup), len(spans))):
+        if i < len(sup): seq.append(("sup", i))
+        if i < len(spans): seq.append(("span", i))
+    for kind, i in seq:
+        if kind == "sup":
+            s = sup[i]; label = f"Sec @ {s.get('target_id', 'C')}"; nt = int(s.get("top_n_bars", ntop_cont)); nb = nbot_cont
+            stir = s.get("stirrups_end", des.get("stirrups", ""))
+        else:
+            s = spans[i]; label = f"Sec Mid-Span {s.get('span_index', i + 1)}"; nt = ntop_cont; nb = int(s.get("bottom_n_bars", nbot_cont))
+            stir = s.get("stirrups", des.get("stirrups", ""))
+        sc.addRect(QRectF(x, base, sc_w, sc_h), QPen(QColor("#0F172A"), 2), QBrush(QColor("#F1F5F9")))
+        sc.addRect(QRectF(x + 8, base + 8, sc_w - 16, sc_h - 16), QPen(QColor("#059669"), 1.6), QBrush(Qt.BrushStyle.NoBrush))
+        def row(n, top):
+            rem = n; r = 0
+            while rem > 0 and r < 3:
+                nr = min(rem, nbs); ry = base + 12 + r * 12 if top else base + sc_h - 18 - r * 12
+                for k in range(nr):
+                    bx = x + 12 + (sc_w - 24) * (k / max(1, nr - 1)) if nr > 1 else x + sc_w / 2
+                    sc.addEllipse(QRectF(bx - 3.5, ry, 7, 7), QPen(QColor("#991B1B" if top else "#0369A1"), 1), QBrush(QColor("#DC2626" if top else "#0284C7")))
+                rem -= nr; r += 1
+        row(nt, True); row(nb, False)
+        t = sc.addText(label, QFont("Arial", 8, QFont.Weight.Bold)); t.setDefaultTextColor(QColor("#0B3C5D")); t.setPos(x, base - 18)
+        t2 = sc.addText(f"Top {nt} / Bot {nb}\n{stir}", QFont("Arial", 7)); t2.setPos(x, base + sc_h + 4)
+        x += sc_w + 40
+    sc.setSceneRect(sc.itemsBoundingRect().adjusted(-20, -20, 20, 60))
+BeamDesignDetailWidget._draw_beam_rc_canvas = _rc_v243

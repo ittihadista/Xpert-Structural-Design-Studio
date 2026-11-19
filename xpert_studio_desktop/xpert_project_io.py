@@ -29,7 +29,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.4.2-structural-bim-pro"
+STUDIO_VERSION = "v2.4.3-structural-bim-pro"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
@@ -1421,3 +1421,119 @@ def update_min_sections(master, hidden_width_cm, drop_depth_cm):
         with open(mf, "w", encoding="utf-8") as f: _j.dump(master, f, indent=2)
     log_studio_event("MIN_SECTIONS", f"Hidden min width={hidden_width_cm}cm, Drop min depth={drop_depth_cm}cm")
     return master
+
+
+# ===== v2.4.3 additive: migration, minimum dimensions, column lifecycle =====
+def migrate_story_to_v243(story, master):
+    ld = (master or {}).get("loads_and_defaults", {})
+    sh = (master or {}).get("story_heights", {})
+    hb = story.setdefault("hollow_block", {})
+    hw_cm = float(ld.get("hidden_beam_min_width_cm", 30.0))
+    dd_cm = float(ld.get("drop_beam_min_depth_cm", 40.0))
+    hb["min_b_hidden_mm"] = hw_cm * 10.0
+    hb["min_h_drop_mm"] = dd_cm * 10.0
+    n_upper = sum(1 for s in (master or {}).get("stories", []) if s.get("story_type") in ("typical", "standard", "penthouse"))
+    story["has_upper_floors"] = bool(n_upper > 0)
+    st = str(story.get("story_type", ""))
+    is_tie = (st == "tie_beams") or str(story.get("story_id", "")).startswith("00_")
+    if is_tie:
+        story["slabs"] = []; story["openings"] = []
+        story["adopted_slab_thickness_cm"] = 0.0; story["slab_factored_wu_kpa"] = 0.0
+        hb["factored_wu_kpa"] = 0.0; hb["total_thickness_cm"] = 0.0
+        story["wall_height_m"] = float(sh.get("ground_floor_height_m", 3.20))
+        story["beam_id_prefix"] = "TB"
+        remap = {}
+        for bm in story.get("beams", []):
+            old = str(bm.get("id", ""))
+            if old.startswith("B") and not old.startswith("TB"):
+                remap[old] = "TB" + old[1:]
+        for bm in story.get("beams", []):
+            old = str(bm.get("id", ""))
+            if old in remap: bm["id"] = remap[old]
+            for sup in bm.get("supports", []):
+                t = str(sup.get("target_id", ""))
+                if t in remap: sup["target_id"] = remap[t]
+    elif st == "ground":
+        story["wall_height_m"] = float(sh.get("upper_floor_height_m", 3.00)) if story["has_upper_floors"] else float(story.get("wall_height_m", 1.50))
+        if "wall_load_policy" not in story:
+            story["wall_load_policy"] = "all_beams" if story["has_upper_floors"] else "no_walls"
+    if "wall_load_policy" not in story:
+        story["wall_load_policy"] = "all_beams"
+    for bm in story.get("beams", []):
+        if not bm.get("min_width_mm_user"): bm["min_width_mm"] = hw_cm * 10.0
+        if not bm.get("min_depth_mm_user"): bm["min_depth_mm"] = dd_cm * 10.0
+    story["minimum_dimensions"] = {
+        "hidden_beam_min_width_cm": hw_cm, "drop_beam_min_depth_cm": dd_cm,
+        "column_min_b_m": float(ld.get("column_min_b_m", 0.20)), "column_min_h_m": float(ld.get("column_min_h_m", 0.40)),
+        "footing_min_b_m": float(ld.get("footing_min_b_m", 0.80)), "footing_min_h_m": float(ld.get("footing_min_h_m", 0.80)),
+        "footing_min_t_m": float(ld.get("footing_min_t_m", 0.30)),
+    }
+    return story
+
+def migrate_master_to_v243(master):
+    import json as _j
+    ld = (master or {}).setdefault("loads_and_defaults", {})
+    ld.setdefault("hidden_beam_min_width_cm", 30.0); ld.setdefault("drop_beam_min_depth_cm", 40.0)
+    ld.setdefault("column_min_b_m", 0.20); ld.setdefault("column_min_h_m", 0.40)
+    ld.setdefault("footing_min_b_m", 0.80); ld.setdefault("footing_min_h_m", 0.80); ld.setdefault("footing_min_t_m", 0.30)
+    for s in (master or {}).get("stories", []):
+        jp = s.get("json_file", "")
+        if jp and os.path.isfile(jp):
+            with open(jp, encoding="utf-8") as f: sd = _j.load(f)
+            migrate_story_to_v243(sd, master)
+            with open(jp, "w", encoding="utf-8") as f: _j.dump(sd, f, indent=2)
+    return master
+
+def update_minimum_dimensions(master, hidden_cm, drop_cm, col_b, col_h, foot_b, foot_h, foot_t):
+    import json as _j
+    ld = master.setdefault("loads_and_defaults", {})
+    ld.update({"hidden_beam_min_width_cm": float(hidden_cm), "drop_beam_min_depth_cm": float(drop_cm),
+               "column_min_b_m": float(col_b), "column_min_h_m": float(col_h),
+               "footing_min_b_m": float(foot_b), "footing_min_h_m": float(foot_h), "footing_min_t_m": float(foot_t)})
+    for s in master.get("stories", []):
+        jp = s.get("json_file", "")
+        if jp and os.path.isfile(jp):
+            with open(jp, encoding="utf-8") as f: sd = _j.load(f)
+            migrate_story_to_v243(sd, master)
+            with open(jp, "w", encoding="utf-8") as f: _j.dump(sd, f, indent=2)
+    mf = master.get("master_file", "")
+    if mf:
+        with open(mf, "w", encoding="utf-8") as f: _j.dump(master, f, indent=2)
+    log_studio_event("MIN_DIMENSIONS", f"Hidden>={hidden_cm}cm Drop>={drop_cm}cm Col>={col_b}x{col_h}m Foot>={foot_b}x{foot_h}x{foot_t}m")
+    return master
+
+def set_column_story_override(master, col_id, story_id, active=None, b_m=None, h_m=None):
+    ov = master.setdefault("column_overrides", {}).setdefault(str(col_id), {}).setdefault(str(story_id), {})
+    if active is not None: ov["active"] = bool(active)
+    if b_m is not None: ov["b_m"] = float(b_m)
+    if h_m is not None: ov["h_m"] = float(h_m)
+    return master
+
+def restore_column_in_upper_stories(master, col_id):
+    for sid, ov in master.get("column_overrides", {}).get(str(col_id), {}).items():
+        if not sid.startswith("02_") and not sid.startswith("00_"):
+            ov["active"] = True
+    return master
+
+_orig_propagate_v243 = propagate_ground_columns_to_all_stories
+def propagate_ground_columns_to_all_stories(master_payload, ground_columns):
+    import json as _j
+    _orig_propagate_v243(master_payload, ground_columns)
+    ov_all = (master_payload or {}).get("column_overrides", {})
+    for s in (master_payload or {}).get("stories", []):
+        sid = s.get("story_id", "")
+        if sid == "02_Ground_Floor": continue
+        jp = s.get("json_file", "")
+        if not jp or not os.path.isfile(jp): continue
+        with open(jp, encoding="utf-8") as f: sd = _j.load(f)
+        changed = False
+        for c in sd.get("columns", []):
+            ov = ov_all.get(str(c.get("id")), {}).get(sid)
+            if ov:
+                if "active" in ov: c["active"] = bool(ov["active"]); changed = True
+                if "b_m" in ov: c["b_m"] = float(ov["b_m"]); changed = True
+                if "h_m" in ov: c["h_m"] = float(ov["h_m"]); changed = True
+        if changed:
+            with open(jp, "w", encoding="utf-8") as f: _j.dump(sd, f, indent=2)
+            if s.get("dxf_file"): sync_story_to_dxf(sd, s["dxf_file"])
+    return None
