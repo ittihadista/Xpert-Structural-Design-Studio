@@ -29,7 +29,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.4.6-structural-bim-pro"
+STUDIO_VERSION = "v2.4.7-structural-bim-pro"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None

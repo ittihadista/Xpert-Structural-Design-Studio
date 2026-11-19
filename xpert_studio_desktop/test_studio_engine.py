@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1988,6 +1988,100 @@ class TestXpertStudioEngine(unittest.TestCase):
             win.hide()
         except ModuleNotFoundError:
             pass
+
+
+    def test_v247_single_column_slot_per_story_after_show(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication, QPushButton
+            import xpert_project_io as pio
+            from xpert_studio_app import XpertStudioMainWindow
+            _app = QApplication.instance() or QApplication([])
+            cfg = {"project_name": "Slot247", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.2,
+                   "include_basement": True, "floors_above_ground": 2, "upper_floors_mode": "distinct",
+                   "include_penthouse": False}
+            m = pio.initialize_studio_project(cfg)
+            win = XpertStudioMainWindow(initial_master_project=m)
+            win.show(); _app.processEvents()
+            expect = {"00_TieBeams": "2. Neck Column (Ties)", "01_Basement_Slab": "2. Column (Basement-only)",
+                      "02_Ground_Floor": "2. Place Column"}
+            for idx in range(len(m["stories"])):
+                win.cb_story.setCurrentIndex(idx); _app.processEvents()
+                sid = win.current_story_data.get("story_id")
+                vis = [b.text() for b in win.draw_tb.findChildren(QPushButton)
+                       if b.isVisible() and b.text().strip().startswith("2.")]
+                self.assertEqual(vis, [expect.get(sid, "2. Edit Columns")])
+            win.hide()
+        except ModuleNotFoundError:
+            pass
+
+    def test_v247_continuity_ok_reloads_memory_and_hides_column(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            import xpert_project_io as pio, json
+            from xpert_studio_app import XpertStudioMainWindow, EditColumnsDialog
+            _app = QApplication.instance() or QApplication([])
+            cfg = {"project_name": "Cont247", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.2,
+                   "include_basement": False, "floors_above_ground": 1, "upper_floors_mode": "distinct",
+                   "include_penthouse": False}
+            m = pio.initialize_studio_project(cfg)
+            g = next(s for s in m["stories"] if s["story_id"] == "02_Ground_Floor")
+            gcols = [{"id": "C1", "x": 1.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                     {"id": "C2", "x": 4.0, "y": 1.0, "b_m": 0.2, "h_m": 0.4, "active": True}]
+            sdg = json.load(open(g["json_file"], encoding="utf-8")); sdg["columns"] = gcols
+            json.dump(sdg, open(g["json_file"], "w", encoding="utf-8"), indent=2)
+            pio.propagate_ground_columns_to_all_stories(m, gcols)
+            win = XpertStudioMainWindow(initial_master_project=m)
+            win.show(); _app.processEvents()
+            uidx = next(i for i, s in enumerate(m["stories"]) if s.get("story_type") in ("typical", "standard"))
+            win.cb_story.setCurrentIndex(uidx); _app.processEvents()
+            dlg = EditColumnsDialog(win)
+            for i in range(dlg.tbl.rowCount()):
+                if dlg.tbl.item(i, 0).text() == "C1":
+                    dlg.tbl.cellWidget(i, 1).setCurrentIndex(1)
+            dlg._save(); _app.processEvents()
+            flags = {c["id"]: c.get("active", True) for c in win.current_story_data["columns"]}
+            self.assertFalse(flags["C1"])
+            self.assertTrue(flags["C2"])
+            win.hide()
+        except ModuleNotFoundError:
+            pass
+
+    def test_v247_slot_dispatch_neck_and_edit(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            import xpert_project_io as pio
+            from xpert_studio_app import XpertStudioMainWindow
+            _app = QApplication.instance() or QApplication([])
+            cfg = {"project_name": "Disp247", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.2,
+                   "include_basement": False, "floors_above_ground": 1, "upper_floors_mode": "distinct",
+                   "include_penthouse": False}
+            m = pio.initialize_studio_project(cfg)
+            win = XpertStudioMainWindow(initial_master_project=m)
+            win.show(); _app.processEvents()
+            win.cb_story.setCurrentIndex(0); _app.processEvents()
+            win._btn_place_col.click(); _app.processEvents()
+            self.assertEqual(win.cad_canvas.active_tool, "DRAW_NECK_COL")
+            uidx = next(i for i, s in enumerate(m["stories"]) if s.get("story_type") in ("typical", "standard"))
+            win.cb_story.setCurrentIndex(uidx); _app.processEvents()
+            opened = []
+            win.open_edit_columns_dialog = lambda: opened.append(1)
+            win._btn_place_col.click(); _app.processEvents()
+            self.assertEqual(opened, [1])
+            self.assertNotEqual(win.cad_canvas.active_tool, "DRAW_COL")
+            win.hide()
+        except ModuleNotFoundError:
+            pass
+
+    def test_v247_marker_before_guard_and_reload_present(self):
+        p = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
+        src = open(p, encoding="utf-8").read()
+        self.assertIn("v2.4.7-structural-bim-pro additive", src)
+        self.assertLess(src.index("v2.4.7-structural-bim-pro additive"), src.index('if __name__ == "__main__":'))
+        self.assertIn("def _save_v247", src)
+        self.assertIn("self.studio.current_story_data = _j.load(f)", src)
 
 
 if __name__ == "__main__":

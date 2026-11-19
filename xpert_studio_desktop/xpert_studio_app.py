@@ -7016,5 +7016,94 @@ def _open_edit_cols(self):
     EditColumnsDialog(self).exec()
 XpertStudioMainWindow.open_edit_columns_dialog = _open_edit_cols
 
+
+# ===== v2.4.7-structural-bim-pro additive: single dynamic column slot + continuity reload =====
+_orig_tb_v247 = XpertStudioMainWindow._build_separated_toolbars
+def _tb_v247(self):
+    _orig_tb_v247(self)
+    tb = self.draw_tb
+    for nm in ("_btn_neck_col", "_btn_edit_cols"):
+        w = getattr(self, nm, None)
+        if w is None:
+            continue
+        act = None
+        for a in tb.actions():
+            if tb.widgetForAction(a) is w:
+                act = a; break
+        if act is None:
+            for a in tb.actions():
+                dw = a.defaultWidget() if hasattr(a, "defaultWidget") else None
+                if dw is w:
+                    act = a; break
+        if act is not None:
+            tb.removeAction(act)
+        w.hide()
+        w.deleteLater()
+        setattr(self, nm, None)
+    slot = getattr(self, "_btn_place_col", None)
+    if slot is not None:
+        try:
+            slot.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        slot.clicked.connect(self._col_slot_dispatch_v247)
+        for a in tb.actions():
+            if tb.widgetForAction(a) is slot:
+                a.setVisible(True)
+        slot.setVisible(True)
+XpertStudioMainWindow._build_separated_toolbars = _tb_v247
+
+def _col_slot_dispatch_v247(self):
+    st = str(self.current_story_data.get("story_type", "")); sid = str(self.current_story_data.get("story_id", ""))
+    if self.is_tie_beams_story():
+        self.activate_cad_tool("DRAW_NECK_COL"); return
+    if st == "basement" or sid.startswith("01_"):
+        self.activate_cad_tool("DRAW_COL"); return
+    if sid == "02_Ground_Floor" or st == "ground":
+        self.activate_cad_tool("DRAW_COL"); return
+    self.open_edit_columns_dialog()
+XpertStudioMainWindow._col_slot_dispatch_v247 = _col_slot_dispatch_v247
+
+_orig_story_v247 = XpertStudioMainWindow._on_story_changed
+def _story_v247(self, idx):
+    _orig_story_v247(self, idx)
+    slot = getattr(self, "_btn_place_col", None)
+    if slot is None:
+        return
+    st = str(self.current_story_data.get("story_type", "")); sid = str(self.current_story_data.get("story_id", ""))
+    if self.is_tie_beams_story():
+        slot.setText("2. Neck Column (Ties)")
+        slot.setStyleSheet("background-color:#0D9488;color:white;font-weight:bold;")
+    elif st == "basement" or sid.startswith("01_"):
+        slot.setText("2. Column (Basement-only)")
+        slot.setStyleSheet("")
+    elif sid == "02_Ground_Floor" or st == "ground":
+        slot.setText("2. Place Column")
+        slot.setStyleSheet("")
+    else:
+        slot.setText("2. Edit Columns")
+        slot.setStyleSheet("background-color:#7C3AED;color:white;font-weight:bold;")
+    slot.setVisible(True)
+    for a in self.draw_tb.actions():
+        if self.draw_tb.widgetForAction(a) is slot:
+            a.setVisible(True)
+XpertStudioMainWindow._on_story_changed = _story_v247
+
+_orig_save_v247 = EditColumnsDialog._save
+def _save_v247(self):
+    import xpert_project_io as _pio
+    import json as _j
+    _pio.propagate_ground_columns_to_all_stories(self.studio.master_project, self.gcols)
+    sid = str(self.studio.current_story_data.get("story_id", ""))
+    meta = next((s for s in (self.studio.master_project or {}).get("stories", []) if s.get("story_id") == sid), None)
+    jp = (meta or {}).get("json_file", "")
+    if jp and os.path.isfile(jp):
+        with open(jp, encoding="utf-8") as f:
+            self.studio.current_story_data = _j.load(f)
+        self.studio._last_saved_snapshot = json.dumps(self.studio.current_story_data, sort_keys=True)
+    self.studio.refresh_story_ui()
+    self.accept()
+EditColumnsDialog._save = _save_v247
+
 if __name__ == "__main__":
     main()

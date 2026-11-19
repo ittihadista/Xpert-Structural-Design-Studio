@@ -442,3 +442,8 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 - r2: added version header comment inside app source so legacy version-presence tests (v221/v230) pass.
 - Regression test converted from source-text assertion (which enshrined the bug) to a BEHAVIORAL test firing real QResizeEvent + resize + showMaximized offscreen.
 - 42 regression tests.
+
+## v2.4.7-structural-bim-pro (2026-11-20)
+- Single dynamic column slot: the original "2." toolbar button changes text/color/behavior per story (Tie=Neck Column, Ground=Place Column, Basement=Basement-only BC#, Upper=Edit Columns dialog). Extra Neck/Edit buttons removed; visibility now driven through QAction as well as QWidget (fixes Qt re-showing hidden widgets on win.show()).
+- EditColumnsDialog OK now reloads the active story JSON into current_story_data before refresh, so discontinued columns (active=False) disappear from the plan immediately.
+- 4 new BEHAVIORAL tests executed after real win.show() (single visible slot per story, continuity reload, slot dispatch, marker/reload presence). 46 regression tests.
