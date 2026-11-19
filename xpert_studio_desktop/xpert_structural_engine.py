@@ -2683,6 +2683,299 @@ def reconcile_all_story_beams_supports_and_spans(story_data: Dict[str, Any]) -> 
             ensure_beam_wall_flags(story_data, bm)
 
 
+
+def _dist_point_to_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    dx, dy = x2 - x1, y2 - y1
+    L2 = dx*dx + dy*dy
+    if L2 < 1e-9:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1)*dx + (py - y1)*dy) / L2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def validate_cantilever_tip(
+    tip_pt: Tuple[float, float],
+    cant_len: float,
+    story_data: Dict[str, Any],
+    active_cols: List[Dict[str, Any]],
+    existing_beams: List[Dict[str, Any]],
+    slab_edge_poly: List[List[float]],
+    openings: Optional[List[Dict[str, Any]]] = None,
+    tol2: float = 0.025,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Modification 3 — Cantilever Tip Validation Rule (TOL2 = 25 mm):
+    A cantilever tip is valid if ANY of the following holds:
+      (a) on a support node (column or supporting beam);
+      (b) on any slab boundary edge (outer boundary or opening edge);
+      (c) outside all slab and opening polygons (projecting outward);
+      (d) on an existing beam line.
+    Otherwise rejects with descriptive hint:
+      '...tip lies inside slab {id} at (x,y); move it to a slab edge, a support, or outside the slab.'
+    """
+    tx, ty = float(tip_pt[0]), float(tip_pt[1])
+
+    # (a) On a support node
+    for col in active_cols:
+        cx, cy = float(col["x"]), float(col["y"])
+        b = float(col.get("b_m", 0.20))
+        h = float(col.get("h_m", 0.40))
+        if abs(tx - cx) <= (b / 2.0 + tol2) and abs(ty - cy) <= (h / 2.0 + tol2):
+            return True, None
+    for ob in existing_beams:
+        osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
+        oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
+        w = float(ob.get("width_m", 0.30))
+        if _dist_point_to_segment(tx, ty, osx, osy, oex, oey) <= (w / 2.0 + tol2):
+            return True, None
+
+    # (b) On any slab boundary edge (outer boundary or opening edge)
+    if slab_edge_poly and len(slab_edge_poly) >= 3:
+        n = len(slab_edge_poly)
+        for i in range(n):
+            p1 = slab_edge_poly[i]
+            p2 = slab_edge_poly[(i + 1) % n]
+            if _dist_point_to_segment(tx, ty, p1[0], p1[1], p2[0], p2[1]) <= tol2:
+                return True, None
+    if openings:
+        for op in openings:
+            poly = op.get("polygon", [])
+            if not poly and "min_x" in op:
+                poly = [[op["min_x"], op["min_y"]], [op["max_x"], op["min_y"]], [op["max_x"], op["max_y"]], [op["min_x"], op["max_y"]]]
+            if poly and len(poly) >= 3:
+                m = len(poly)
+                for i in range(m):
+                    p1 = poly[i]
+                    p2 = poly[(i + 1) % m]
+                    if _dist_point_to_segment(tx, ty, p1[0], p1[1], p2[0], p2[1]) <= tol2:
+                        return True, None
+    for slb in story_data.get("slabs", []):
+        poly = slb.get("polygon", [])
+        if poly and len(poly) >= 3:
+            k = len(poly)
+            for i in range(k):
+                p1 = poly[i]
+                p2 = poly[(i + 1) % k]
+                if _dist_point_to_segment(tx, ty, p1[0], p1[1], p2[0], p2[1]) <= tol2:
+                    return True, None
+
+    # (c) Outside all slab and opening polygons
+    in_outer = False
+    if slab_edge_poly and len(slab_edge_poly) >= 3:
+        in_outer = _point_in_polygon_2d(tx, ty, slab_edge_poly)
+        d_outer = _min_dist_to_poly_edges(tx, ty, slab_edge_poly)
+        if not in_outer and d_outer > tol2:
+            return True, None  # Outside building footprint
+
+    if openings:
+        for op in openings:
+            poly = op.get("polygon", [])
+            if not poly and "min_x" in op:
+                poly = [[op["min_x"], op["min_y"]], [op["max_x"], op["min_y"]], [op["max_x"], op["max_y"]], [op["min_x"], op["max_y"]]]
+            if poly and len(poly) >= 3:
+                if _point_in_polygon_2d(tx, ty, poly):
+                    return True, None  # Inside void opening
+
+    # (d) On an existing beam line
+    for ob in existing_beams:
+        osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
+        oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
+        if _dist_point_to_segment(tx, ty, osx, osy, oex, oey) <= tol2:
+            return True, None
+
+    # Otherwise: tip lies inside a slab!
+    slab_id = "Slab"
+    for slb in story_data.get("slabs", []):
+        poly = slb.get("polygon", [])
+        if poly and len(poly) >= 3 and _point_in_polygon_2d(tx, ty, poly):
+            slab_id = slb.get("id", "Slab")
+            break
+
+    return False, (
+        f"Invalid Interior Cantilever: Overhang ({cant_len:.2f} m) tip lies inside slab {slab_id} at ({tx:.2f}, {ty:.2f}); "
+        "move it to a slab edge, a support, or outside the slab."
+    )
+
+
+def extend_beam_with_target(
+    story_data: Dict[str, Any],
+    beam_id: str,
+    target_pt: Tuple[float, float],
+    tol: float = 0.010,
+    tol2: float = 0.025,
+) -> Tuple[bool, Optional[Dict[str, Any]], str]:
+    """
+    Modification 2 — Extend Beam Command:
+    Extends beam to an existing support node (adds a span) or a free point (creates cantilever).
+    Rejects if off-axis (M3) or overlapping another collinear beam (M4/D2).
+    """
+    beams = story_data.get("beams", [])
+    bm = next((b for b in beams if b.get("id") == beam_id), None)
+    if not bm:
+        return False, None, f"Beam {beam_id} not found."
+
+    sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+    ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+    is_horizontal = abs(ex - sx) >= abs(ey - sy)
+    tx, ty = float(target_pt[0]), float(target_pt[1])
+
+    # Check: Target point must lie on beam infinite axis line
+    if is_horizontal:
+        if abs(ty - sy) > tol2:
+            return False, None, "Target point must lie on the beam axis line."
+        tx = round(tx, 3)
+        ty = sy
+    else:
+        if abs(tx - sx) > tol2:
+            return False, None, "Target point must lie on the beam axis line."
+        ty = round(ty, 3)
+        tx = sx
+
+    # Check: Target point must be outside current beam interval
+    if is_horizontal:
+        min_x, max_x = min(sx, ex), max(sx, ex)
+        if (min_x - tol) <= tx <= (max_x + tol):
+            return False, None, "Target point must be outside the current beam length."
+        extending_right = (tx > max_x)
+        ext_start, ext_end = (max_x, tx) if extending_right else (tx, min_x)
+    else:
+        min_y, max_y = min(sy, ey), max(sy, ey)
+        if (min_y - tol) <= ty <= (max_y + tol):
+            return False, None, "Target point must be outside the current beam length."
+        extending_right = (ty > max_y)
+        ext_start, ext_end = (max_y, ty) if extending_right else (ty, min_y)
+
+    # Check D2 Overlap with existing collinear beams (Scenario M4)
+    for ob in beams:
+        if ob.get("id") == beam_id:
+            continue
+        osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
+        oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
+        ob_horiz = abs(oex - osx) >= abs(oey - osy)
+        if is_horizontal and ob_horiz and abs(sy - osy) <= 0.025:
+            ob_a, ob_b = min(osx, oex), max(osx, oex)
+            ov = min(ext_end, ob_b) - max(ext_start, ob_a)
+            if ov > tol:
+                return False, None, f"Overlapping beam: overlaps {ob['id']}; adjust ends or use Extend"
+        elif (not is_horizontal) and (not ob_horiz) and abs(sx - osx) <= 0.025:
+            ob_a, ob_b = min(osy, oey), max(osy, oey)
+            ov = min(ext_end, ob_b) - max(ext_start, ob_a)
+            if ov > tol:
+                return False, None, f"Overlapping beam: overlaps {ob['id']}; adjust ends or use Extend"
+
+    # Support Discovery at target point (Scenario M1)
+    target_coord = tx if is_horizontal else ty
+    active_cols = [c for c in story_data.get("columns", []) if c.get("active", True)]
+    target_support = None
+
+    for col in active_cols:
+        cx, cy = float(col["x"]), float(col["y"])
+        b = float(col.get("b_m", 0.20))
+        h = float(col.get("h_m", 0.40))
+        snap_r = max(b, h) / 2.0 + 0.15
+        if math.hypot(tx - cx, ty - cy) <= snap_r:
+            target_support = {
+                "kind": "column",
+                "target_id": str(col["id"]),
+                "width_m": b if is_horizontal else h,
+                "depth_m": h if is_horizontal else b,
+                "coord": cx if is_horizontal else cy,
+            }
+            break
+
+    if not target_support:
+        for ob in beams:
+            if ob.get("id") == beam_id:
+                continue
+            osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
+            oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
+            ob_horiz = abs(oex - osx) >= abs(oey - osy)
+            if is_horizontal and (not ob_horiz):
+                if abs(tx - osx) <= tol2 and min(osy, oey) - 0.25 <= ty <= max(osy, oey) + 0.25:
+                    target_support = {
+                        "kind": "beam",
+                        "target_id": str(ob["id"]),
+                        "width_m": float(ob.get("width_m", 0.30)),
+                        "depth_m": float(ob.get("depth_m", 0.30)),
+                        "coord": osx,
+                    }
+                    break
+            elif (not is_horizontal) and ob_horiz:
+                if abs(ty - osy) <= tol2 and min(osx, oex) - 0.25 <= tx <= max(osx, oex) + 0.25:
+                    target_support = {
+                        "kind": "beam",
+                        "target_id": str(ob["id"]),
+                        "width_m": float(ob.get("width_m", 0.30)),
+                        "depth_m": float(ob.get("depth_m", 0.30)),
+                        "coord": osy,
+                    }
+                    break
+
+    supports = bm.setdefault("supports", [])
+    spans = bm.setdefault("spans", [])
+
+    if target_support:
+        if extending_right:
+            last_sup_coord = float(supports[-1].get("coord", supports[-1].get("center_coord_m", max_x))) if supports else max_x
+            new_span = round(abs(target_support["coord"] - last_sup_coord), 3)
+            spans.append(new_span)
+            target_support["support_index"] = len(supports) + 1
+            supports.append(target_support)
+            bm["cantilever_right_m"] = 0.0
+            if is_horizontal:
+                bm["end_x"] = tx
+            else:
+                bm["end_y"] = ty
+        else:
+            first_sup_coord = float(supports[0].get("coord", supports[0].get("center_coord_m", min_x))) if supports else min_x
+            new_span = round(abs(first_sup_coord - target_support["coord"]), 3)
+            spans.insert(0, new_span)
+            supports.insert(0, target_support)
+            bm["cantilever_left_m"] = 0.0
+            if is_horizontal:
+                bm["start_x"] = tx
+            else:
+                bm["start_y"] = ty
+        for i, s in enumerate(supports):
+            s["support_index"] = i + 1
+    else:
+        # Free point extension (Scenario M2)
+        poly = story_data.get("slab_edge_polygon", [])
+        ops = story_data.get("openings", [])
+        end_sup_coord = float(supports[-1].get("coord", max_x)) if extending_right else float(supports[0].get("coord", min_x))
+        cant_len = round(abs(target_coord - end_sup_coord), 3)
+
+        ok_tip, tip_msg = validate_cantilever_tip(
+            (tx, ty),
+            cant_len,
+            story_data,
+            active_cols,
+            beams,
+            poly,
+            ops,
+            tol2=tol2,
+        )
+        if not ok_tip:
+            return False, None, tip_msg
+
+        if extending_right:
+            bm["cantilever_right_m"] = cant_len
+            if is_horizontal:
+                bm["end_x"] = tx
+            else:
+                bm["end_y"] = ty
+        else:
+            bm["cantilever_left_m"] = cant_len
+            if is_horizontal:
+                bm["start_x"] = tx
+            else:
+                bm["start_y"] = ty
+
+    bm.pop("manual_loads_override", None)
+    reconcile_all_story_beams_supports_and_spans(story_data)
+    return True, bm, f"Beam {beam_id} extended successfully."
+
+
 def validate_and_build_beam_with_cantilevers(
     beam_id: str,
     start_pt: Tuple[float, float],
@@ -2917,21 +3210,60 @@ def validate_and_build_beam_with_cantilevers(
     if total_len < 0.40:
         return False, None, "Beam length is too short (< 0.40 m)."
 
-    # Prevent Duplicate Overlapping Beams along the same axis
+    TOL = 0.010  # 10 mm
+    shared_notes: List[str] = []
     for ob in existing_beams:
         if ob.get("id") == beam_id:
             continue
         osx, osy = float(ob.get("start_x", 0.0)), float(ob.get("start_y", 0.0))
         oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
         ob_horiz = abs(oex - osx) >= abs(oey - osy)
-        if is_horizontal and ob_horiz and abs(sy - osy) <= 0.25:
-            ov = min(ex, max(osx, oex)) - max(sx, min(osx, oex))
-            if ov > 0.35:
-                return False, None, f"Duplicate Beam Prevented: Overlaps existing horizontal beam {ob['id']}."
-        elif (not is_horizontal) and (not ob_horiz) and abs(sx - osx) <= 0.25:
-            ov = min(ey, max(osy, oey)) - max(sy, min(osy, oey))
-            if ov > 0.35:
-                return False, None, f"Duplicate Beam Prevented: Overlaps existing vertical beam {ob['id']}."
+
+        if is_horizontal and ob_horiz and abs(sy - osy) <= 0.025:
+            new_a, new_b = min(sx, ex), max(sx, ex)
+            old_a, old_b = min(osx, oex), max(osx, oex)
+
+            for s in supports_raw:
+                s_id = str(s.get("target_id", ""))
+                s_coord = float(s.get("coord", 0.0))
+                if any(str(osup.get("target_id")) == s_id for osup in ob.get("supports", [])):
+                    shared_notes.append(f"{beam_id} shares {s_id} with {ob['id']}; modeled independently.")
+                    if abs(old_b - new_a) <= float(s.get("width_m", 0.40)) + 0.05 and old_a < s_coord < new_b:
+                        old_b = s_coord
+                        new_a = s_coord
+                    elif abs(new_b - old_a) <= float(s.get("width_m", 0.40)) + 0.05 and new_a < s_coord < old_b:
+                        new_b = s_coord
+                        old_a = s_coord
+
+            if abs(new_a - old_a) <= TOL and abs(new_b - old_b) <= TOL:
+                return False, None, f"Duplicate beam: same segment as {ob['id']}"
+
+            ov = min(new_b, old_b) - max(new_a, old_a)
+            if ov > TOL:
+                return False, None, f"Overlapping beam: overlaps {ob['id']}; adjust ends or use Extend"
+
+        elif (not is_horizontal) and (not ob_horiz) and abs(sx - osx) <= 0.025:
+            new_a, new_b = min(sy, ey), max(sy, ey)
+            old_a, old_b = min(osy, oey), max(osy, oey)
+
+            for s in supports_raw:
+                s_id = str(s.get("target_id", ""))
+                s_coord = float(s.get("coord", 0.0))
+                if any(str(osup.get("target_id")) == s_id for osup in ob.get("supports", [])):
+                    shared_notes.append(f"{beam_id} shares {s_id} with {ob['id']}; modeled independently.")
+                    if abs(old_b - new_a) <= float(s.get("width_m", 0.40)) + 0.05 and old_a < s_coord < new_b:
+                        old_b = s_coord
+                        new_a = s_coord
+                    elif abs(new_b - old_a) <= float(s.get("width_m", 0.40)) + 0.05 and new_a < s_coord < old_b:
+                        new_b = s_coord
+                        old_a = s_coord
+
+            if abs(new_a - old_a) <= TOL and abs(new_b - old_b) <= TOL:
+                return False, None, f"Duplicate beam: same segment as {ob['id']}"
+
+            ov = min(new_b, old_b) - max(new_a, old_a)
+            if ov > TOL:
+                return False, None, f"Overlapping beam: overlaps {ob['id']}; adjust ends or use Extend"
 
     start_coord = sx if is_horizontal else sy
     end_coord = ex if is_horizontal else ey
@@ -2950,25 +3282,18 @@ def validate_and_build_beam_with_cantilevers(
     cant_left = raw_cant_left if overhang_beyond_first_face > 0.25 else 0.0
     cant_right = raw_cant_right if overhang_beyond_last_face > 0.25 else 0.0
 
-    edge_margin = 0.45
-    if has_bnd and cant_left > 0.35:
-        tip_at_boundary = (abs(sx - min_x) <= edge_margin) if is_horizontal else (abs(sy - min_y) <= edge_margin)
-        if not tip_at_boundary:
-            return (
-                False,
-                None,
-                f"Invalid Interior Cantilever: Left overhang ({cant_left:.2f} m) ends inside the slab at ({sx:.2f}, {sy:.2f}). "
-                "A cantilever must terminate at a free outer slab boundary edge or rest on a support.",
-            )
-    if has_bnd and cant_right > 0.35:
-        tip_at_boundary = (abs(ex - max_x) <= edge_margin) if is_horizontal else (abs(ey - max_y) <= edge_margin)
-        if not tip_at_boundary:
-            return (
-                False,
-                None,
-                f"Invalid Interior Cantilever: Right overhang ({cant_right:.2f} m) ends inside the slab at ({ex:.2f}, {ey:.2f}). "
-                "A cantilever must terminate at a free outer slab boundary edge or rest on a support.",
-            )
+    tip_left = (sx, sy)
+    tip_right = (ex, ey)
+    story_dummy = {"slabs": [], "columns": columns, "beams": existing_beams, "slab_edge_polygon": slab_edge_polygon, "openings": openings or []}
+
+    if has_bnd and cant_left > 0.25:
+        ok_tip, tip_err = validate_cantilever_tip(tip_left, cant_left, story_dummy, active_cols, existing_beams, slab_edge_polygon, openings, tol2=0.025)
+        if not ok_tip:
+            return False, None, tip_err
+    if has_bnd and cant_right > 0.25:
+        ok_tip, tip_err = validate_cantilever_tip(tip_right, cant_right, story_dummy, active_cols, existing_beams, slab_edge_polygon, openings, tol2=0.025)
+        if not ok_tip:
+            return False, None, tip_err
 
     spans: List[float] = []
     for idx in range(len(supports_along) - 1):
@@ -3001,6 +3326,7 @@ def validate_and_build_beam_with_cantilevers(
     sup_names = " -> ".join(s["target_id"] for s in formatted_supports)
     beam_dict = {
         "id": beam_id,
+        "shared_node_note": (" | ".join(shared_notes) if shared_notes else ""),
         "beam_kind": beam_kind,
         "width_m": width_m,
         "depth_m": depth_m,

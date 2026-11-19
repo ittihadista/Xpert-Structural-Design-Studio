@@ -1,3 +1,4 @@
+# Xpert Structural Design Studio (v2.4.8-structural-bim-pro)
 """
 Xpert Structural Design Studio (v2.4.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
@@ -82,6 +83,9 @@ from xpert_structural_engine import (
     renumber_story_columns_sequentially,
     reconcile_all_story_beams_supports_and_spans,
     validate_and_build_beam_with_cantilevers,
+    extend_beam_with_target,
+    validate_cantilever_tip,
+    _dist_point_to_segment,
     detect_story_grid_bays,
     reconcile_and_split_slabs_after_beam_change,
     auto_fill_all_story_slabs,
@@ -2539,6 +2543,46 @@ class StructuralCadCanvas2D(QGraphicsView):
             self.studio.update_contextual_prompt(f"Placed Column {updated_col['id']} ({b_m:.2f}×{h_m:.2f} m): {msg}")
             return
 
+        # STEP 3C: Extend Beam (EX)
+        if tool == "DRAW_EXTEND_BEAM":
+            beams = story.get("beams", [])
+            if not beams:
+                QMessageBox.warning(self, "Extend Beam", "No beams exist on this story to extend.")
+                return
+            if getattr(self, "_extend_beam_id", None) is None:
+                pick_x, pick_y = sx, sy
+                found_b = None
+                min_d = 0.50
+                for bm in beams:
+                    bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                    bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+                    d = _dist_point_to_segment(pick_x, pick_y, bsx, bsy, bex, bey)
+                    if d < min_d:
+                        min_d = d
+                        found_b = bm
+                if found_b:
+                    self._extend_beam_id = found_b["id"]
+                    self.studio.update_contextual_prompt(
+                        f"Selected beam {found_b['id']}. Click boundary/target point on beam line via OSNAP to extend..."
+                    )
+                else:
+                    self.studio.update_contextual_prompt("No beam found near click. Click directly on a beam to extend.")
+                return
+            else:
+                target_pt = (sx, sy)
+                target_bid = self._extend_beam_id
+                self._extend_beam_id = None
+                ok_ext, ext_bm, msg_ext = extend_beam_with_target(story, target_bid, target_pt)
+                if not ok_ext:
+                    QMessageBox.warning(self, "Extend Beam Error", msg_ext)
+                    self.studio.update_contextual_prompt(f"Extend Rejected: {msg_ext}")
+                    self.render_story(story)
+                    return
+                self.studio.save_and_sync_current_story()
+                self.studio.refresh_story_ui()
+                self.studio.update_contextual_prompt(f"Beam {target_bid} extended successfully: {msg_ext}")
+                return
+
         # STEP 3: Draw Full-Width Hidden (0.40m) or Drop (0.20x0.40m) Beam
         if tool in ("DRAW_BEAM_HID", "DRAW_BEAM_DROP"):
             if is_tie_story and tool == "DRAW_BEAM_HID":
@@ -2588,6 +2632,8 @@ class StructuralCadCanvas2D(QGraphicsView):
                     self.render_story(story)
                     return
                 beams.append(bm_obj)
+                if bm_obj.get("shared_node_note"):
+                    self.studio.statusBar().showMessage(bm_obj["shared_node_note"], 6000)
                 reconcile_all_story_beams_supports_and_spans(story)
                 cascade_alerts: List[str] = []
                 if not is_tie_story:
@@ -4847,6 +4893,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("Step 2: Place Structural Column 0.20×0.40m (00-XD-COL)", "DRAW_COL"),
             ("Step 3A: Draw Hidden Beam 0.30m Width", "DRAW_BEAM_HID"),
             ("Step 3B: Draw Drop Beam 0.20×0.40m Width", "DRAW_BEAM_DROP"),
+            ("Step 3C: Extend Beam (EX)", "DRAW_EXTEND_BEAM"),
             ("Step 4A: Pick Area -> Create Slab", "PICK_SLAB"),
             ("Step 4B: Flip Selected or Picked Slab Rib (0° ↔ 90°)", "FLIP_RIB"),
             ("Step 4C: Pick Area -> Toggle Void Opening", "PICK_OPENING"),
@@ -5110,6 +5157,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("2. Place Column", "DRAW_COL"),
             ("3A. + Hidden Beam", "DRAW_BEAM_HID"),
             ("3B. + Drop Beam", "DRAW_BEAM_DROP"),
+            ("3C. Extend Beam (EX)", "DRAW_EXTEND_BEAM"),
             ("4A. Pick: Slab", "PICK_SLAB"),
             ("4B. Pick: Flip Rib", "FLIP_RIB"),
             ("4C. Pick: Opening", "PICK_OPENING"),
@@ -6093,6 +6141,7 @@ class XpertStudioMainWindow(QMainWindow):
             "DRAW_COL": "Step 2 (Place Column): Move cursor to preview column, press [Space] to flip orientation, click to place.",
             "DRAW_BEAM_HID": "Step 3A (Hidden Beam 0.30m): Click Start Column Center -> Click End Column Center.",
             "DRAW_BEAM_DROP": "Step 3B (Drop Beam 0.20×0.40m): Click Start Column Center -> Click End Column Center.",
+            "DRAW_EXTEND_BEAM": "Step 3C (Extend Beam): Click beam to select -> Click target/boundary point on beam line to extend.",
             "PICK_SLAB": "Step 4A (Pick Slab): Click inside any beam-bounded bay to create/update its Hollow-Block Slab.",
             "FLIP_RIB": "Step 4B (Flip Rib): Click inside any Slab or on its yellow tag to flip its rib orientation (0° <-> 90°).",
             "PICK_OPENING": "Step 4C (Pick Opening): Click inside any bay to toggle a Void Opening (X).",

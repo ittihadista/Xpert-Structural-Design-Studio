@@ -23,6 +23,7 @@ from xpert_structural_engine import (
     enforce_column_inside_slab_boundary,
     check_duplicate_column,
     validate_and_build_beam_with_cantilevers,
+    extend_beam_with_target,
     detect_story_grid_bays,
     pick_area_create_or_update_slab,
     reconcile_and_split_slabs_after_beam_change,
@@ -1244,7 +1245,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1336,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1568,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -2082,6 +2083,180 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertLess(src.index("v2.4.7-structural-bim-pro additive"), src.index('if __name__ == "__main__":'))
         self.assertIn("def _save_v247", src)
         self.assertIn("self.studio.current_story_data = _j.load(f)", src)
+
+
+
+    def test_v248_shared_column_collinear_beam_allowed(self):
+        poly = [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C16", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C17", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C18", "x": 10.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C19", "x": 10.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok_b6, b6, _ = validate_and_build_beam_with_cantilevers(
+            "B6", (0.0, 5.0), (5.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok_b6)
+        ok_b17, b17, _ = validate_and_build_beam_with_cantilevers(
+            "B17", (10.0, 0.0), (10.0, 5.0), "drop", 0.20, 0.40, cols, [b6], poly
+        )
+        self.assertTrue(ok_b17)
+        ok_new, b_new, msg_new = validate_and_build_beam_with_cantilevers(
+            "B_new", (5.0, 5.0), (10.0, 5.0), "hidden", 0.40, 0.30, cols, [b6, b17], poly
+        )
+        self.assertTrue(ok_new, f"Failed to draw shared-column beam: {msg_new}")
+        self.assertIsNotNone(b_new)
+        self.assertIn("shares C17 with B6", b_new.get("shared_node_note", ""))
+
+    def test_v248_exact_duplicate_still_rejected(self):
+        poly = [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C17", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C18", "x": 10.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok7, b7, _ = validate_and_build_beam_with_cantilevers(
+            "B7", (5.0, 5.0), (10.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok7)
+        ok_dup, b_dup, msg_dup = validate_and_build_beam_with_cantilevers(
+            "B8", (5.0, 5.0), (10.0, 5.0), "hidden", 0.40, 0.30, cols, [b7], poly
+        )
+        self.assertFalse(ok_dup)
+        self.assertIsNone(b_dup)
+        self.assertIn("Duplicate beam: same segment as B7", msg_dup)
+
+    def test_v248_partial_overlap_still_rejected(self):
+        poly = [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C16", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C17", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C18", "x": 10.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok6, b6, _ = validate_and_build_beam_with_cantilevers(
+            "B6", (0.0, 5.0), (5.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok6)
+        ok_ov, b_ov, msg_ov = validate_and_build_beam_with_cantilevers(
+            "B_ov", (2.5, 5.0), (7.5, 5.0), "hidden", 0.40, 0.30, cols, [b6], poly
+        )
+        self.assertFalse(ok_ov)
+        self.assertIsNone(b_ov)
+        self.assertIn("Overlapping beam: overlaps B6", msg_ov)
+        self.assertIn("adjust ends or use Extend", msg_ov)
+
+    def test_v248_extend_to_column_adds_span(self):
+        poly = [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C16", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C17", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C18", "x": 10.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok6, b6, _ = validate_and_build_beam_with_cantilevers(
+            "B6", (0.0, 5.0), (5.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok6)
+        story = {"columns": cols, "beams": [b6], "slab_edge_polygon": poly}
+        ok_ext, b_ext, msg_ext = extend_beam_with_target(story, "B6", (10.0, 5.0))
+        self.assertTrue(ok_ext, msg_ext)
+        self.assertEqual(b_ext["id"], "B6")
+        self.assertEqual(len(b_ext["spans"]), 2)
+        self.assertEqual(len(b_ext["supports"]), 3)
+
+    def test_v248_extend_to_free_edge_creates_cantilever(self):
+        poly = [[0.0, 0.0], [12.0, 0.0], [12.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C16", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C17", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C18", "x": 10.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        story = {"columns": cols, "beams": [], "slab_edge_polygon": poly}
+        ok_bm, bm, _ = validate_and_build_beam_with_cantilevers(
+            "B1", (0.0, 5.0), (10.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok_bm)
+        story["beams"].append(bm)
+        ok_ext, b_ext, msg_ext = extend_beam_with_target(story, "B1", (12.0, 5.0))
+        self.assertTrue(ok_ext, msg_ext)
+        self.assertAlmostEqual(b_ext["cantilever_right_m"], 2.0, places=1)
+
+    def test_v248_extend_off_line_rejected(self):
+        poly = [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C16", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C17", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        story = {"columns": cols, "beams": [], "slab_edge_polygon": poly}
+        ok_bm, bm, _ = validate_and_build_beam_with_cantilevers(
+            "B1", (0.0, 5.0), (5.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        story["beams"].append(bm)
+        ok_ext, b_ext, msg_ext = extend_beam_with_target(story, "B1", (10.0, 8.0))
+        self.assertFalse(ok_ext)
+        self.assertIn("axis", msg_ext.lower())
+
+    def test_v248_extend_overlap_rejected_no_merge_dialog(self):
+        poly = [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C16", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C17", "x": 4.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C18", "x": 7.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C19", "x": 12.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        story = {"columns": cols, "beams": [], "slab_edge_polygon": poly}
+        ok1, b1, _ = validate_and_build_beam_with_cantilevers(
+            "B1", (0.0, 5.0), (4.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        ok2, b2, _ = validate_and_build_beam_with_cantilevers(
+            "B2", (7.0, 5.0), (12.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        story["beams"].extend([b1, b2])
+        ok_ext, b_ext, msg_ext = extend_beam_with_target(story, "B1", (9.0, 5.0))
+        self.assertFalse(ok_ext)
+        self.assertIn("Overlapping beam", msg_ext)
+        self.assertIn("B2", msg_ext)
+
+    def test_v248_cantilever_tip_on_slab_edge_allowed(self):
+        poly = [[0.0, 0.0], [15.70, 0.0], [15.70, 7.40], [10.0, 7.40], [10.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C1", "x": 5.0, "y": 7.40, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C2", "x": 10.0, "y": 7.40, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok, bm, msg = validate_and_build_beam_with_cantilevers(
+            "B1", (5.0, 7.40), (15.70, 7.40), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok, f"Balcony cantilever on slab edge was rejected: {msg}")
+        self.assertIsNotNone(bm)
+        self.assertAlmostEqual(bm["cantilever_right_m"], 5.70, places=1)
+
+    def test_v248_cantilever_tip_inside_slab_rejected_with_hint(self):
+        poly = [[0.0, 0.0], [15.70, 0.0], [15.70, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C1", "x": 0.0, "y": 7.40, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C2", "x": 5.0, "y": 7.40, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok, bm, msg = validate_and_build_beam_with_cantilevers(
+            "B1", (0.0, 7.40), (8.0, 7.40), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertFalse(ok)
+        self.assertIsNone(bm)
+        self.assertIn("Invalid Interior Cantilever", msg)
+        self.assertIn("tip lies inside slab", msg)
+        self.assertIn("move it to a slab edge, a support, or outside the slab", msg)
+
+    def test_v248_transfer_untouched(self):
+        import hashlib
+        engine_file = os.path.join(os.path.dirname(__file__), "xpert_structural_engine.py")
+        with open(engine_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        def get_h(s, e):
+            return hashlib.sha256("".join(lines[s-1:e]).encode("utf-8")).hexdigest()
+
+        self.assertEqual(get_h(194, 515), "351d9de788087a301ec6efc6f25bdcacb571d9e06b4e903e43ca93847484ee42")
+        self.assertEqual(get_h(733, 960), "b853e8d467d48d7471e132235943d0e578a15092ff7c74c092ebec21cf922a98")
+        self.assertEqual(get_h(961, 1730), "f3594ce1480c88c745094d364521962db77f61e6e88a844a631e8f76ee4d721d")
+        self.assertEqual(get_h(1731, 2318), "2b45cfa748f3b187faa0bdba019bc77ee1d9865723680156b4f410612ccf70a6")
+        self.assertEqual(get_h(2319, 2377), "eb7bf8b4ecec56efd80a36b94388791a2b2dd79db34fe9f9c4a3ceae98c8a50c")
 
 
 if __name__ == "__main__":

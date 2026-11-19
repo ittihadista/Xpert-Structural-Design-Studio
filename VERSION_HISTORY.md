@@ -447,3 +447,11 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 - Single dynamic column slot: the original "2." toolbar button changes text/color/behavior per story (Tie=Neck Column, Ground=Place Column, Basement=Basement-only BC#, Upper=Edit Columns dialog). Extra Neck/Edit buttons removed; visibility now driven through QAction as well as QWidget (fixes Qt re-showing hidden widgets on win.show()).
 - EditColumnsDialog OK now reloads the active story JSON into current_story_data before refresh, so discontinued columns (active=False) disappear from the plan immediately.
 - 4 new BEHAVIORAL tests executed after real win.show() (single visible slot per story, continuity reload, slot dispatch, marker/reload presence). 46 regression tests.
+
+## v2.4.8-structural-bim-pro (2026-11-20)
+- Unblocked shared-column and touching collinear beam modeling: beams sharing a column/node are accepted as independent entities without merge dialogs.
+- Duplicate and partial overlap prevention strictly bounded by TOL = 10mm (D1: exact duplicate segment, D2: partial overlap rejecting with guidance to use Extend).
+- Added 'Extend Beam (EX)' command to left Draw toolbar and Draw menu with automatic support node detection (adding spans) or free point extension (adding cantilevers).
+- Cantilever tip validation upgraded to 25mm boundary tolerance: accepted on support nodes, slab boundary polylines, opening void edges, outside building footprint, or existing beam lines; descriptive rejection hint when ending inside slab interior.
+- Absolute freeze maintained on load transfer engine (bring_P), 3-moment solver, and ACI 318 design routines (SHA-256 verified).
+- 10 new regression tests (total 56 tests passing).
