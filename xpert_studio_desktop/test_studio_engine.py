@@ -2270,7 +2270,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         # Retargeted per v2.4.10 Item 0: Frozen cores (analytical beam, rib slab, and load transfer 3-moment)
         self.assertEqual(get_h(194, 515), "351d9de788087a301ec6efc6f25bdcacb571d9e06b4e903e43ca93847484ee42")
         self.assertEqual(get_h(733, 960), "b853e8d467d48d7471e132235943d0e578a15092ff7c74c092ebec21cf922a98")
-        self.assertEqual(get_h(961, 1730), "f3594ce1480c88c745094d364521962db77f61e6e88a844a631e8f76ee4d721d")
+        self.assertEqual(get_h(961, 1730), "16e3ae121abef1a5e8635729accbdfa407f1e08e97afad39deff1433095ad4b3")
 
 
 
@@ -2446,7 +2446,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         # Block 2: design_hollow_block_slab_rib (733-960)
         self.assertEqual(get_h(733, 960), "b853e8d467d48d7471e132235943d0e578a15092ff7c74c092ebec21cf922a98")
         # Block 3: analyze_all_story_beams_and_columns (961-1730)
-        self.assertEqual(get_h(961, 1730), "f3594ce1480c88c745094d364521962db77f61e6e88a844a631e8f76ee4d721d")
+        self.assertEqual(get_h(961, 1730), "16e3ae121abef1a5e8635729accbdfa407f1e08e97afad39deff1433095ad4b3")
         # Block 4A: design_beam_aci318 (1731-2397)
         self.assertEqual(get_h(1731, 2397), "5ef415460e2ba578998716eb9cd29030768b2c36396486995efa903818fde27a")
         # Block 4B: design_column_and_pm_curve (2398-2632)
@@ -3199,6 +3199,98 @@ class TestXpertStudioEngine(unittest.TestCase):
             self.assertFalse(ok_flip)
             self.assertIn("Cantilever Back-Span Lock", lock_msg)
             self.assertIn(cant_id, lock_msg)
+
+    def test_v2414_clear_span_b4_load_calculation(self):
+        """
+        v2.4.14 Acceptance Criterion 1:
+        Beam B4 tributary load must use clear spans (lx_m, ly_m) of Shapely slabs.
+        Formula string must show clear spans (e.g. 11.71x(4.25/2)m=24.88 or 11.71x(2.55/2)m=14.93)
+        instead of centerline spans (4.80/2 or 3.20/2).
+        Load on B4 changes at secondary beam B13 only where slab polygon changes.
+        """
+        import json
+        from xpert_structural_engine import (
+            infer_story_slabs_face_based,
+            analyze_all_story_beams_and_columns,
+            flip_slab_rib_by_id,
+        )
+        fixture_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, _ = infer_story_slabs_face_based(story)
+        story["slabs"] = slabs
+
+        # 1. Default state: S3 (ly=4.25m, rib=90) transfers load to horizontal beam B4
+        analyze_all_story_beams_and_columns(story)
+        b4 = next(b for b in story["beams"] if b["id"] == "B4")
+        d_loads = [ld for ld in b4.get("loads", []) if ld.get("type") == "D"]
+        self.assertGreater(len(d_loads), 0)
+        f_str = d_loads[0].get("formula_str", "")
+        self.assertIn("(4.25/2)m", f_str)
+        self.assertNotIn("(4.80/2)m", f_str)
+        self.assertNotIn("(4.75/2)m", f_str)
+
+        # 2. When S2 (ly=2.55m) is flipped to 90°, it also transfers load to B4
+        ok_flip, _, _ = flip_slab_rib_by_id(story, "S2")
+        self.assertTrue(ok_flip)
+        analyze_all_story_beams_and_columns(story)
+        b4_flipped = next(b for b in story["beams"] if b["id"] == "B4")
+        d_loads_flipped = [ld for ld in b4_flipped.get("loads", []) if ld.get("type") == "D"]
+        self.assertEqual(len(d_loads_flipped), 2)
+        # Segment 1 [0.00 -> 2.80m] at B13: contains both S2 and S3 clear spans
+        f_seg1 = d_loads_flipped[0].get("formula_str", "")
+        self.assertIn("(2.55/2)m=14.93", f_seg1)
+        self.assertIn("(4.25/2)m=24.88", f_seg1)
+        self.assertEqual(d_loads_flipped[0].get("x1"), 0.0)
+        self.assertEqual(d_loads_flipped[0].get("x2"), 2.8)
+        # Segment 2 [2.80 -> 5.00m]: contains S3 clear span
+        f_seg2 = d_loads_flipped[1].get("formula_str", "")
+        self.assertIn("(4.25/2)m=24.88", f_seg2)
+        self.assertEqual(d_loads_flipped[1].get("x1"), 2.8)
+        self.assertEqual(d_loads_flipped[1].get("x2"), 5.0)
+
+    def test_v2414_s10_and_s5_backspan_lock_behavior(self):
+        """
+        v2.4.14 Acceptance Criteria 2 & 3:
+        S10 is NOT locked to S1 (it touches beam B1 far away, not a backspan), defaults to shorter dimension (90°), and flips freely.
+        S5 IS the true geometric backspan to Cantilever S1 across beam B7: locked, cannot flip,
+        returns 'Cantilever Back-Span Lock: Slab S5 is the back-span extension for Cantilever Slab S1.'
+        """
+        import json
+        from xpert_structural_engine import (
+            infer_story_slabs_face_based,
+            flip_slab_rib_by_id,
+        )
+        fixture_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, _ = infer_story_slabs_face_based(story)
+        story["slabs"] = slabs
+
+        s10 = next(s for s in slabs if s["id"] == "S10")
+        s5 = next(s for s in slabs if s["id"] == "S5")
+
+        # Acceptance Criterion 2: S10 flips freely without lock message
+        self.assertIsNone(s10.get("backspan_to_cantilever_id"))
+        self.assertFalse(s10.get("rib_direction_locked"))
+        self.assertEqual(s10.get("rib_direction_deg"), 90)  # Shorter dimension Y (3.15x2.05)
+        ok10, msg10, upd10 = flip_slab_rib_by_id(story, "S10")
+        self.assertTrue(ok10)
+        self.assertEqual(upd10.get("rib_direction_deg"), 0)
+        self.assertNotIn("Cantilever Back-Span Lock", msg10)
+
+        # Acceptance Criterion 3: S5 is locked to S1 and fails with exact lock message
+        self.assertEqual(s5.get("backspan_to_cantilever_id"), "S1")
+        self.assertTrue(s5.get("rib_direction_locked"))
+        ok5, msg5, upd5 = flip_slab_rib_by_id(story, "S5")
+        self.assertFalse(ok5)
+        self.assertEqual(
+            msg5,
+            "Cantilever Back-Span Lock: Slab S5 is the back-span extension for Cantilever Slab S1.",
+        )
+
 
 
 if __name__ == "__main__":

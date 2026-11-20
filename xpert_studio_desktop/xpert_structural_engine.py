@@ -1349,8 +1349,8 @@ def analyze_all_story_beams_and_columns(
                         if s_bounds is None:
                             continue
                         smin_x, smax_x, smin_y, smax_y = s_bounds
-                        lx_0 = max(0.5, smax_x - smin_x)
-                        ly_0 = max(0.5, smax_y - smin_y)
+                        lx_0 = max(0.5, float(slb.get("lx_m", smax_x - smin_x)))
+                        ly_0 = max(0.5, float(slb.get("ly_m", smax_y - smin_y)))
                         rib_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
                         is_cant_slb = bool(slb.get("is_cantilever", False))
                         sid_lbl = str(slb.get("id", "S"))
@@ -4244,6 +4244,90 @@ def validate_geometry_before_inference(story_data: Dict[str, Any]) -> Tuple[bool
 
     return True, []
 
+def find_geometric_backspan_for_cantilever(
+    cant: Dict[str, Any],
+    candidate_slabs: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Identifies the collinear continuity back-span slab for a given cantilever slab
+    based on Shapely geometric adjacency across the root carrier beam:
+      - Direct adjacency across the cantilever support face
+      - Collinear/overlapping interval >= 0.50 m
+      - Separation distance <= 0.85 m
+    """
+    c_edge = cant.get("cantilever_free_edge")
+    if not c_edge:
+        return None
+    c_dir = cant.get("rib_direction_deg", 0)
+    # Ribs must be perpendicular to root carrier beam to require backspan continuity
+    if c_edge in ("North", "South") and c_dir != 90:
+        return None
+    if c_edge in ("East", "West") and c_dir != 0:
+        return None
+    cx1 = float(cant.get("clear_min_x", cant.get("min_x", 0.0)))
+    cx2 = float(cant.get("clear_max_x", cant.get("max_x", 0.0)))
+    cy1 = float(cant.get("clear_min_y", cant.get("min_y", 0.0)))
+    cy2 = float(cant.get("clear_max_y", cant.get("max_y", 0.0)))
+    c_poly = None
+    if "polygon" in cant:
+        try:
+            c_poly = Polygon(cant["polygon"])
+        except Exception:
+            c_poly = None
+
+    best_slab = None
+    best_overlap = 0.0
+
+    for slb in candidate_slabs:
+        if slb.get("id") == cant.get("id") or slb.get("is_cantilever"):
+            continue
+        sx1 = float(slb.get("clear_min_x", slb.get("min_x", 0.0)))
+        sx2 = float(slb.get("clear_max_x", slb.get("max_x", 0.0)))
+        sy1 = float(slb.get("clear_min_y", slb.get("min_y", 0.0)))
+        sy2 = float(slb.get("clear_max_y", slb.get("max_y", 0.0)))
+
+        dist = 0.0
+        if c_poly is not None and "polygon" in slb:
+            try:
+                s_poly = Polygon(slb["polygon"])
+                dist = c_poly.distance(s_poly)
+            except Exception:
+                dist = 0.0
+        else:
+            dx = max(0.0, max(cx1, sx1) - min(cx2, sx2))
+            dy = max(0.0, max(cy1, sy1) - min(cy2, sy2))
+            dist = math.hypot(dx, dy)
+
+        if dist > 0.85:
+            continue
+
+        if c_edge == "West":
+            overlap_y = max(0.0, min(cy2, sy2) - max(cy1, sy1))
+            if sx1 >= cx2 - 0.25 and overlap_y >= 0.50:
+                if overlap_y > best_overlap:
+                    best_overlap = overlap_y
+                    best_slab = slb
+        elif c_edge == "East":
+            overlap_y = max(0.0, min(cy2, sy2) - max(cy1, sy1))
+            if sx2 <= cx1 + 0.25 and overlap_y >= 0.50:
+                if overlap_y > best_overlap:
+                    best_overlap = overlap_y
+                    best_slab = slb
+        elif c_edge == "South":
+            overlap_x = max(0.0, min(cx2, sx2) - max(cx1, sx1))
+            if sy1 >= cy2 - 0.25 and overlap_x >= 0.50:
+                if overlap_x > best_overlap:
+                    best_overlap = overlap_x
+                    best_slab = slb
+        elif c_edge == "North":
+            overlap_x = max(0.0, min(cx2, sx2) - max(cx1, sx1))
+            if sy2 <= cy1 + 0.25 and overlap_x >= 0.50:
+                if overlap_x > best_overlap:
+                    best_overlap = overlap_x
+                    best_slab = slb
+
+    return best_slab
+
 def infer_story_slabs_face_based(
     story: Optional[Dict[str, Any]] = None,
     preserve_existing_ids: bool = True,
@@ -4652,23 +4736,18 @@ def infer_story_slabs_face_based(
             cantilever_slabs.append(slab_obj)
         final_slabs.append(slab_obj)
 
-    # Backspan continuity lock: lock adjacent slab rib direction
+    # Backspan continuity lock: lock adjacent slab rib direction via geometric continuity
     for cant in cantilever_slabs:
-        c_sup_beam_ids = {sb["id"] for sb in cant["supporting_beams"]}
         c_dir = cant["rib_direction_deg"]
-        for slb in final_slabs:
-            if slb["id"] == cant["id"] or slb["is_cantilever"]:
-                continue
-            s_sup_ids = {sb["id"] for sb in slb["supporting_beams"]}
-            shared = c_sup_beam_ids.intersection(s_sup_ids)
-            if shared:
-                slb["rib_direction_deg"] = c_dir
-                slb["rib_direction_label"] = "X-Direction (0°)" if c_dir == 0 else "Y-Direction (90°)"
-                slb["rib_direction_locked"] = True
-                slb["backspan_to_cantilever_id"] = cant["id"]
-                slb["lock_reason"] = (
-                    f"Cantilever Back-Span Lock: Slab {slb['id']} acts as continuity back-span for Cantilever {cant['id']}."
-                )
+        best_slab = find_geometric_backspan_for_cantilever(cant, final_slabs)
+        if best_slab is not None:
+            best_slab["rib_direction_deg"] = c_dir
+            best_slab["rib_direction_label"] = "X-Direction (0°)" if c_dir == 0 else "Y-Direction (90°)"
+            best_slab["rib_direction_locked"] = True
+            best_slab["backspan_to_cantilever_id"] = cant["id"]
+            best_slab["lock_reason"] = (
+                f"Cantilever Back-Span Lock: Slab {best_slab['id']} acts as continuity back-span for Cantilever {cant['id']}."
+            )
 
     return final_slabs, warnings
 
@@ -4809,21 +4888,14 @@ def pick_area_create_or_update_slab(
 
     existing_slab = next((es for es in slabs if es.get("id") == target_slab["id"] or es.get("bay_key") == target_slab["bay_key"]), None)
 
-    # Check active cantilevers in story_data["slabs"]
-    t_sup_ids = {sb["id"] for sb in target_slab.get("supporting_beams", [])}
+    # Check active cantilevers in story_data["slabs"] via geometric continuity
     controlling_cant = None
     if not target_slab.get("is_cantilever"):
         for es in slabs:
             if es.get("is_cantilever") and es is not existing_slab:
-                es_sup_ids = {sb["id"] for sb in es.get("supporting_beams", [])}
-                if t_sup_ids.intersection(es_sup_ids):
-                    c_dir = es.get("rib_direction_deg", 90)
-                    if es.get("cantilever_free_edge") in ("North", "South") and c_dir == 90:
-                        controlling_cant = es
-                        break
-                    elif es.get("cantilever_free_edge") in ("East", "West") and c_dir == 0:
-                        controlling_cant = es
-                        break
+                if find_geometric_backspan_for_cantilever(es, [target_slab]) is not None:
+                    controlling_cant = es
+                    break
 
     if target_mode == "TOGGLE_OPENING" or target_mode == "OPENING":
         if controlling_cant is not None:
@@ -4845,9 +4917,11 @@ def pick_area_create_or_update_slab(
     elif controlling_cant is not None:
         chosen_dir = controlling_cant["rib_direction_deg"]
         target_slab["rib_direction_locked"] = True
+        target_slab["backspan_to_cantilever_id"] = controlling_cant.get("id")
     else:
         chosen_dir = 0 if target_slab["lx_m"] <= target_slab["ly_m"] else 90
         target_slab["rib_direction_locked"] = False
+        target_slab["backspan_to_cantilever_id"] = None
 
     if target_mode == "FLIP_RIB":
         if existing_slab is not None:
@@ -4891,21 +4965,17 @@ def pick_area_create_or_update_slab(
         chosen_slab = target_slab
 
     if chosen_slab.get("is_cantilever"):
-        c_sup_beam_ids = {sb["id"] for sb in chosen_slab.get("supporting_beams", [])}
         c_dir = chosen_slab["rib_direction_deg"]
+        b_slb = find_geometric_backspan_for_cantilever(chosen_slab, slabs)
         for s in slabs:
-            if s.get("id") == chosen_slab.get("id") or s.get("is_cantilever"):
-                continue
-            s_sup_ids = {sb["id"] for sb in s.get("supporting_beams", [])}
-            if c_sup_beam_ids.intersection(s_sup_ids):
-                if chosen_slab["rib_direction_deg"] == 90:
-                    s["rib_direction_deg"] = c_dir
-                    s["rib_direction_label"] = "X-Direction (0°)" if c_dir == 0 else "Y-Direction (90°)"
-                    s["rib_direction_locked"] = True
-                    s["backspan_to_cantilever_id"] = chosen_slab.get("id")
-                else:
-                    s["rib_direction_locked"] = False
-                    s["backspan_to_cantilever_id"] = None
+            if s.get("backspan_to_cantilever_id") == chosen_slab.get("id"):
+                s["backspan_to_cantilever_id"] = None
+                s["rib_direction_locked"] = False
+        if b_slb is not None:
+            b_slb["rib_direction_deg"] = c_dir
+            b_slb["rib_direction_label"] = "X-Direction (0°)" if c_dir == 0 else "Y-Direction (90°)"
+            b_slb["rib_direction_locked"] = True
+            b_slb["backspan_to_cantilever_id"] = chosen_slab.get("id")
 
     return True, f"Slab {chosen_slab['id']} set with Rib Direction = {chosen_slab['rib_direction_deg']}.", chosen_slab
 
