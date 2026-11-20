@@ -8,6 +8,10 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 **Release Title:** Face-Based Slab Inference Engine (Robust Shapely 2.0+ 2D CAD Boolean Subtraction, Coverage Equation $\le 0.01\text{ m}^2$, Zero Beam-Slab Overlap, Slivers Policy, Cantilever Rib Perpendicularity & Backspan Continuity Lock, 88/88 Tests Passed, Frozen Cores Preserved 100%).
 
 ### Key Features & Advancements in `v2.4.13-structural-bim-pro`:
+0. **UI & CAD Rendering Pipeline Overhaul (`xpert_studio_app.py`):**
+   - **Exact Polygon Rendering (`addPolygon`):** Switched slab canvas rendering from bounding-box rectangles (`addRect`) to exact 2D CAD polygons (`self.scene_2d.addPolygon(qpoly)`). Blue slab edges now align 100% flush against the inner faces of yellow hatched beams with zero centerline overlap.
+   - **Dynamic Slab Dimension Labels:** Fixed slab tag badges to display true clear dimensions `lx_m` and `ly_m` (e.g. `S16 (5.8m, 4.9m)`), completely eliminating `0.0m` placeholders.
+   - **Missing Import Fixed:** Imported `QListWidget` from `PyQt6.QtWidgets`, eliminating `NameError: QListWidget is not defined` when displaying `SlabInferenceWarningsDialog`.
 1. **Shapely 2.0+ 2D CAD Boolean Subtraction (`infer_story_slabs_face_based`):**
    - Completely replaced Qt `QPainterPath` boolean subtractions with exact CAD geometric topology via `shapely.ops.unary_union` and `difference`.
    - Formula: $\text{Slabs} = \text{Building Boundary (00-XD-EDGE)} - \text{Openings (00-XD-OPEN)} - \text{Beams (00-XD-BEAM)}$.

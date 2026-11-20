@@ -4587,6 +4587,10 @@ def infer_story_slabs_face_based(
             "clear_min_y": c["min_y"], "clear_max_y": c["max_y"],
             "lx_m": c["lx_m"], "ly_m": c["ly_m"],
             "ln_m": ln_m,
+            "axis_span_m": ln_m,
+            "span_m": ln_m,
+            "length": c["lx_m"],
+            "width": c["ly_m"],
             "rib_direction_deg": rib_dir,
             "rib_direction_label": "X-Direction (0°)" if rib_dir == 0 else "Y-Direction (90°)",
             "rib_direction_locked": locked,
@@ -4813,6 +4817,11 @@ def pick_area_create_or_update_slab(
 
     target_slab["rib_direction_deg"] = chosen_dir
     target_slab["rib_direction_label"] = "X-Direction (0°)" if chosen_dir == 0 else "Y-Direction (90°)"
+    target_slab["ln_m"] = target_slab.get("lx_m", 0.0) if chosen_dir == 0 else target_slab.get("ly_m", 0.0)
+    target_slab["axis_span_m"] = target_slab["ln_m"]
+    target_slab["span_m"] = target_slab["ln_m"]
+    target_slab["length"] = target_slab.get("lx_m", 0.0)
+    target_slab["width"] = target_slab.get("ly_m", 0.0)
 
     if existing_slab is not None:
         existing_slab.update(target_slab)

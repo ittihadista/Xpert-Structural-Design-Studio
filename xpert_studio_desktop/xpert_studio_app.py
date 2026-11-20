@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -3047,24 +3048,35 @@ class StructuralCadCanvas2D(QGraphicsView):
         openings_list = story_data.get("openings", [])
         if self.layer_show_slabs:
             for slb in story_data.get("slabs", []):
-                if "min_x" not in slb:
-                    continue
-                cmin_x = float(slb.get("clear_min_x", slb["min_x"]))
-                cmax_x = float(slb.get("clear_max_x", slb["max_x"]))
-                cmin_y = float(slb.get("clear_min_y", slb["min_y"]))
-                cmax_y = float(slb.get("clear_max_y", slb["max_y"]))
+                poly_pts = slb.get("polygon", [])
+                cmin_x = float(slb.get("clear_min_x", slb.get("min_x", 0.0)))
+                cmax_x = float(slb.get("clear_max_x", slb.get("max_x", 0.0)))
+                cmin_y = float(slb.get("clear_min_y", slb.get("min_y", 0.0)))
+                cmax_y = float(slb.get("clear_max_y", slb.get("max_y", 0.0)))
+                if len(poly_pts) >= 3:
+                    xs = [float(pt[0]) for pt in poly_pts]
+                    ys = [float(pt[1]) for pt in poly_pts]
+                    cmin_x, cmax_x = min(xs), max(xs)
+                    cmin_y, cmax_y = min(ys), max(ys)
+
                 if cmax_x <= cmin_x or cmax_y <= cmin_y:
                     continue
                 scx, scy = (cmin_x + cmax_x) / 2.0, (cmin_y + cmax_y) / 2.0
                 if any(is_point_in_opening(scx, scy, op, include_edge=False, tol=0.05) for op in openings_list):
                     continue
 
-                rect = QRectF(cmin_x * s, -cmax_y * s, (cmax_x - cmin_x) * s, (cmax_y - cmin_y) * s)
                 is_cant = bool(slb.get("is_cantilever", False))
                 is_sel_slab = ("slab", str(slb.get("id"))) in self.selected_items
                 fill_col = QColor(245, 158, 11, 42) if is_cant else QColor(56, 189, 248, 22)
                 border_pen = QPen(QColor("#F8FAFC" if is_sel_slab else "#38BDF8"), 2 if is_sel_slab else 1, Qt.PenStyle.DotLine)
-                self.scene_2d.addRect(rect, border_pen, QBrush(fill_col))
+
+                # Render exact face-based Shapely polygon (aligns flush with beam inner faces)
+                if len(poly_pts) >= 3:
+                    qpoly = QPolygonF([QPointF(float(pt[0]) * s, -float(pt[1]) * s) for pt in poly_pts])
+                    self.scene_2d.addPolygon(qpoly, border_pen, QBrush(fill_col))
+                else:
+                    rect = QRectF(cmin_x * s, -cmax_y * s, (cmax_x - cmin_x) * s, (cmax_y - cmin_y) * s)
+                    self.scene_2d.addRect(rect, border_pen, QBrush(fill_col))
 
                 rib_dir = int(slb.get("rib_direction_deg", 0))
                 rib_pen = QPen(QColor(234, 179, 8, 75), 1, Qt.PenStyle.DashLine)
@@ -3079,21 +3091,30 @@ class StructuralCadCanvas2D(QGraphicsView):
                         self.scene_2d.addLine(x_step * s, -(cmin_y + 0.05) * s, x_step * s, -(cmax_y - 0.05) * s, rib_pen)
                         x_step += 0.55
 
-                cx = (cmin_x + cmax_x) / 2.0
-                cy = (cmin_y + cmax_y) / 2.0
+                cx = float(slb.get("cx", (cmin_x + cmax_x) / 2.0))
+                cy = float(slb.get("cy", (cmin_y + cmax_y) / 2.0))
                 arrow_pen = QPen(QColor("#FACC15"), 2.2)
                 if rib_dir == 0:
                     self.scene_2d.addLine((cx - 0.65) * s, -cy * s, (cx + 0.65) * s, -cy * s, arrow_pen)
                 else:
                     self.scene_2d.addLine(cx * s, -(cy - 0.65) * s, cx * s, -(cy + 0.65) * s, arrow_pen)
 
+                # Format dimensions: read lx_m and ly_m properly
+                lx_val = float(slb.get("lx_m", 0.0))
+                ly_val = float(slb.get("ly_m", 0.0))
+                if lx_val <= 0.0:
+                    lx_val = round(cmax_x - cmin_x, 2)
+                if ly_val <= 0.0:
+                    ly_val = round(cmax_y - cmin_y, 2)
+
                 if self.layer_show_tags:
-                    badge_rect = QRectF(cx * s - 46, -cy * s - 12, 92, 22)
+                    slb_tag = f"{slb['id']} ({lx_val:.1f}m, {ly_val:.1f}m)"
+                    badge_w = max(88.0, len(slb_tag) * 6.5 + 14.0)
+                    badge_rect = QRectF(cx * s - badge_w / 2.0, -cy * s - 11, badge_w, 22)
                     self.scene_2d.addRect(badge_rect, QPen(QColor("#FACC15"), 1), QBrush(QColor(15, 23, 42, 220)))
-                    slb_tag = f"{slb['id']} ({slb.get('axis_span_m', 0):.1f}m | {rib_dir}°)"
                     stxt = self.scene_2d.addText(slb_tag, QFont("Arial", 8, QFont.Weight.Bold))
                     stxt.setDefaultTextColor(QColor("#FDE047"))
-                    stxt.setPos(cx * s - 44, -cy * s - 12)
+                    stxt.setPos(cx * s - badge_w / 2.0 + 4, -cy * s - 12)
 
             for op in openings_list:
                 min_x, max_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
