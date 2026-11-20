@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v1.0.0)
+Xpert Structural Design Studio (v2.5.0-structural-bim-pro)
 Module: xpert_project_io.py
 Lead Engineer: Eng. Yousef Mohammed Keshlaf
 
@@ -8,7 +8,8 @@ Handles:
 2. Strict <ProjectName>- File Prefixing with Zero Unprefixed Duplicates.
 3. Two-Way Live Synchronization between In-Memory Story Models, JSON Databases,
    and Standard AutoCAD .DXF Drawings ($INSUNITS = 6 Meters, Z = 0).
-4. Color-Coded Non-Overlapping CAD Tags:
+4. Ground-to-Upper Column Propagation, Continuity Cascade, and Tie-Beams Neck Columns.
+5. Color-Coded Non-Overlapping CAD Tags:
    - Columns (00-XD-TAG-COL): Bright Green (ACI Color 3), outside top-right corner.
    - Beams (00-XD-TAG-BEAM): Bright Orange (ACI Color 30), parallel to beam at
      the midpoint of the first clear span (strictly between columns).
@@ -29,7 +30,8 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.4.0-structural-bim-pro"
+STUDIO_VERSION = "v2.5.0-structural-bim-pro"
+MASTER_FILE_EXT = ".xsd"
 
 _LOG_LOCK = threading.Lock()
 _ACTIVE_PROJECT_LOG_DIR: Optional[str] = None
@@ -59,11 +61,6 @@ def log_studio_event(
     details: Optional[Any] = None,
     level: str = "INFO",
 ) -> None:
-    """
-    Appends a timestamped structured diagnostic entry to `xpert_studio_session.log`
-    (both in the desktop module folder and in the active project folder when open).
-    Never raises exceptions into callers.
-    """
     try:
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         entry = f"[{ts}] [{STUDIO_VERSION}] [{level.upper()}] [{category.upper()}] {message}"
@@ -121,6 +118,7 @@ def clear_studio_log(project_dir: Optional[str] = None) -> None:
     except OSError:
         pass
 
+
 DEFAULT_REBAR_DIAMETERS_TABLE: List[Dict[str, Any]] = [
     {"active": True, "enabled": True, "label": "Φ 6", "bar_name": "Φ6", "dia_mm": 6, "diameter_mm": 6, "area_mm2": 28.27, "weight_kg_m": 0.222, "role": "Stirrups (Ribs & Beams)"},
     {"active": True, "enabled": True, "label": "Φ 8", "bar_name": "Φ8", "dia_mm": 8, "diameter_mm": 8, "area_mm2": 50.27, "weight_kg_m": 0.395, "role": "Stirrups (Beams & Columns)"},
@@ -142,10 +140,6 @@ def _get_global_settings_file_path() -> str:
 
 
 def _normalize_rebar_table(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Ensures all standard diameters from Φ6 through Φ32 exist in the rebar table
-    and synchronizes both (dia_mm/diameter_mm, label/bar_name, active/enabled) keys.
-    """
     by_dia: Dict[int, Dict[str, Any]] = {}
     for r in DEFAULT_REBAR_DIAMETERS_TABLE:
         d = int(r["dia_mm"])
@@ -177,13 +171,6 @@ def _normalize_rebar_table(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def load_studio_global_settings() -> Dict[str, Any]:
-    """
-    Loads persistent global studio settings for:
-    1. 'Startup Defaults' (Projects Root Folder & Rebar Diameters Table including Φ6 stirrups & Φ32 main bars)
-    2. 'Options' (Material Properties & Hollow-Block / Hordi Slab Parameters matching Eng. Yousef's Excel sheet:
-       W_finishing = 1.5 kN/m², standard block height = 20.0 cm (or 16.0 cm), hs = h - h_block,
-       γc = 24.0 kN/m³, Wu(rib) = 6.44 kN/m'/rib @ h=30cm [6.07 @ h=28cm], Wu(m×m) = 11.71 kN/m² @ h=30cm [11.04 @ h=28cm])
-    """
     default_root = os.path.abspath("./XpertStudio_Projects")
     mat_defaults = {
         "fc_mpa": 20.0,
@@ -196,38 +183,38 @@ def load_studio_global_settings() -> Dict[str, Any]:
         "beam_compression_steel_mode": "double_as_min",
     }
     hb_defaults = {
-        "slab_thickness_cm": 30.0,        # h = 300 mm
-        "top_flange_cm": 10.0,            # hs = h - h_block = 100 mm (80 mm when h=280mm)
-        "top_compression_slab_cm": 10.0,  # hs = 100 mm
-        "block_height_cm": 20.0,          # Fixed commercial block height: 20 cm (200 mm) or 16 cm (160 mm)
-        "block_width_cm": 40.0,           # S = 400 mm (clear spacing between ribs)
-        "block_length_cm": 25.0,          # 250 mm along rib (4 blocks / m)
-        "rib_width_cm": 15.0,             # bw1 = 150 mm (top rib width)
-        "rib_bw2_cm": 15.0,               # bw2 = 150 mm (bottom rib width)
-        "slab_cover_mm": 20.0,            # dc = 20 mm
-        "rib_bar_dia_mm": 12,             # db = 12 mm (can be changed to 14 or 16 mm)
-        "rib_stirrup_dia_mm": 6,          # ds = 6 mm (triangular stirrup)
-        "block_weight_kn": 0.10,          # W_block = 10 kg = 0.10 kN
-        "finish_load_kn_m2": 1.5,         # W_finishing = 1.5 kN/m² (Eng. Yousef Excel)
+        "slab_thickness_cm": 30.0,
+        "top_flange_cm": 10.0,
+        "top_compression_slab_cm": 10.0,
+        "block_height_cm": 20.0,
+        "block_width_cm": 40.0,
+        "block_length_cm": 25.0,
+        "rib_width_cm": 15.0,
+        "rib_bw2_cm": 15.0,
+        "slab_cover_mm": 20.0,
+        "rib_bar_dia_mm": 12,
+        "rib_stirrup_dia_mm": 6,
+        "block_weight_kn": 0.10,
+        "finish_load_kn_m2": 1.5,
         "finishing_load_kpa": 1.5,
-        "live_load_kn_m2": 2.0,           # LL = 2.0 kN/m²
+        "live_load_kn_m2": 2.0,
         "live_load_kpa": 2.0,
-        "dl_factor": 1.4,                 # 1.4 DL
-        "ll_factor": 1.7,                 # 1.7 LL
-        "wu_rib_kn_m": 6.44,              # Wu(rib) = 6.44 kN/m'/rib @ h=30cm
-        "slab_factored_wu_kpa": 11.71,    # Wu(m*m) = Wu(rib)/(S+bw1) = 6.441 / 0.55 = 11.71 kN/m² @ h=30cm
-        "wall_thickness_cm": 20.0,        # Default wall thickness = 20 cm (200 mm)
-        "wall_unit_wt_20cm_kn_m2": 2.5,   # 2.5 kN/m² of wall elevation for 20 cm wall
-        "default_wall_load_kn_m": 10.50,  # W_wall = 2.5 * H(3.0m) * 1.4 = 10.50 kN/m
-        "hidden_beam_min_width_cm": 40.0, # Min B for Hidden Beams = 400 mm (Excel B_min = 400)
-        "drop_beam_width_cm": 20.0,       # Default B for Drop Beams = 200 mm
-        "drop_beam_min_depth_cm": 40.0,   # Min h for Drop Beams = 400 mm (Excel h_min = 400)
+        "dl_factor": 1.4,
+        "ll_factor": 1.7,
+        "wu_rib_kn_m": 6.44,
+        "slab_factored_wu_kpa": 11.71,
+        "wall_thickness_cm": 20.0,
+        "wall_unit_wt_20cm_kn_m2": 2.5,
+        "default_wall_load_kn_m": 10.50,
+        "hidden_beam_min_width_cm": 40.0,
+        "drop_beam_width_cm": 20.0,
+        "drop_beam_min_depth_cm": 40.0,
         "drop_beam_depth_cm": 40.0,
     }
     rebar_table = _normalize_rebar_table(DEFAULT_REBAR_DIAMETERS_TABLE)
 
     defaults: Dict[str, Any] = {
-        "schema_version": "2.3.0",
+        "schema_version": "2.5.0",
         "default_projects_root_folder": default_root,
         "default_stirrup_bar_mm": 6,
         "default_main_bar_mm": 16,
@@ -275,7 +262,6 @@ def load_studio_global_settings() -> Dict[str, Any]:
                     if isinstance(saved["options"].get("hollow_block_slab"), dict):
                         defaults["hollow_block_slab_data"].update(saved["options"]["hollow_block_slab"])
 
-                # Migrate pre-v2.0.0 legacy settings (where finish_load was 2.0, top_slab was 5.0, gamma_c was 25.0, wu was 10.0)
                 if not is_modern:
                     defaults["materials_and_soil"]["concrete_unit_weight_kn_m3"] = 24.0
                     defaults["materials_and_soil"]["gamma_c_kn_m3"] = 24.0
@@ -296,10 +282,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
 
 
 def save_studio_global_settings(settings: Dict[str, Any]) -> str:
-    """
-    Saves global 'Startup Defaults' and 'Options' to `xpert_studio_defaults.json`.
-    """
-    settings["schema_version"] = "2.3.0"
+    settings["schema_version"] = "2.5.0"
     if "rebar_diameters_table" in settings:
         settings["rebar_diameters_table"] = _normalize_rebar_table(settings["rebar_diameters_table"])
     fpath = _get_global_settings_file_path()
@@ -312,24 +295,20 @@ def save_studio_global_settings(settings: Dict[str, Any]) -> str:
 
 
 STANDARD_LAYERS = [
-    ("00-XD-EDGE", 4, "Continuous"),       # Cyan: Outer Slab Boundary
-    ("00-XD-OPEN", 6, "Continuous"),       # Magenta: Slab Openings
-    ("00-XD-COL", 1, "Continuous"),        # Red: Structural Columns
-    ("00-XD-BEAM-HID", 2, "DASHED"),       # Yellow: Hidden Beams
-    ("00-XD-BEAM-DROP", 3, "Continuous"),  # Green: Drop Beams
-    ("00-XD-SLAB", 40, "Continuous"),      # Gold: One-Way Hollow-Block Ribs
-    ("00-XD-TAG-COL", 3, "Continuous"),    # Bright Green: Column Tags (C1..Cn)
-    ("00-XD-TAG-BEAM", 30, "Continuous"),  # Bright Orange: Beam Tags (B1..Bm)
-    ("00-XD-DIM", 7, "Continuous"),        # White/Cyan: Engineering Dimensions
-    ("00-XD-ARCH-REF", 8, "Continuous"),   # Gray: Imported Architectural Underlay
+    ("00-XD-EDGE", 4, "Continuous"),
+    ("00-XD-OPEN", 6, "Continuous"),
+    ("00-XD-COL", 1, "Continuous"),
+    ("00-XD-BEAM-HID", 2, "DASHED"),
+    ("00-XD-BEAM-DROP", 3, "Continuous"),
+    ("00-XD-SLAB", 40, "Continuous"),
+    ("00-XD-TAG-COL", 3, "Continuous"),
+    ("00-XD-TAG-BEAM", 30, "Continuous"),
+    ("00-XD-DIM", 7, "Continuous"),
+    ("00-XD-ARCH-REF", 8, "Continuous"),
 ]
 
 
 def validate_project_name(name: str) -> Tuple[bool, str, str, str]:
-    """
-    Validates project identifier (alphanumeric and spaces/underscores only).
-    Returns: (is_valid, clean_name, folder_name, error_message_en)
-    """
     trimmed = (name or "").strip()
     if not trimmed:
         return False, "", "", "Project Name cannot be empty."
@@ -349,18 +328,6 @@ def resolve_standard_hordi_block_and_topping_cm(
     slab_thickness_cm: float,
     requested_block_height_cm: Optional[float] = None,
 ) -> Tuple[float, float]:
-    """
-    Standard Commercial Hollow-Block (Hordi) Rule per Eng. Yousef's Engineering Specification:
-    - Hollow block height (`block_height_cm`) is strictly one of the two standard commercial sizes:
-        * 20.0 cm (200 mm) when total slab thickness h >= 25.0 cm (e.g., h = 25..35 cm -> block = 20 cm, hs = h - 20 cm).
-        * 16.0 cm (160 mm) when total slab thickness h < 25.0 cm (e.g., h = 20..24 cm -> block = 16 cm, hs = h - 16 cm).
-      (If the user explicitly selects 16.0 cm or 20.0 cm and h >= block + 4.0 cm, that choice is respected.)
-    - The concrete topping slab (`hs_cm`) is the variable layer above the block:
-        * hs_cm = h_cm - block_height_cm
-        * For h = 28 cm (280 mm): block = 20 cm (200 mm), hs = 8 cm (80 mm) -> Wu(rib)=6.07, Wu(m×m)=11.04 kN/m².
-        * For h = 29 cm (290 mm): block = 20 cm (200 mm), hs = 9 cm (90 mm) -> Wu(rib)=6.26, Wu(m×m)=11.38 kN/m².
-        * For h = 30 cm (300 mm): block = 20 cm (200 mm), hs = 10 cm (100 mm) -> Wu(rib)=6.44, Wu(m×m)=11.71 kN/m².
-    """
     h_cm = max(18.0, float(slab_thickness_cm))
     if requested_block_height_cm is not None and round(float(requested_block_height_cm), 1) in (16.0, 20.0):
         cand_blk = round(float(requested_block_height_cm), 1)
@@ -386,11 +353,6 @@ def compute_hollow_block_parameters(
     ll_factor: float = 1.7,
     block_height_cm: Optional[float] = None,
 ) -> Dict[str, float]:
-    """
-    Computes hollow-block (Hordi) rib loads and area load per Eng. Yousef's Excel Sheet ('Design of rib slab').
-    Accepts either a dictionary of options as the first argument OR individual float parameters.
-    Enforces standard commercial block height (20 cm or 16 cm) so topping slab hs = h - block_height varies with h!
-    """
     req_blk_h = block_height_cm
     if isinstance(slab_thickness_cm, dict):
         d_in = slab_thickness_cm
@@ -411,9 +373,8 @@ def compute_hollow_block_parameters(
     s_cm = max(20.0, float(block_width_cm))
     bw1_cm = max(8.0, float(rib_width_cm))
     bw2_cm = max(8.0, float(rib_bw2_cm if rib_bw2_cm is not None else bw1_cm))
-    rib_spacing_cm = round(s_cm + bw1_cm, 2)  # b = S + bw1 (default 55 cm)
+    rib_spacing_cm = round(s_cm + bw1_cm, 2)
 
-    h_m = h_cm / 100.0
     hs_m = hs_cm / 100.0
     blk_h_m = block_height_cm_val / 100.0
     s_m = s_cm / 100.0
@@ -423,9 +384,6 @@ def compute_hollow_block_parameters(
     blk_len_m = max(0.10, float(block_length_cm) / 100.0)
     gamma_rc = max(18.0, float(gamma_c_kn_m3))
 
-    # Per-Rib Weights (kN/m'/rib) — matching Excel cells 100%:
-    # Topping = hs * (S + bw1) * gamma_c
-    # Rib Web = ((bw1 + bw2)/2) * (h - hs) * gamma_c = ((bw1 + bw2)/2) * block_height * gamma_c
     topping_wt_rib = round(hs_m * b_space_m * gamma_rc, 4)
     rib_web_wt_rib = round(((bw1_m + bw2_m) / 2.0) * blk_h_m * gamma_rc, 4)
     blocks_per_m_rib = round(1.0 / blk_len_m, 3)
@@ -486,11 +444,6 @@ compute_hollow_block_slab_loads = compute_hollow_block_parameters
 
 
 def cleanup_unprefixed_duplicates(project_dir: str, clean_project_name: str) -> None:
-    """
-    Ensures zero legacy unprefixed files AND zero duplicate .xpert / .json
-    files remain inside the root Stractural-<ProjectName> directory.
-    Only `<ProjectName>-00_Project_Master.xsd` is kept in the root project directory.
-    """
     prefix = f"{clean_project_name}-"
     canonical_master_name = f"{clean_project_name}-00_Project_Master.xsd"
     for sub in ["", "CAD_Drawings", "Stories_Data"]:
@@ -515,15 +468,7 @@ def cleanup_unprefixed_duplicates(project_dir: str, clean_project_name: str) -> 
                         pass
 
 
-MASTER_FILE_EXT = ".xsd"
-
-
 def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
-    """
-    Loads an existing project from its custom `<ProjectName>-00_Project_Master.xsd`
-    (or legacy `.xpert` / `.json`) file, resolves relative story paths if the project folder was moved,
-    and ensures only the canonical `.xsd` master file remains in the project directory.
-    """
     abs_path = os.path.abspath(master_path)
     if not os.path.isfile(abs_path):
         raise FileNotFoundError(f"Master project file not found: {abs_path}")
@@ -587,7 +532,6 @@ def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    # Always write canonical .xsd and remove any legacy .xpert or -00_Project_Master.json duplicates
     try:
         with open(canonical_xsd, "w", encoding="utf-8") as f:
             json.dump(master_payload, f, indent=2)
@@ -599,10 +543,6 @@ def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
 
 
 def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Creates Stractural-<ProjectName> and generates the custom `<ProjectName>-00_Project_Master.xsd`
-    master file along with all `<ProjectName>-` prefixed JSON and DXF files.
-    """
     raw_name = config.get("project_name", "NewProject")
     ok, clean_name, folder_name, err = validate_project_name(raw_name)
     if not ok:
@@ -615,7 +555,6 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
     os.makedirs(cad_dir, exist_ok=True)
     os.makedirs(stories_dir, exist_ok=True)
-
     cleanup_unprefixed_duplicates(project_dir, clean_name)
 
     ground_h = float(config.get("ground_floor_height_m", 3.20))
@@ -626,12 +565,11 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
     include_basement = bool(config.get("include_basement", False))
     floors_above_ground = max(0, int(config.get("floors_above_ground", 0)))
-    upper_mode = config.get("upper_floors_mode", "typical")  # 'typical' or 'distinct'
+    upper_mode = config.get("upper_floors_mode", "typical")
     include_penthouse = bool(config.get("include_penthouse", False))
 
     stories_meta: List[Dict[str, Any]] = []
 
-    # 00 - Tie Beams (Carries Ground Floor walls -> H_wall = ground_h, NOT foundation depth!)
     stories_meta.append({
         "story_id": "00_TieBeams",
         "story_label": "00 - Tie Beams & Grade Beams",
@@ -645,7 +583,6 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         "status": "PENDING_GROUND_COLUMNS",
     })
 
-    # 01 - Optional Basement (Carries Ground Floor walls)
     if include_basement:
         stories_meta.append({
             "story_id": "01_Basement_Slab",
@@ -660,7 +597,6 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             "status": "PENDING_GROUND_COLUMNS",
         })
 
-    # 02 - Mandatory Ground Floor (Carries Upper/First Floor walls -> H_wall = upper_h!)
     ground_wall_h = upper_h if floors_above_ground > 0 else (penthouse_h if include_penthouse else 1.50)
     stories_meta.append({
         "story_id": "02_Ground_Floor",
@@ -675,7 +611,6 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         "status": "ACTIVE_START",
     })
 
-    # Upper Floors (03+) (Carries Upper / Penthouse / Parapet walls)
     next_code = 3
     if floors_above_ground > 0:
         if upper_mode == "typical" and floors_above_ground >= 1:
@@ -710,7 +645,6 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
                 })
                 next_code += 1
 
-    # Optional Roof Annex / Penthouse (Unchecked by default)
     if include_penthouse:
         stories_meta.append({
             "story_id": f"{next_code:02d}_Penthouse_Floor",
@@ -745,6 +679,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         "project_dir": project_dir,
         "master_file": master_xsd_file,
         "mandatory_start_story_id": "02_Ground_Floor",
+        "column_overrides": {},
         "materials_and_soil": {
             "fc_mpa": float(config.get("fc_mpa", 20.0)),
             "fy_mpa": float(config.get("fy_mpa", 350.0)),
@@ -792,6 +727,7 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
         sm_entry["json_file"] = json_path
         sm_entry["dxf_file"] = dxf_path
         master_payload["stories"].append(sm_entry)
+
         story_data = {
             "project_name": clean_name,
             "story_id": sid,
@@ -817,7 +753,6 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
         sync_story_to_dxf(story_data, dxf_path, role="STORY_EXTRACTION")
 
-    # Root Master (ONLY .xsd in project_dir — summary JSONs live in Stories_Data)
     takedown_file = os.path.join(stories_dir, f"{clean_name}-Columns_Load_Takedown.json")
     foundations_file = os.path.join(stories_dir, f"{clean_name}-Foundations_Design.json")
     boq_file = os.path.join(stories_dir, f"{clean_name}-BOQ_Quantities.json")
@@ -844,7 +779,11 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
 
     cleanup_unprefixed_duplicates(project_dir, clean_name)
     set_active_project_log_dir(project_dir)
-    log_studio_event("PROJECT_INIT", f"Initialized project Stractural-{clean_name} with {len(stories_meta)} stories", {"project_dir": project_dir, "master_file": master_xsd_file})
+    log_studio_event(
+        "PROJECT_INIT",
+        f"Initialized project Stractural-{clean_name} with {len(stories_meta)} stories",
+        {"project_dir": project_dir, "master_file": master_xsd_file},
+    )
     return master_payload
 
 
@@ -855,14 +794,6 @@ def compute_smart_beam_tag_position(
     all_beams: Optional[List[Dict[str, Any]]] = None,
     slabs: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[float, float, float]:
-    """
-    Computes a collision-free label position (x, y, rotation_deg) for a beam B#:
-    - Offsets clearly away from the beam border line (`width_m / 2.0 + 0.24 m`) so the text never
-      sits on top of the beam lines.
-    - Avoids perpendicular beam T-junctions/intersections, columns, slab badges (`S1..Sn`),
-      and previously placed beam tags by scoring candidate positions on both sides of the beam
-      along its spans.
-    """
     sx = float(beam.get("start_x", 0.0))
     sy = float(beam.get("start_y", 0.0))
     ex = float(beam.get("end_x", 5.0))
@@ -874,7 +805,6 @@ def compute_smart_beam_tag_position(
     length = max(0.01, (dx * dx + dy * dy) ** 0.5)
     ux = dx / length
     uy = dy / length
-    # Perpendicular unit vector (above horizontal beam, left of vertical beam)
     nx = -uy
     ny = ux
 
@@ -882,7 +812,6 @@ def compute_smart_beam_tag_position(
     rot_deg = 90.0 if is_vertical else 0.0
     perp_offset = (b_width / 2.0) + 0.24
 
-    # Find stations along the beam where columns or perpendicular beams intersect this beam
     junction_stations: List[float] = [0.0, length]
     for col in columns:
         if not col.get("active", True):
@@ -902,18 +831,13 @@ def compute_smart_beam_tag_position(
             ob_vert = abs(oey - osy) > abs(oex - osx)
             if ob_vert != is_vertical:
                 if is_vertical:
-                    # This beam is vertical at sx, ob is horizontal at osy
                     if min(osx, oex) - 0.30 <= sx <= max(osx, oex) + 0.30 and min(sy, ey) - 0.30 <= osy <= max(sy, ey) + 0.30:
-                        proj = abs(osy - sy)
-                        junction_stations.append(min(max(0.0, proj), length))
+                        junction_stations.append(min(max(0.0, abs(osy - sy)), length))
                 else:
-                    # This beam is horizontal at sy, ob is vertical at osx
                     if min(sx, ex) - 0.30 <= osx <= max(sx, ex) + 0.30 and min(osy, oey) - 0.30 <= sy <= max(osy, oey) + 0.30:
-                        proj = abs(osx - sx)
-                        junction_stations.append(min(max(0.0, proj), length))
+                        junction_stations.append(min(max(0.0, abs(osx - sx)), length))
 
     junction_stations = sorted(set(round(s, 2) for s in junction_stations))
-    # Build candidate stations at midpoints and third-points of each clear segment between junctions
     cand_stations: List[float] = []
     segs = [
         (junction_stations[i], junction_stations[i + 1])
@@ -927,8 +851,7 @@ def compute_smart_beam_tag_position(
     if not cand_stations:
         cand_stations = [length * 0.50, length * 0.32, length * 0.68]
 
-    # Collect obstacle centers (columns, slab badge boxes, and already-placed tags)
-    obstacles: List[Tuple[float, float, float]] = []  # (ox, oy, min_dist)
+    obstacles: List[Tuple[float, float, float]] = []
     for col in columns:
         if col.get("active", True):
             obstacles.append((float(col.get("x", 0.0)), float(col.get("y", 0.0)), 0.52))
@@ -956,7 +879,6 @@ def compute_smart_beam_tag_position(
                 clearance_margin = d - req_d
                 if clearance_margin < min_clearance:
                     min_clearance = clearance_margin
-            # Slight preference for positive side (+nx, +ny) when both sides are completely clear
             side_bonus = 0.08 if side_sign > 0 else 0.0
             score = min(min_clearance, 0.60) + side_bonus
             if min_clearance >= 0.0 and score > best_score:
@@ -974,10 +896,6 @@ def compute_smart_beam_tag_position(
 
 
 def _write_ascii_dxf_fallback(story_data: Dict[str, Any], dxf_path: str) -> None:
-    """
-    Pure-Python standard ASCII DXF writer fallback when ezdxf is not installed.
-    Writes layers, closed column polylines, beams, and color-coded non-overlapping tags.
-    """
     lines = [
         "0", "SECTION", "2", "HEADER",
         "9", "$INSUNITS", "70", "6",
@@ -990,7 +908,7 @@ def _write_ascii_dxf_fallback(story_data: Dict[str, Any], dxf_path: str) -> None
         if not col.get("active", True):
             continue
         cx, cy = float(col["x"]), float(col["y"])
-        b, h = float(col.get("b_m", 0.25)), float(col.get("h_m", 0.50))
+        b, h = float(col.get("b_m", 0.20)), float(col.get("h_m", 0.40))
         cid = str(col["id"]) + (" (2H)" if col.get("double_height") else "")
         tag_x = round(cx + b / 2.0 + 0.12, 3)
         tag_y = round(cy + h / 2.0 + 0.12, 3)
@@ -1040,10 +958,6 @@ def _write_ascii_dxf_fallback(story_data: Dict[str, Any], dxf_path: str) -> None
 
 
 def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "STORY_EXTRACTION") -> None:
-    """
-    Writes the complete story geometry and color-coded non-overlapping tags
-    to a standard AutoCAD .DXF file ($INSUNITS = 6 Meters).
-    """
     if ezdxf is None:
         _write_ascii_dxf_fallback(story_data, dxf_path)
         return
@@ -1054,20 +968,18 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
     if "XD_TAG_STYLE" not in doc.styles:
         doc.styles.add("XD_TAG_STYLE", font="arial.ttf")
 
-    for layer_name, aci_color, ltype in STANDARD_LAYERS:
+    for layer_name, aci_color, _ltype in STANDARD_LAYERS:
         if layer_name not in doc.layers:
             doc.layers.add(name=layer_name, color=aci_color)
 
     msp = doc.modelspace()
 
-    # 1. Outer Slab Boundary (00-XD-EDGE)
     edge_pts = story_data.get("slab_edge_polygon", [])
     if len(edge_pts) >= 3:
         pts_2d = [(float(p[0]), float(p[1])) for p in edge_pts]
         poly = msp.add_lwpolyline(pts_2d, dxfattribs={"layer": "00-XD-EDGE"})
         poly.closed = True
 
-    # 2. Columns (00-XD-COL) & Bright Green Column Tags (00-XD-TAG-COL)
     placed_tags: List[Tuple[float, float]] = []
     columns = story_data.get("columns", [])
     for col in columns:
@@ -1075,8 +987,9 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
             continue
         cx = float(col["x"])
         cy = float(col["y"])
-        b = float(col.get("b_m", 0.25))
-        h = float(col.get("h_m", 0.50))
+        b = float(col.get("b_m", 0.20))
+        h = float(col.get("h_m", 0.40))
+        is_neck = bool(col.get("neck") or col.get("is_neck_column"))
         cid = str(col["id"]) + (" (2H)" if col.get("double_height") else "")
 
         corners = [
@@ -1085,10 +998,9 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
             (cx + b / 2.0, cy + h / 2.0),
             (cx - b / 2.0, cy + h / 2.0),
         ]
-        cpoly = msp.add_lwpolyline(corners, dxfattribs={"layer": "00-XD-COL", "color": 1})
+        cpoly = msp.add_lwpolyline(corners, dxfattribs={"layer": "00-XD-COL", "color": 4 if is_neck else 1})
         cpoly.closed = True
 
-        # Place C# tag OUTSIDE the top-right corner in Bright Green (ACI Color 3)
         tag_x = round(cx + b / 2.0 + 0.12, 3)
         tag_y = round(cy + h / 2.0 + 0.12, 3)
         placed_tags.append((tag_x, tag_y))
@@ -1098,12 +1010,11 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
                 "layer": "00-XD-TAG-COL",
                 "style": "XD_TAG_STYLE",
                 "height": 0.22,
-                "color": 3,
+                "color": 4 if is_neck else 3,
                 "insert": (tag_x, tag_y, 0.0),
             },
         )
 
-    # 2B. Slab Openings (00-XD-OPEN in Magenta)
     for op in story_data.get("openings", []):
         pts = op.get("polygon") or [
             [float(op.get("min_x", 0.0)), float(op.get("min_y", 0.0))],
@@ -1119,7 +1030,6 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
             msp.add_line((omin_x, omin_y), (omax_x, omax_y), dxfattribs={"layer": "00-XD-OPEN", "color": 6})
             msp.add_line((omin_x, omax_y), (omax_x, omin_y), dxfattribs={"layer": "00-XD-OPEN", "color": 6})
 
-    # 3. Beams (00-XD-BEAM-HID / 00-XD-BEAM-DROP) & Bright Orange Beam Tags (00-XD-TAG-BEAM)
     beams = story_data.get("beams", [])
     for bm in beams:
         sx = float(bm.get("start_x", 0.0))
@@ -1127,7 +1037,7 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
         ex = float(bm.get("end_x", 5.0))
         ey = float(bm.get("end_y", 0.0))
         b_kind = bm.get("beam_kind", "hidden")
-        b_width = float(bm.get("width_m", 0.30 if b_kind == "hidden" else 0.20))
+        b_width = float(bm.get("width_m", 0.40 if b_kind == "hidden" else 0.20))
         layer = "00-XD-BEAM-HID" if b_kind == "hidden" else "00-XD-BEAM-DROP"
         color = 2 if b_kind == "hidden" else 3
 
@@ -1136,7 +1046,6 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
             dxfattribs={"layer": layer, "color": color, "const_width": b_width},
         )
 
-        # Place B# tag at clear-span midpoint in Bright Orange (ACI Color 30)
         tx, ty, rot_deg = compute_smart_beam_tag_position(bm, columns, placed_tags)
         msp.add_text(
             str(bm["id"]),
@@ -1153,31 +1062,105 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
     doc.saveas(dxf_path)
 
 
-def propagate_ground_columns_to_all_stories(master_payload: Dict[str, Any], ground_columns: List[Dict[str, Any]]) -> None:
-    """
-    Propagates the approved Ground Floor columns (C1..Cn) with their exact IDs
-    and coordinates into 00_TieBeams and all upper stories.
-    """
-    for s_entry in master_payload.get("stories", []):
-        sid = s_entry["story_id"]
-        if sid == "02_Ground_Floor":
-            continue
+def set_column_story_override(
+    master_payload: Dict[str, Any],
+    col_id: str,
+    story_id: str,
+    active: Optional[bool] = None,
+    b_m: Optional[float] = None,
+    h_m: Optional[float] = None,
+) -> Dict[str, Any]:
+    ov = master_payload.setdefault("column_overrides", {}).setdefault(str(col_id), {}).setdefault(str(story_id), {})
+    if active is not None:
+        ov["active"] = bool(active)
+    if b_m is not None:
+        ov["b_m"] = float(b_m)
+    if h_m is not None:
+        ov["h_m"] = float(h_m)
+    return master_payload
+
+
+def set_column_continuity_cascade(
+    master_payload: Dict[str, Any],
+    col_id: str,
+    story_id: str,
+    active: bool,
+    upper_story_ids: List[str],
+) -> Tuple[bool, str]:
+    ov = master_payload.setdefault("column_overrides", {}).setdefault(str(col_id), {})
+    if story_id not in upper_story_ids:
+        return False, "Story is not an upper story."
+    idx = upper_story_ids.index(story_id)
+    if active:
+        for lower in upper_story_ids[:idx]:
+            if ov.get(lower, {}).get("active", True) is False:
+                return False, f"Cannot continue {col_id} at {story_id}: it is discontinued at lower story {lower}."
+        ov.setdefault(story_id, {})["active"] = True
+        return True, f"Column {col_id} continued at {story_id}."
+    for sid in upper_story_ids[idx:]:
+        ov.setdefault(sid, {})["active"] = False
+    return True, f"Column {col_id} discontinued at {story_id} and all higher stories."
+
+
+def propagate_ground_columns_to_all_stories(
+    master_payload: Dict[str, Any],
+    ground_columns: List[Dict[str, Any]],
+) -> None:
+    all_stories = (master_payload or {}).get("stories", [])
+    story_ids = [str(s.get("story_id")) for s in all_stories if s.get("story_id")]
+    ov_all = (master_payload or {}).get("column_overrides", {})
+
+    regular_ground_cols = [
+        dict(gc) for gc in (ground_columns or [])
+        if not (gc.get("neck") or gc.get("is_neck_column"))
+    ]
+
+    for s_entry in all_stories:
+        sid = str(s_entry.get("story_id", ""))
         jpath = s_entry.get("json_file")
         dpath = s_entry.get("dxf_file")
         if not jpath or not os.path.isfile(jpath):
             continue
+
         with open(jpath, "r", encoding="utf-8") as f:
             sdata = json.load(f)
 
-        existing_discontinued = {
-            c["id"] for c in sdata.get("columns", []) if not c.get("active", True)
-        }
-        updated_cols = []
-        for gc in ground_columns:
+        local_necks = []
+        if sid == "00_TieBeams":
+            local_necks = [
+                c for c in sdata.get("columns", [])
+                if c.get("neck") or c.get("is_neck_column")
+            ]
+
+        updated_cols: List[Dict[str, Any]] = []
+        for gc in regular_ground_cols:
             c_copy = dict(gc)
-            if c_copy["id"] in existing_discontinued:
-                c_copy["active"] = False
+            cid = str(c_copy.get("id", ""))
+            vis_map: Dict[str, bool] = {}
+            for other_sid in story_ids:
+                if other_sid in ("02_Ground_Floor", "00_TieBeams", "01_Basement_Slab"):
+                    vis_map[other_sid] = True
+                else:
+                    vis_map[other_sid] = bool(ov_all.get(cid, {}).get(other_sid, {}).get("active", True))
+
+            c_copy["visible_in_story"] = vis_map
+            c_copy["active"] = bool(vis_map.get(sid, True))
+
+            ov = ov_all.get(cid, {}).get(sid)
+            if isinstance(ov, dict):
+                if "b_m" in ov:
+                    c_copy["b_m"] = float(ov["b_m"])
+                if "h_m" in ov:
+                    c_copy["h_m"] = float(ov["h_m"])
+
             updated_cols.append(c_copy)
+
+        if sid == "00_TieBeams":
+            existing_ids = {str(c.get("id")) for c in updated_cols}
+            for nc in local_necks:
+                if str(nc.get("id")) not in existing_ids:
+                    nc["visible_in_story"] = {other_sid: (other_sid == "00_TieBeams") for other_sid in story_ids}
+                    updated_cols.append(nc)
 
         sdata["columns"] = updated_cols
         with open(jpath, "w", encoding="utf-8") as f:
@@ -1187,16 +1170,12 @@ def propagate_ground_columns_to_all_stories(master_payload: Dict[str, Any], grou
 
 
 def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
-    """
-    Imports an external Architectural .DXF file for a single story as a unified,
-    locked reference block (`arch_underlay_block`) containing clean 2D line segments
-    and candidate architectural column rectangles so they never mix with structural entities.
-    """
     if not os.path.isfile(dxf_file_path):
         raise FileNotFoundError(f"Architectural DXF file not found: {dxf_file_path}")
 
-    segments: List[List[float]] = []  # [[x1, y1, x2, y2], ...]
+    segments: List[List[float]] = []
     closed_rects: List[Dict[str, float]] = []
+    circles: List[Dict[str, float]] = []
 
     if ezdxf is not None:
         doc = ezdxf.readfile(dxf_file_path)
@@ -1207,8 +1186,13 @@ def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
                 s = ent.dxf.start
                 e = ent.dxf.end
                 segments.append([round(float(s.x), 3), round(float(s.y), 3), round(float(e.x), 3), round(float(e.y), 3)])
+            elif etype in ("CIRCLE", "ARC"):
+                circles.append({
+                    "x": round(float(ent.dxf.center.x), 3),
+                    "y": round(float(ent.dxf.center.y), 3),
+                    "r": round(float(ent.dxf.radius), 3),
+                })
             elif etype in ("LWPOLYLINE", "POLYLINE"):
-                pts = []
                 if etype == "LWPOLYLINE":
                     pts = [(float(p[0]), float(p[1])) for p in ent.get_points("xy")]
                     is_closed = bool(ent.closed)
@@ -1238,7 +1222,6 @@ def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
                                 "h_m": bh,
                             })
     else:
-        # Lightweight ASCII DXF LINE parser fallback
         with open(dxf_file_path, "r", encoding="utf-8", errors="ignore") as f:
             raw_lines = [line.strip() for line in f.readlines()]
         idx = 0
@@ -1269,5 +1252,5 @@ def import_arch_dxf_underlay(dxf_file_path: str) -> Dict[str, Any]:
         "locked": True,
         "segments": segments,
         "candidate_columns": closed_rects,
+        "circles": circles,
     }
-

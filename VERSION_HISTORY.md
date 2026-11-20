@@ -4,7 +4,34 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.4.0-structural-bim-pro` (2026-11-18)
+## Current Release: `v2.5.0-structural-bim-pro (Phase 1 Baseline)` (2026-11-20)
+**Release Title:** Clean Architectural & Structural BIM Baseline Rebuild, Zero Monkey-Patching Architecture, Multi-Story Column Continuity & Discontinuation Cascade, Rigid Boundary & Column Locks, Interactive Boundary Vertex Modification, and Dedicated Tie-Beams Neck Columns (`NC#`).
+
+### Key Features & Advancements in `v2.5.0-structural-bim-pro (Phase 1)`:
+1. **Clean Rebuild Baseline from `v2.4.0` with Zero Monkey-Patching:**
+   - Surgical, in-place codebase refactoring across `xpert_project_io.py`, `xpert_structural_engine.py`, and `xpert_studio_app.py` with zero runtime monkey-patching or overrides.
+   - Core structural engineering and analytical math modules strictly preserved: continuous beam solver (`solve_continuous_beam_analytical`), hollow-block slab rib design (`design_hollow_block_slab_rib`), multi-span beam/column analysis (`analyze_all_story_beams_and_columns`), ACI 318 beam design (`design_beam_aci318`), and column P-M curve design (`design_column_and_pm_curve`).
+2. **Rigid Outer Building Boundary Lock & Interactive Vertex Editing (`Lock Boundary`):**
+   - Automatically locks outer building boundary polyline (`00-XD-EDGE`) upon closing with dedicated toggle button (`🔒 Lock Boundary` / `🔓 Unlock Boundary`) in the `MODIFY` toolbar.
+   - When unlocked, interactive square handles (`V1..Vn`) appear at each polygon vertex, allowing direct dragging with magnetic `OSNAP` and `Ortho` alignment.
+   - Dedicated boundary layer visibility toggle (`Boundary (00-XD-EDGE)`) in the workspace layer bar.
+3. **Rigid Structural Column Lock (`Lock Columns`):**
+   - Toggle button (`Lock Columns` / `🔒 Columns Locked`) in the `MODIFY` toolbar preventing inadvertent selection, box selection, moving, or deletion of columns during beam/slab framing.
+   - Enforces strict story ownership: regular columns (`C#`) can only be modified, rotated, deleted, or aligned on `02_Ground_Floor` (`story_type == "ground"`).
+4. **Upper Stories Column Visibility & Cascade Discontinuation (`Edit Columns`):**
+   - Dedicated `EditColumnsDialog` for typical, standard, and penthouse stories (`03+`) accessible via the dynamic slot button (`"2. Edit Columns"`).
+   - Enforces vertical continuity cascade: discontinuing a column at story $k$ automatically discontinues it for all higher stories $k+1 \dots n$. Re-enabling a column is blocked if discontinued at any lower story.
+   - Changes propagate cleanly across all stories' JSON definitions and synchronized DXF files with immediate canvas re-render.
+5. **Dedicated Neck Columns (`NC#`) on Tie-Beams Story (`00_TieBeams`):**
+   - Dynamic button slot switches automatically to `"2. Add Neck Column"` (`DRAW_NECK_COL`) on the tie-beams story.
+   - Places dedicated $0.20 \times 0.20\text{ m}$ neck columns tagged as `NC1, NC2, ...` with turquoise highlight (`#0D9488`), distinct from inherited ground columns.
+6. **100% English-Only Compliance & Unit Test Verification:**
+   - 0 Arabic characters across all codebase, UI labels, dialogs, and diagnostic logs.
+   - 20/20 unit tests pass in `test_studio_engine.py`.
+
+---
+
+## Previous Release: `v2.4.0-structural-bim-pro` (2026-11-18)
 **Release Title:** Selective Opening Drop Enforcement, Inner Beam Face Flush Snapping, 100% English-Only UI, Non-Clipping Tabs 2 & 3 Viewports, Floor-by-Floor Wall Load Elevation Calibration, and Phantom Slab Gap Elimination.
 
 ### Key Features & Advancements in `v2.4.0-structural-bim-pro`:

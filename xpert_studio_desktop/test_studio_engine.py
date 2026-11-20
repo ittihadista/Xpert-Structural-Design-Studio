@@ -1244,7 +1244,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1335,7 +1335,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1567,7 +1567,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertEqual(pio.STUDIO_VERSION, "v2.4.0-structural-bim-pro")
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {

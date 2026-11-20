@@ -2459,23 +2459,50 @@ def check_duplicate_column(
     return None
 
 
+_COL_LOCK_MSG = (
+    "Column Lock: regular columns are edited ONLY on the Ground Floor (02_Ground_Floor). "
+    "Upper stories inherit them (use '2. Edit Columns' to discontinue). "
+    "Tie-Beams (00_TieBeams) accept Neck Columns (NC#) only."
+)
+
+
+def _col_edit_allowed(story_data: Dict[str, Any], col: Dict[str, Any]) -> bool:
+    """
+    Enforces strict per-story column ownership:
+    - Regular columns (C#): editable ONLY on 02_Ground_Floor.
+    - Neck columns (NC#): editable ONLY on 00_TieBeams.
+    """
+    sid = str(story_data.get("story_id", ""))
+    st = str(story_data.get("story_type", ""))
+    if col.get("neck") or col.get("is_neck_column"):
+        return st == "tie_beams" or sid.startswith("00_")
+    if st in ("tie_beams", "typical", "standard", "penthouse", "basement") or (sid and not sid.startswith("02_")):
+        return False
+    return True
+
+
 def renumber_story_columns_sequentially(story_data: Dict[str, Any]) -> Dict[str, str]:
     """
-    Ensures all active columns in `story_data['columns']` are numbered sequentially
-    `C1, C2, C3, ..., Cn` with ZERO gaps (e.g., after deleting C4, C5..C9 become C4..C8),
-    and updates all column support references (`target_id`) across `story_data['beams']`.
-    Returns a dictionary mapping `{old_col_id: new_col_id}`.
+    Renumbers regular active columns sequentially (C1..Cn) ONLY on the Ground Floor.
+    Preserves Neck Columns (NC#) on Tie Beams and discontinued columns on upper stories.
     """
+    sid = str(story_data.get("story_id", ""))
+    st = str(story_data.get("story_type", ""))
+    if sid and not sid.startswith("02_") and st != "ground":
+        return {}
+
     cols = story_data.get("columns", [])
-    active_cols = [c for c in cols if c.get("active", True)]
+    regular_cols = [c for c in cols if c.get("active", True) and not (c.get("neck") or c.get("is_neck_column"))]
+    neck_cols = [c for c in cols if c.get("neck") or c.get("is_neck_column")]
+
     id_map: Dict[str, str] = {}
-    for idx, col in enumerate(active_cols):
+    for idx, col in enumerate(regular_cols):
         old_id = str(col.get("id", f"C{idx + 1}"))
         new_id = f"C{idx + 1}"
         id_map[old_id] = new_id
         col["id"] = new_id
 
-    story_data["columns"] = active_cols
+    story_data["columns"] = regular_cols + neck_cols
     for bm in story_data.get("beams", []):
         for sup in bm.get("supports", []):
             if sup.get("kind") == "column":
@@ -3640,6 +3667,8 @@ def rotate_column_90_deg(story_data: Dict[str, Any], column_id: str, boundary_mo
     target = next((c for c in cols if c.get("id") == column_id), None)
     if not target:
         return False, f"Column {column_id} not found."
+    if not _col_edit_allowed(story_data, target):
+        return False, _COL_LOCK_MSG
     old_b, old_h = float(target.get("b_m", 0.20)), float(target.get("h_m", 0.40))
     target["b_m"] = round(old_h, 3)
     target["h_m"] = round(old_b, 3)
@@ -4132,6 +4161,9 @@ def delete_selected_element_from_story(
         eid = str(element_id)
         if kind == "column":
             cols = story_data.get("columns", [])
+            target_col = next((c for c in cols if str(c.get("id")) == eid), None)
+            if target_col is not None and not _col_edit_allowed(story_data, target_col):
+                return False, _COL_LOCK_MSG
             before = len(cols)
             story_data["columns"] = [c for c in cols if str(c.get("id")) != eid]
             if len(story_data["columns"]) < before:
@@ -4236,6 +4268,8 @@ def move_column_and_sync_connected_beams(
     target_col = next((c for c in columns if c.get("id") == column_id), None)
     if not target_col:
         return False, f"Column {column_id} not found."
+    if not _col_edit_allowed(story_data, target_col):
+        return False, _COL_LOCK_MSG
 
     old_x, old_y = float(target_col["x"]), float(target_col["y"])
     candidate = dict(target_col)
@@ -4384,6 +4418,7 @@ def select_elements_by_box(
     x2: float,
     y2: float,
     crossing: Optional[bool] = None,
+    columns_locked: bool = False,
 ) -> List[Tuple[str, str]]:
     """
     AutoCAD / Revit Window & Crossing Selection across ALL element types (`column`, `beam`, `slab`, `opening`, `dimension`):
@@ -4400,14 +4435,15 @@ def select_elements_by_box(
         return not (emax_x < bmin_x - 1e-6 or emin_x > bmax_x + 1e-6 or emax_y < bmin_y - 1e-6 or emin_y > bmax_y + 1e-6)
 
     selected: List[Tuple[str, str]] = []
-    for col in story_data.get("columns", []):
-        if not col.get("active", True):
-            continue
-        cx, cy = float(col["x"]), float(col["y"])
-        hb = float(col.get("b_m", 0.20)) / 2.0
-        hh = float(col.get("h_m", 0.40)) / 2.0
-        if box_match(cx - hb, cy - hh, cx + hb, cy + hh):
-            selected.append(("column", str(col["id"])))
+    if not columns_locked:
+        for col in story_data.get("columns", []):
+            if not col.get("active", True):
+                continue
+            cx, cy = float(col["x"]), float(col["y"])
+            hb = float(col.get("b_m", 0.20)) / 2.0
+            hh = float(col.get("h_m", 0.40)) / 2.0
+            if box_match(cx - hb, cy - hh, cx + hb, cy + hh):
+                selected.append(("column", str(col["id"])))
 
     for bm in story_data.get("beams", []):
         sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
@@ -4466,6 +4502,8 @@ def align_element_face_to_reference(
         col = next((c for c in cols if c.get("id") == target_id), None)
         if not col:
             return False, f"Column {target_id} not found."
+        if not _col_edit_allowed(story_data, col):
+            return False, _COL_LOCK_MSG
         half_b = float(col.get("b_m", 0.20)) / 2.0
         half_h = float(col.get("h_m", 0.40)) / 2.0
         new_x, new_y = float(col["x"]), float(col["y"])

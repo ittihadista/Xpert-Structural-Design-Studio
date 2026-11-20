@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.4.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.5.0-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -61,6 +61,7 @@ from xpert_project_io import (
     initialize_studio_project,
     load_studio_project_from_master_file,
     propagate_ground_columns_to_all_stories,
+    set_column_continuity_cascade,
     sync_story_to_dxf,
     validate_project_name,
     compute_hollow_block_parameters,
@@ -1422,6 +1423,137 @@ class SlabRibDesignDialog(QDialog):
         self.sec_view.fitInView(bounds, Qt.AspectRatioMode.KeepAspectRatio)
 
 
+class EditColumnsDialog(QDialog):
+    """
+    Upper Stories Column Visibility Dialog:
+    Allows continuing or discontinuing columns on typical/upper floors
+    with cascade continuity checking.
+    """
+
+    def __init__(self, parent_studio: "XpertStudioMainWindow", master_project: Dict[str, Any], current_story_id: str):
+        super().__init__(parent_studio)
+        self.studio = parent_studio
+        self.master = master_project
+        self.current_story_id = str(current_story_id)
+        self.setWindowTitle(f"Edit Columns Visibility — {self.current_story_id}")
+        self.resize(540, 460)
+
+        stories = (self.master or {}).get("stories", [])
+        self.upper_story_ids = [
+            str(s.get("story_id"))
+            for s in stories
+            if s.get("story_type") in ("typical", "standard", "penthouse") and s.get("story_id")
+        ]
+
+        ground_entry = next(
+            (s for s in stories if s.get("story_id") == "02_Ground_Floor" or s.get("story_type") == "ground"),
+            None,
+        )
+        self.ground_cols: List[Dict[str, Any]] = []
+        if ground_entry and ground_entry.get("json_file") and os.path.isfile(ground_entry["json_file"]):
+            try:
+                with open(ground_entry["json_file"], "r", encoding="utf-8") as f:
+                    gdata = json.load(f)
+                    self.ground_cols = [
+                        c for c in gdata.get("columns", [])
+                        if not (c.get("neck") or c.get("is_neck_column"))
+                    ]
+            except Exception:
+                self.ground_cols = []
+        if not self.ground_cols and self.studio.current_story_data:
+            self.ground_cols = [
+                c for c in self.studio.current_story_data.get("columns", [])
+                if not (c.get("neck") or c.get("is_neck_column"))
+            ]
+
+        vbox = QVBoxLayout(self)
+        vbox.setSpacing(10)
+        vbox.setContentsMargins(12, 12, 12, 12)
+
+        info_lbl = QLabel(
+            f"Select column visibility on active upper story ({self.current_story_id}).\n"
+            f"Discontinuing a column discontinues it on this story and all higher stories."
+        )
+        info_lbl.setStyleSheet("color: #334155; font-size: 11px;")
+        vbox.addWidget(info_lbl)
+
+        self.table = QTableWidget(len(self.ground_cols), 3)
+        self.table.setHorizontalHeaderLabels(["Column ID", "Section (m)", "Show in Story (Yes / No)"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
+
+        ov_all = (self.master or {}).get("column_overrides", {})
+        curr_cols = self.studio.current_story_data.get("columns", []) if self.studio.current_story_data else []
+        curr_map = {str(c.get("id")): bool(c.get("active", True)) for c in curr_cols}
+
+        self._combos: List[Tuple[str, QComboBox]] = []
+        for row, col in enumerate(self.ground_cols):
+            cid = str(col.get("id", f"C{row + 1}"))
+            bm = float(col.get("b_m", 0.20))
+            hm = float(col.get("h_m", 0.40))
+
+            it_id = QTableWidgetItem(cid)
+            it_id.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(row, 0, it_id)
+
+            it_sec = QTableWidgetItem(f"{bm:.2f} × {hm:.2f}")
+            it_sec.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(row, 1, it_sec)
+
+            cb = QComboBox()
+            cb.addItems(["Yes", "No"])
+            col_ov = ov_all.get(cid, {}).get(self.current_story_id, {})
+            if "active" in col_ov:
+                is_active = bool(col_ov["active"])
+            elif cid in curr_map:
+                is_active = curr_map[cid]
+            else:
+                is_active = bool(col.get("active", True))
+            cb.setCurrentIndex(0 if is_active else 1)
+
+            self.table.setCellWidget(row, 2, cb)
+            self._combos.append((cid, cb))
+
+        vbox.addWidget(self.table)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(self._on_ok)
+        btn_box.rejected.connect(self.reject)
+        vbox.addWidget(btn_box)
+
+    def _on_ok(self) -> None:
+        warnings: List[str] = []
+        for cid, cb in self._combos:
+            is_yes = (cb.currentText() == "Yes")
+            ok, msg = set_column_continuity_cascade(
+                self.master, cid, self.current_story_id, is_yes, self.upper_story_ids
+            )
+            if not ok:
+                warnings.append(msg)
+
+        if warnings:
+            QMessageBox.warning(
+                self,
+                "Column Continuity Rule",
+                "\n".join(warnings),
+            )
+
+        propagate_ground_columns_to_all_stories(self.master, self.ground_cols)
+
+        master_xsd = (self.master or {}).get("master_file")
+        if master_xsd and os.path.isfile(master_xsd):
+            try:
+                with open(master_xsd, "w", encoding="utf-8") as f:
+                    json.dump(self.master, f, indent=2)
+            except OSError:
+                pass
+
+        self.studio._on_story_changed(self.studio.current_story_index)
+        self.accept()
+
+
 class StructuralCadCanvas2D(QGraphicsView):
     """
     Revit + AutoCAD Hybrid 2D Structural BIM Canvas:
@@ -1468,11 +1600,17 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         # Layer visibility flags
         self.layer_show_arch = True
+        self.layer_show_edge = True
         self.layer_show_cols = True
         self.layer_show_beams = True
         self.layer_show_slabs = True
         self.layer_show_dims = True
         self.layer_show_tags = True
+
+        # Locks and editing states
+        self.boundary_locked = True
+        self.columns_locked = False
+        self._dragging_vertex_idx: Optional[int] = None
 
         # Interactive states
         self._is_panning = False
@@ -1701,6 +1839,12 @@ class StructuralCadCanvas2D(QGraphicsView):
             story["slabs"] = []
         n_verts = len(self._polyline_pts)
         self._polyline_pts.clear()
+        self.boundary_locked = True
+        if hasattr(self.studio, "btn_lock_boundary"):
+            self.studio.btn_lock_boundary.blockSignals(True)
+            self.studio.btn_lock_boundary.setChecked(True)
+            self.studio.btn_lock_boundary.setText("🔒 Lock Boundary")
+            self.studio.btn_lock_boundary.blockSignals(False)
         self.active_tool = "SELECT"
         self.update_cursor_for_active_tool()
         self.studio.save_and_sync_current_story()
@@ -1925,6 +2069,16 @@ class StructuralCadCanvas2D(QGraphicsView):
 
             # In SELECT mode: click element (including Slabs!) ONLY to select it — never auto-flip slab ribs on SELECT click!
             if self.active_tool == "SELECT":
+                if not self.boundary_locked and self.layer_show_edge:
+                    edge_pts = self.studio.current_story_data.get("slab_edge_polygon", [])
+                    for v_idx, v_pt in enumerate(edge_pts):
+                        if math.hypot(raw_x - float(v_pt[0]), raw_y - float(v_pt[1])) <= 0.35:
+                            self._dragging_vertex_idx = v_idx
+                            self.render_story(self.studio.current_story_data)
+                            self.studio.statusBar().showMessage(f"Dragging Boundary Vertex V{v_idx + 1}...")
+                            event.accept()
+                            return
+
                 found = self._find_element_near(raw_x, raw_y)
                 mods = event.modifiers()
                 is_multi_mod = bool(mods & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier))
@@ -2073,6 +2227,26 @@ class StructuralCadCanvas2D(QGraphicsView):
         scene_pt = self.mapToScene(event.position().toPoint())
         raw_x, raw_y = self._scene_to_world_m(scene_pt)
 
+        if self._dragging_vertex_idx is not None:
+            snap = self.compute_osnap_point(raw_x, raw_y, self.studio.current_story_data)
+            sx, sy = snap["x"], snap["y"]
+            edge_pts = self.studio.current_story_data.get("slab_edge_polygon", [])
+            if 0 <= self._dragging_vertex_idx < len(edge_pts):
+                if self.ortho_enabled and len(edge_pts) > 1:
+                    adj_idx = (self._dragging_vertex_idx - 1) % len(edge_pts)
+                    fx, fy = float(edge_pts[adj_idx][0]), float(edge_pts[adj_idx][1])
+                    if abs(sx - fx) >= abs(sy - fy):
+                        sy = fy
+                    else:
+                        sx = fx
+                edge_pts[self._dragging_vertex_idx] = [round(sx, 3), round(sy, 3)]
+                self.studio.statusBar().showMessage(
+                    f"Dragging Boundary Vertex V{self._dragging_vertex_idx + 1}: X={sx:.2f}m, Y={sy:.2f}m"
+                )
+                self.render_story(self.studio.current_story_data)
+            event.accept()
+            return
+
         if self._is_zoom_window_dragging and self._zoom_win_start_world is not None:
             self._zoom_win_current_world = (raw_x, raw_y)
             self.studio.statusBar().showMessage(f"Zoom Window: Release mouse to zoom to area ({raw_x:.2f}, {raw_y:.2f})")
@@ -2112,6 +2286,14 @@ class StructuralCadCanvas2D(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._dragging_vertex_idx is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging_vertex_idx = None
+            self.studio.save_and_sync_current_story()
+            self.render_story(self.studio.current_story_data)
+            self.studio.update_contextual_prompt("Boundary vertex position updated.")
+            event.accept()
+            return
+
         if self._is_panning and event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton):
             self._is_panning = False
             self.update_cursor_for_active_tool()
@@ -2145,8 +2327,14 @@ class StructuralCadCanvas2D(QGraphicsView):
                 x1, y1 = self._box_start_world
                 x2, y2 = self._box_current_world
                 if math.hypot(x2 - x1, y2 - y1) >= 0.15:
-                    newly_sel = select_elements_by_box(self.studio.current_story_data, x1, y1, x2, y2)
+                    newly_sel = select_elements_by_box(
+                        self.studio.current_story_data,
+                        x1, y1, x2, y2,
+                        columns_locked=self.columns_locked,
+                    )
                     for item in newly_sel:
+                        if (self.boundary_locked or not self.layer_show_edge) and item[0] == "slab_edge":
+                            continue
                         if item not in self.selected_items:
                             self.selected_items.append(item)
                     is_cross = x2 < x1
@@ -2164,7 +2352,7 @@ class StructuralCadCanvas2D(QGraphicsView):
 
     def _find_element_near(self, wx: float, wy: float) -> Optional[Dict[str, Any]]:
         story = self.studio.current_story_data
-        if self.layer_show_cols:
+        if self.layer_show_cols and not self.columns_locked:
             for col in story.get("columns", []):
                 if not col.get("active", True):
                     continue
@@ -2219,16 +2407,17 @@ class StructuralCadCanvas2D(QGraphicsView):
             if slab_hits:
                 slab_hits.sort(key=lambda item: (item[0], item[1], item[2]))
                 return {"kind": "slab", "id": slab_hits[0][3]}
-        poly_pts = story.get("slab_edge_polygon", [])
-        for idx in range(len(poly_pts)):
-            x1, y1 = float(poly_pts[idx][0]), float(poly_pts[idx][1])
-            x2, y2 = float(poly_pts[(idx + 1) % len(poly_pts)][0]), float(poly_pts[(idx + 1) % len(poly_pts)][1])
-            dx, dy = x2 - x1, y2 - y1
-            seg_len2 = dx * dx + dy * dy
-            if seg_len2 > 1e-6:
-                t = max(0.0, min(1.0, ((wx - x1) * dx + (wy - y1) * dy) / seg_len2))
-                if math.hypot(wx - (x1 + t * dx), wy - (y1 + t * dy)) <= 0.25:
-                    return {"kind": "slab_edge", "id": "00-XD-EDGE"}
+        if self.layer_show_edge and not self.boundary_locked:
+            poly_pts = story.get("slab_edge_polygon", [])
+            for idx in range(len(poly_pts)):
+                x1, y1 = float(poly_pts[idx][0]), float(poly_pts[idx][1])
+                x2, y2 = float(poly_pts[(idx + 1) % len(poly_pts)][0]), float(poly_pts[(idx + 1) % len(poly_pts)][1])
+                dx, dy = x2 - x1, y2 - y1
+                seg_len2 = dx * dx + dy * dy
+                if seg_len2 > 1e-6:
+                    t = max(0.0, min(1.0, ((wx - x1) * dx + (wy - y1) * dy) / seg_len2))
+                    if math.hypot(wx - (x1 + t * dx), wy - (y1 + t * dy)) <= 0.25:
+                        return {"kind": "slab_edge", "id": "00-XD-EDGE"}
         return None
 
     def _detect_reference_edge_at(self, wx: float, wy: float, story: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2453,12 +2642,24 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         # STEP 2: Place Structural Column
         if tool == "DRAW_COL":
+            curr_sid = str(story.get("story_id", ""))
+            curr_st = str(story.get("story_type", ""))
+            if curr_sid != "02_Ground_Floor" and curr_st != "ground":
+                QMessageBox.warning(
+                    self,
+                    "Column Placement Rule",
+                    "Regular columns can ONLY be placed on the Ground Floor (02_Ground_Floor).\n\n"
+                    "Upper stories inherit them automatically (use '2. Edit Columns' to manage visibility).\n"
+                    "Tie-Beams (00_TieBeams) accept Neck Columns only.",
+                )
+                return
+
             cols = story.setdefault("columns", [])
             is_vert = self.studio.cb_col_orient.currentIndex() == 0
             b_m = 0.20 if is_vert else 0.40
             h_m = 0.40 if is_vert else 0.20
             boundary_mode = "clamp" if self.studio.cb_col_boundary_rule.currentIndex() == 0 else "expand"
-            active_cols = [c for c in cols if c.get("active", True)]
+            active_cols = [c for c in cols if c.get("active", True) and not (c.get("neck") or c.get("is_neck_column"))]
             next_id = f"C{len(active_cols) + 1}"
             new_col = {
                 "id": next_id,
@@ -2537,6 +2738,50 @@ class StructuralCadCanvas2D(QGraphicsView):
             self.studio.save_and_sync_current_story()
             self.studio.refresh_story_ui()
             self.studio.update_contextual_prompt(f"Placed Column {updated_col['id']} ({b_m:.2f}×{h_m:.2f} m): {msg}")
+            return
+
+        # TOOL: Draw Neck Column on Tie-Beams (NC#)
+        if tool == "DRAW_NECK_COL":
+            curr_sid = str(story.get("story_id", ""))
+            curr_st = str(story.get("story_type", ""))
+            if curr_sid != "00_TieBeams" and curr_st != "tie_beams":
+                QMessageBox.warning(
+                    self,
+                    "Neck Column Rule",
+                    "Neck Columns (NC#) can ONLY be placed on the Tie-Beams story (00_TieBeams).",
+                )
+                return
+            cols = story.setdefault("columns", [])
+            neck_cols = [c for c in cols if c.get("neck") or c.get("is_neck_column")]
+            next_id = f"NC{len(neck_cols) + 1}"
+            b_m, h_m = 0.20, 0.20
+            new_neck = {
+                "id": next_id,
+                "x": round(sx, 3),
+                "y": round(sy, 3),
+                "b_m": b_m,
+                "h_m": h_m,
+                "active": True,
+                "neck": True,
+                "is_neck_column": True,
+                "moves_with_grids": True,
+                "room_bounding": True,
+            }
+            dup_id = check_duplicate_column(new_neck["x"], new_neck["y"], b_m, h_m, cols)
+            if dup_id:
+                self.studio.update_contextual_prompt(
+                    f"Duplicate Column Prevented: Column {dup_id} already exists at ({new_neck['x']:.2f}, {new_neck['y']:.2f})."
+                )
+                return
+            cols.append(new_neck)
+            reconcile_all_story_beams_supports_and_spans(story)
+            log_studio_event(
+                "NECK_COLUMN_PLACED",
+                f"Neck Column {next_id} placed at ({new_neck['x']:.2f}, {new_neck['y']:.2f})",
+            )
+            self.studio.save_and_sync_current_story()
+            self.studio.refresh_story_ui()
+            self.studio.update_contextual_prompt(f"Placed Neck Column {next_id} (0.20×0.20 m) on Tie-Beams.")
             return
 
         # STEP 3: Draw Full-Width Hidden (0.40m) or Drop (0.20x0.40m) Beam
@@ -2670,12 +2915,23 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         # MOVE ELEMENT TOOL (Base-Point -> Target-Point Vector Move on Canvas)
         if tool == "MOVE_ELEMENT":
+            self.selected_items = [
+                it for it in self.selected_items
+                if not (self.columns_locked and it[0] == "column")
+                and not (self.boundary_locked and it[0] == "slab_edge")
+            ]
             if not self.selected_items:
                 found = self._find_element_near(raw_x, raw_y)
                 if not found or found["kind"] not in ("column", "beam", "dimension"):
                     self.studio.update_contextual_prompt(
                         "Move [MV]: First click on a Column, Beam, or Dimension to select it (or select multiple in SELECT mode)."
                     )
+                    return
+                if found["kind"] == "column" and self.columns_locked:
+                    self.studio.update_contextual_prompt("Columns are locked. Cannot move column.")
+                    return
+                if found["kind"] == "slab_edge" and self.boundary_locked:
+                    self.studio.update_contextual_prompt("Boundary is locked. Cannot move boundary.")
                     return
                 self.selected_items = [(found["kind"], found["id"])]
                 self.render_story(story)
@@ -2694,7 +2950,16 @@ class StructuralCadCanvas2D(QGraphicsView):
                 bx, by = self._first_click_pt
                 dx, dy = round(sx - bx, 3), round(sy - by, 3)
                 boundary_mode = "clamp" if self.studio.cb_col_boundary_rule.currentIndex() == 0 else "expand"
-                _, msg = move_selected_elements_by_delta(story, self.selected_items, dx, dy, boundary_mode=boundary_mode)
+                valid_items = [
+                    it for it in self.selected_items
+                    if not (self.columns_locked and it[0] == "column")
+                    and not (self.boundary_locked and it[0] == "slab_edge")
+                ]
+                if not valid_items:
+                    self.studio.update_contextual_prompt("Selected items cannot be moved (Columns or Boundary are locked).")
+                    self._first_click_pt = None
+                    return
+                _, msg = move_selected_elements_by_delta(story, valid_items, dx, dy, boundary_mode=boundary_mode)
                 self._first_click_pt = None
                 self.active_tool = "SELECT"
                 self.update_cursor_for_active_tool()
@@ -2793,11 +3058,20 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         # 1. Outer Building Boundary Polyline (00-XD-EDGE in Cyan — NEVER auto-draws ribs!)
         edge = story_data.get("slab_edge_polygon", [])
-        if len(edge) >= 3:
+        if self.layer_show_edge and len(edge) >= 3:
             is_sel_edge = ("slab_edge", "00-XD-EDGE") in self.selected_items
             edge_pen = QPen(QColor("#F8FAFC" if is_sel_edge else "#06B6D4"), 3.0 if is_sel_edge else 2.2)
             poly = QPolygonF([QPointF(float(p[0]) * s, -float(p[1]) * s) for p in edge])
             self.scene_2d.addPolygon(poly, edge_pen, QBrush(QColor(6, 182, 212, 8)))
+            if not self.boundary_locked:
+                handle_size = 8.0
+                for v_idx, pt in enumerate(edge):
+                    vx, vy = float(pt[0]) * s, -float(pt[1]) * s
+                    h_rect = QRectF(vx - handle_size / 2.0, vy - handle_size / 2.0, handle_size, handle_size)
+                    self.scene_2d.addRect(h_rect, QPen(QColor("#FFFFFF"), 1.2), QBrush(QColor("#0284C7")))
+                    v_lbl = self.scene_2d.addText(f"V{v_idx + 1}", QFont("Arial", 8, QFont.Weight.Bold))
+                    v_lbl.setDefaultTextColor(QColor("#38BDF8"))
+                    v_lbl.setPos(vx + 5, vy - 15)
 
         # 2. Picked Slabs (00-XD-SLAB clipped to Room-Bounding Clear Inner Bounds) & Openings (00-XD-OPEN)
         # STRICTLY PRESERVING ENG. YOUSEF'S APPROVED VISUAL STYLE
@@ -2939,18 +3213,29 @@ class StructuralCadCanvas2D(QGraphicsView):
                 b, h = float(col.get("b_m", 0.20)), float(col.get("h_m", 0.40))
                 is_sel_col = ("column", str(col.get("id"))) in self.selected_items
                 is_2h = bool(col.get("double_height", False))
+                is_neck = bool(col.get("neck") or col.get("is_neck_column"))
                 rect = QRectF((cx - b / 2.0) * s, -(cy + h / 2.0) * s, b * s, h * s)
-                col_pen = QPen(QColor("#38BDF8" if is_sel_col else ("#F59E0B" if is_2h else "#EF4444")), 2.8 if is_sel_col else 2)
-                self.scene_2d.addRect(rect, col_pen, QBrush(QColor(56, 189, 248, 160) if is_sel_col else QColor(239, 68, 68, 125)))
+                if is_neck:
+                    col_pen = QPen(QColor("#38BDF8" if is_sel_col else "#0D9488"), 2.8 if is_sel_col else 2)
+                    col_brush = QBrush(QColor(56, 189, 248, 160) if is_sel_col else QColor(13, 148, 136, 150))
+                else:
+                    col_pen = QPen(QColor("#38BDF8" if is_sel_col else ("#F59E0B" if is_2h else "#EF4444")), 2.8 if is_sel_col else 2)
+                    col_brush = QBrush(QColor(56, 189, 248, 160) if is_sel_col else QColor(239, 68, 68, 125))
+                self.scene_2d.addRect(rect, col_pen, col_brush)
                 if is_2h:
                     self.scene_2d.addRect(rect.adjusted(-3, -3, 3, 3), QPen(QColor("#FACC15"), 1.5, Qt.PenStyle.DashLine))
 
                 if self.layer_show_tags:
                     tag_x = cx + b / 2.0 + 0.10
                     tag_y = cy + h / 2.0 + 0.10
-                    tag_label = f"{col['id']} (2H)" if is_2h else str(col["id"])
+                    if is_neck:
+                        tag_label = str(col["id"])
+                        tag_color = "#2DD4BF"
+                    else:
+                        tag_label = f"{col['id']} (2H)" if is_2h else str(col["id"])
+                        tag_color = "#FACC15" if is_2h else "#4ADE80"
                     ctxt = self.scene_2d.addText(tag_label, QFont("Arial", 9, QFont.Weight.Bold))
-                    ctxt.setDefaultTextColor(QColor("#FACC15" if is_2h else "#4ADE80"))
+                    ctxt.setDefaultTextColor(QColor(tag_color))
                     ctxt.setPos(tag_x * s, -tag_y * s - 10)
 
         # 5. Persistent Engineering Dimensions (`00-XD-DIM`) — Positioned Strictly Outside or at User Offset
@@ -3103,6 +3388,19 @@ class StructuralCadCanvas2D(QGraphicsView):
             )
             glbl = self.scene_2d.addText(f"{gb_m:.2f}×{gh_m:.2f}m [Space: Flip]", QFont("Consolas", 8, QFont.Weight.Bold))
             glbl.setDefaultTextColor(QColor("#38BDF8"))
+            glbl.setPos((gx + gb_m / 2.0 + 0.08) * s, -(gy + gh_m / 2.0 + 0.12) * s)
+
+        if self.active_tool == "DRAW_NECK_COL" and self._current_snap_info is not None:
+            gx, gy = self._current_snap_info["x"], self._current_snap_info["y"]
+            gb_m, gh_m = 0.20, 0.20
+            grect = QRectF((gx - gb_m / 2.0) * s, -(gy + gh_m / 2.0) * s, gb_m * s, gh_m * s)
+            self.scene_2d.addRect(
+                grect,
+                QPen(QColor("#0D9488"), 2.0, Qt.PenStyle.DashLine),
+                QBrush(QColor(13, 148, 136, 85)),
+            )
+            glbl = self.scene_2d.addText(f"Neck Col {gb_m:.2f}×{gh_m:.2f}m", QFont("Consolas", 8, QFont.Weight.Bold))
+            glbl.setDefaultTextColor(QColor("#2DD4BF"))
             glbl.setPos((gx + gb_m / 2.0 + 0.08) * s, -(gy + gh_m / 2.0 + 0.12) * s)
 
         # 11. Visual Magnetic OSNAP Indicator
@@ -4986,8 +5284,30 @@ class XpertStudioMainWindow(QMainWindow):
         lbl_m = QLabel(" MODIFY: ")
         lbl_m.setStyleSheet("font-weight: bold; color: #0D9488;")
         self.modify_tb.addWidget(lbl_m)
+
+        btn_sel = QPushButton("Select / Box")
+        btn_sel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_sel.setStyleSheet("padding: 3px 8px; font-weight: bold;")
+        btn_sel.clicked.connect(lambda: self.activate_cad_tool("SELECT"))
+        self.modify_tb.addWidget(btn_sel)
+
+        self.btn_lock_boundary = QPushButton("🔒 Lock Boundary")
+        self.btn_lock_boundary.setCheckable(True)
+        self.btn_lock_boundary.setChecked(True)
+        self.btn_lock_boundary.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_lock_boundary.setStyleSheet("padding: 3px 8px; font-weight: bold;")
+        self.btn_lock_boundary.toggled.connect(self._toggle_lock_boundary)
+        self.modify_tb.addWidget(self.btn_lock_boundary)
+
+        self.btn_lock_columns = QPushButton("Lock Columns")
+        self.btn_lock_columns.setCheckable(True)
+        self.btn_lock_columns.setChecked(False)
+        self.btn_lock_columns.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_lock_columns.setStyleSheet("padding: 3px 8px; font-weight: bold;")
+        self.btn_lock_columns.toggled.connect(self._toggle_lock_columns)
+        self.modify_tb.addWidget(self.btn_lock_columns)
+
         for lbl, tid in [
-            ("Select / Box", "SELECT"),
             ("Convert Beam (Hid↔Drop)", "CONVERT_BEAM_KIND"),
             ("Flip Slab Rib (0°↔90°)", "FLIP_SLAB_RIB_NOW"),
             ("Slab Rib Design", "SLAB_RIB_DESIGN_DLG"),
@@ -5077,12 +5397,16 @@ class XpertStudioMainWindow(QMainWindow):
             btn = QPushButton(label)
             btn.setMinimumHeight(30)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            if tid == "DRAW_COL":
+                self.btn_col_slot = btn
+                btn.clicked.connect(self._on_col_slot_clicked)
+            else:
+                btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             if tid == "AUTO_FILL_SLABS":
                 btn.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold;")
             elif tid == "DRAW_OPENING":
                 btn.setStyleSheet("background-color: #FDF2F8; color: #BE185D; border: 1px solid #F472B6; font-weight: bold;")
             self.draw_tb.addWidget(btn)
-            btn.clicked.connect(lambda checked=False, t=tid: self.activate_cad_tool(t))
             if tid in slab_only_draw_tids:
                 self._slab_only_widgets.append(btn)
 
@@ -5169,6 +5493,11 @@ class XpertStudioMainWindow(QMainWindow):
         thick_row.addSpacing(8)
 
         thick_row.addWidget(QLabel("Layers:"))
+        self.chk_layer_edge = QCheckBox("Boundary (00-XD-EDGE)")
+        self.chk_layer_edge.setChecked(True)
+        self.chk_layer_edge.toggled.connect(self._on_layer_visibility_changed)
+        thick_row.addWidget(self.chk_layer_edge)
+
         self.chk_layer_arch = QCheckBox("Arch DXF")
         self.chk_layer_arch.setChecked(True)
         self.chk_layer_arch.toggled.connect(self._on_layer_visibility_changed)
@@ -5487,11 +5816,16 @@ class XpertStudioMainWindow(QMainWindow):
                 self.cad_canvas._handle_left_click_at(nx, ny, nx, ny, "NUMERIC_LEN")
 
     def open_numeric_move_dialog(self) -> None:
-        if not self.cad_canvas.selected_items:
+        items = [
+            it for it in self.cad_canvas.selected_items
+            if not (self.cad_canvas.columns_locked and it[0] == "column")
+            and not (self.cad_canvas.boundary_locked and it[0] == "slab_edge")
+        ]
+        if not items:
             QMessageBox.information(
                 self,
                 "Move by Numeric Offset (ΔX, ΔY)",
-                "Please select one or more Columns or Beams first (by clicking or dragging a selection window), then invoke Move.",
+                "Please select one or more movable elements first (Columns or Boundary may be locked).",
             )
             return
         dlg = MoveNumericDeltaDialog(self)
@@ -5499,7 +5833,7 @@ class XpertStudioMainWindow(QMainWindow):
             dx, dy = dlg.sp_dx.value(), dlg.sp_dy.value()
             boundary_mode = "clamp" if self.cb_col_boundary_rule.currentIndex() == 0 else "expand"
             _, msg = move_selected_elements_by_delta(
-                self.current_story_data, self.cad_canvas.selected_items, dx, dy, boundary_mode=boundary_mode
+                self.current_story_data, items, dx, dy, boundary_mode=boundary_mode
             )
             self.save_and_sync_current_story()
             self.refresh_story_ui()
@@ -5507,7 +5841,46 @@ class XpertStudioMainWindow(QMainWindow):
 
     open_move_selected_dialog = open_numeric_move_dialog
 
+    def _toggle_lock_boundary(self, checked: bool) -> None:
+        self.cad_canvas.boundary_locked = checked
+        self.btn_lock_boundary.setText("🔒 Lock Boundary" if checked else "🔓 Unlock Boundary")
+        if checked:
+            self.cad_canvas.selected_items = [
+                it for it in self.cad_canvas.selected_items if it[0] != "slab_edge"
+            ]
+        self.cad_canvas.render_story(self.current_story_data)
+        self.update_contextual_prompt(f"Boundary {'Locked' if checked else 'Unlocked (Vertices draggable)'}.")
+
+    def _toggle_lock_columns(self, checked: bool) -> None:
+        self.cad_canvas.columns_locked = checked
+        self.btn_lock_columns.setText("🔒 Columns Locked" if checked else "Lock Columns")
+        if checked:
+            self.cad_canvas.selected_items = [
+                it for it in self.cad_canvas.selected_items if it[0] != "column"
+            ]
+        self.cad_canvas.render_story(self.current_story_data)
+        self.update_contextual_prompt(f"Columns {'Locked (Non-selectable)' if checked else 'Unlocked'}.")
+
+    def _on_col_slot_clicked(self) -> None:
+        sid = str(self.current_story_data.get("story_id", ""))
+        st = str(self.current_story_data.get("story_type", ""))
+        if sid == "02_Ground_Floor" or st == "ground":
+            self.activate_cad_tool("DRAW_COL")
+        elif sid == "00_TieBeams" or st == "tie_beams":
+            self.activate_cad_tool("DRAW_NECK_COL")
+        else:
+            self.open_edit_columns_dialog()
+
+    def open_edit_columns_dialog(self) -> None:
+        if not self.master_project or not self.current_story_data:
+            return
+        sid = str(self.current_story_data.get("story_id", ""))
+        dlg = EditColumnsDialog(self, self.master_project, sid)
+        dlg.exec()
+
     def _on_layer_visibility_changed(self) -> None:
+        if hasattr(self, "chk_layer_edge"):
+            self.cad_canvas.layer_show_edge = self.chk_layer_edge.isChecked()
         self.cad_canvas.layer_show_arch = self.chk_layer_arch.isChecked()
         self.cad_canvas.layer_show_cols = self.chk_layer_cols.isChecked()
         self.cad_canvas.layer_show_beams = self.chk_layer_beams.isChecked()
@@ -5599,6 +5972,10 @@ class XpertStudioMainWindow(QMainWindow):
         last_msg = ""
         last_err = ""
         for kind, eid in list(self.cad_canvas.selected_items):
+            if kind == "column" and self.cad_canvas.columns_locked:
+                continue
+            if kind == "slab_edge" and self.cad_canvas.boundary_locked:
+                continue
             ok, msg = delete_selected_element_from_story(self.current_story_data, kind, eid)
             if ok:
                 deleted_count += 1
@@ -5659,6 +6036,21 @@ class XpertStudioMainWindow(QMainWindow):
 
         for w in self._slab_only_widgets:
             w.setEnabled(not is_tie)
+
+        if hasattr(self, "btn_col_slot"):
+            sid = str(self.current_story_data.get("story_id", ""))
+            st = str(self.current_story_data.get("story_type", ""))
+            if sid == "02_Ground_Floor" or st == "ground":
+                self.btn_col_slot.setText("2. Place Column")
+            elif sid == "00_TieBeams" or st == "tie_beams":
+                self.btn_col_slot.setText("2. Add Neck Column")
+            else:
+                self.btn_col_slot.setText("2. Edit Columns")
+
+            if sid not in ("02_Ground_Floor", "00_TieBeams") and st not in ("ground", "tie_beams"):
+                if self.cad_canvas.active_tool in ("DRAW_COL", "DRAW_NECK_COL"):
+                    self.cad_canvas.active_tool = "SELECT"
+                    self.cad_canvas.update_cursor_for_active_tool()
 
         adopted_cm = float(self.current_story_data.get("adopted_slab_thickness_cm", 30.0))
         self.sp_adopted_thick.blockSignals(True)
@@ -6046,6 +6438,7 @@ class XpertStudioMainWindow(QMainWindow):
             "MEASURE_DIST": "Measure [DI]: Click First Point -> Click Second Point to measure L, ΔX, ΔY, and Angle.",
             "DRAW_SLAB_EDGE": "Step 1 (Boundary Polyline): Click vertices around the building perimeter.",
             "DRAW_COL": "Step 2 (Place Column): Move cursor to preview column, press [Space] to flip orientation, click to place.",
+            "DRAW_NECK_COL": "Add Neck Column (Tie-Beams): Click to place 0.20×0.20m neck column on Tie-Beams (NC#).",
             "DRAW_BEAM_HID": "Step 3A (Hidden Beam 0.40m): Click Start Column Center -> Click End Column Center.",
             "DRAW_BEAM_DROP": "Step 3B (Drop Beam 0.20×0.40m): Click Start Column Center -> Click End Column Center.",
             "PICK_SLAB": "Step 4A (Pick Slab): Click inside any beam-bounded bay to create/update its Hollow-Block Slab.",
