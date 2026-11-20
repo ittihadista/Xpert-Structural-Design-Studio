@@ -4422,6 +4422,8 @@ def infer_story_slabs_face_based(
         beam_geoms.append(b_poly)
 
     beams_union = unary_union(beam_geoms) if beam_geoms else Polygon()
+    if not beams_union.is_valid:
+        beams_union = beams_union.buffer(0)
 
     warnings: List[str] = []
 
@@ -4479,41 +4481,24 @@ def infer_story_slabs_face_based(
             if changed:
                 break
 
-    # Pass 2 (v2.4.14): Boundary sliver merge
-    # Detect boundary sliver polygons (area <= 0.50 m² or min_dim <= 0.15 m) touching the exterior building boundary,
-    # and absorb them into their nearest adjacent neighbor panel so they are not treated as independent panels.
-    roof_ext = roof_poly.exterior
-    cand_slivers: List[Polygon] = []
+    # Pass 2: Strictly separate main room panels from boundary slivers
+    # Disconnected slivers across beams or openings are NEVER absorbed into room panels.
     main_panels: List[Polygon] = []
+    slivers: List[Polygon] = []
     for p in merged:
         min_x, min_y, max_x, max_y = p.bounds
-        min_dim = min(max_x - min_x, max_y - min_y)
-        is_sliver = (p.area <= 0.50 + 1e-4 or min_dim <= 0.15)
-        touches_bnd = (p.distance(roof_ext) < 0.05)
-        if is_sliver and touches_bnd:
-            cand_slivers.append(p)
+        eff_w = p.area / max(0.01, max(max_x - min_x, max_y - min_y))
+        if p.area < 0.30 or min(max_x - min_x, max_y - min_y) < 0.15 or (p.area <= 0.50 + 1e-4 and eff_w <= 0.22):
+            slivers.append(p)
         else:
             main_panels.append(p)
 
-    panel_absorbed: Dict[int, List[Polygon]] = {idx: [panel] for idx, panel in enumerate(main_panels)}
-    for s_poly in cand_slivers:
-        best_idx = 0
-        best_dist = 1e9
-        for idx, panel in enumerate(main_panels):
-            d = s_poly.distance(panel)
-            if d < best_dist:
-                best_dist = d
-                best_idx = idx
-        if main_panels:
-            panel_absorbed[best_idx].append(s_poly)
-        else:
-            main_panels.append(s_poly)
-            panel_absorbed[len(main_panels) - 1] = [s_poly]
+    main_panels.sort(key=lambda p: (round(p.centroid.x, 2), round(p.centroid.y, 2)))
+    slivers.sort(key=lambda p: (round(p.centroid.x, 2), round(p.centroid.y, 2)))
+    all_ordered_panels = main_panels + slivers
 
     components_data = []
-    for idx, panel in enumerate(main_panels):
-        absorbed_list = panel_absorbed[idx]
-        total_area = sum(p.area for p in absorbed_list)
+    for panel in all_ordered_panels:
         min_x, min_y, max_x, max_y = panel.bounds
         lx = round(max_x - min_x, 4)
         ly = round(max_y - min_y, 4)
@@ -4522,28 +4507,21 @@ def infer_story_slabs_face_based(
         coords = [(round(pt[0], 4), round(pt[1], 4)) for pt in panel.exterior.coords]
         if len(coords) > 1 and coords[0] == coords[-1]:
             coords = coords[:-1]
-
-        all_polys_coords = []
-        for p in absorbed_list:
-            p_coords = [(round(pt[0], 4), round(pt[1], 4)) for pt in p.exterior.coords]
-            if len(p_coords) > 1 and p_coords[0] == p_coords[-1]:
-                p_coords = p_coords[:-1]
-            all_polys_coords.append(p_coords)
+        eff_w = panel.area / max(0.01, max(lx, ly))
+        is_sliver = (panel.area < 0.30 or min(lx, ly) < 0.15 or (panel.area <= 0.50 + 1e-4 and eff_w <= 0.22))
 
         components_data.append({
             "polygon": coords,
-            "polygons": all_polys_coords,
-            "geom": unary_union(absorbed_list),
+            "polygons": [coords],
+            "geom": panel,
             "main_geom": panel,
-            "area_m2": round(total_area, 4),
+            "area_m2": round(panel.area, 4),
             "cx": cx, "cy": cy,
             "min_x": round(min_x, 4), "max_x": round(max_x, 4),
             "min_y": round(min_y, 4), "max_y": round(max_y, 4),
             "lx_m": lx, "ly_m": ly,
+            "is_sliver": is_sliver,
         })
-
-    # Sort deterministically: X then Y
-    components_data.sort(key=lambda c: (round(c["cx"], 2), round(c["cy"], 2)))
 
     cols = [c for c in story_data.get("columns", []) if c.get("active", True)]
     def has_col_near_edge(x1: float, y1: float, x2: float, y2: float) -> bool:
@@ -4607,7 +4585,7 @@ def infer_story_slabs_face_based(
                     warnings.append(f"Slab {s_id} borders Opening {op_id} without a trim beam edge")
 
         n_sup = len(sup_beams)
-        is_sliver = (c["area_m2"] < 0.30 or min(c["lx_m"], c["ly_m"]) < 0.15)
+        is_sliver = bool(c.get("is_sliver", False)) or (c["area_m2"] < 0.30 or min(c["lx_m"], c["ly_m"]) < 0.15)
         if is_sliver:
             warnings.append(
                 f"Sliver slab at ({c['cx']:.2f}, {c['cy']:.2f}) [ID: {s_id}, Area: {c['area_m2']:.3f} m², Dim: {c['lx_m']:.2f}×{c['ly_m']:.2f} m]"
@@ -4732,7 +4710,7 @@ def infer_story_slabs_face_based(
             "backspan_to_cantilever_id": None,
         }
 
-        if is_cantilever:
+        if is_cantilever and not is_sliver:
             cantilever_slabs.append(slab_obj)
         final_slabs.append(slab_obj)
 
@@ -4748,6 +4726,10 @@ def infer_story_slabs_face_based(
             best_slab["lock_reason"] = (
                 f"Cantilever Back-Span Lock: Slab {best_slab['id']} acts as continuity back-span for Cantilever {cant['id']}."
             )
+
+    # Print exact poly.wkt of the first 3 slabs as required by Task 1
+    for s in final_slabs[:3]:
+        print(f"[infer_story_slabs_face_based] Slab {s['id']} WKT: {Polygon(s['polygon']).wkt}", flush=True)
 
     return final_slabs, warnings
 

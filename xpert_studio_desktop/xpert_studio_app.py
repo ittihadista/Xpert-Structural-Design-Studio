@@ -13,6 +13,7 @@ import os
 import sys
 import traceback
 from typing import Dict, Any, List, Optional, Tuple
+from shapely.geometry import Polygon, LineString
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPen, QBrush, QPolygonF
@@ -2317,21 +2318,12 @@ class StructuralCadCanvas2D(QGraphicsView):
                     return {"kind": "opening", "id": str(op["id"])}
             slab_hits: List[Tuple[int, float, float, str]] = []
             for slb in story.get("slabs", []):
-                c_min_x = float(slb.get("clear_min_x", slb.get("min_x", 0.0)))
-                c_max_x = float(slb.get("clear_max_x", slb.get("max_x", 0.0)))
-                c_min_y = float(slb.get("clear_min_y", slb.get("min_y", 0.0)))
-                c_max_y = float(slb.get("clear_max_y", slb.get("max_y", 0.0)))
-                b_min_x = float(slb.get("min_x", c_min_x))
-                b_max_x = float(slb.get("max_x", c_max_x))
-                b_min_y = float(slb.get("min_y", c_min_y))
-                b_max_y = float(slb.get("max_y", c_max_y))
-                in_clear = (c_min_x - 0.02 <= wx <= c_max_x + 0.02) and (c_min_y - 0.02 <= wy <= c_max_y + 0.02)
-                in_bay = (b_min_x - 0.02 <= wx <= b_max_x + 0.02) and (b_min_y - 0.02 <= wy <= b_max_y + 0.02)
-                if in_clear or in_bay:
-                    area = max(0.05, (c_max_x - c_min_x) * (c_max_y - c_min_y))
-                    cx, cy = (c_min_x + c_max_x) / 2.0, (c_min_y + c_max_y) / 2.0
-                    dist = math.hypot(wx - cx, wy - cy)
-                    slab_hits.append((0 if in_clear else 1, area, dist, str(slb["id"])))
+                poly_pts = slb.get("polygon", [])
+                if len(poly_pts) >= 3 and _point_in_polygon(wx, wy, poly_pts):
+                    area = float(slb.get("area_m2", 1.0))
+                    scx, scy = float(slb.get("cx", 0.0)), float(slb.get("cy", 0.0))
+                    dist = math.hypot(wx - scx, wy - scy)
+                    slab_hits.append((0, area, dist, str(slb["id"])))
             if slab_hits:
                 slab_hits.sort(key=lambda item: (item[0], item[1], item[2]))
                 return {"kind": "slab", "id": slab_hits[0][3]}
@@ -3049,19 +3041,17 @@ class StructuralCadCanvas2D(QGraphicsView):
         if self.layer_show_slabs:
             for slb in story_data.get("slabs", []):
                 poly_pts = slb.get("polygon", [])
-                cmin_x = float(slb.get("clear_min_x", slb.get("min_x", 0.0)))
-                cmax_x = float(slb.get("clear_max_x", slb.get("max_x", 0.0)))
-                cmin_y = float(slb.get("clear_min_y", slb.get("min_y", 0.0)))
-                cmax_y = float(slb.get("clear_max_y", slb.get("max_y", 0.0)))
-                if len(poly_pts) >= 3:
-                    xs = [float(pt[0]) for pt in poly_pts]
-                    ys = [float(pt[1]) for pt in poly_pts]
-                    cmin_x, cmax_x = min(xs), max(xs)
-                    cmin_y, cmax_y = min(ys), max(ys)
-
-                if cmax_x <= cmin_x or cmax_y <= cmin_y:
+                if len(poly_pts) < 3:
                     continue
-                scx, scy = (cmin_x + cmax_x) / 2.0, (cmin_y + cmax_y) / 2.0
+
+                spoly = Polygon(poly_pts)
+                if not spoly.is_valid:
+                    spoly = spoly.buffer(0)
+                if spoly.is_empty or spoly.area < 1e-4:
+                    continue
+
+                min_x, min_y, max_x, max_y = spoly.bounds
+                scx, scy = float(slb.get("cx", spoly.centroid.x)), float(slb.get("cy", spoly.centroid.y))
                 if any(is_point_in_opening(scx, scy, op, include_edge=False, tol=0.05) for op in openings_list):
                     continue
 
@@ -3071,54 +3061,67 @@ class StructuralCadCanvas2D(QGraphicsView):
                 border_pen = QPen(QColor("#F8FAFC" if is_sel_slab else "#38BDF8"), 2 if is_sel_slab else 1, Qt.PenStyle.DotLine)
 
                 # Render exact face-based Shapely polygon (aligns flush with beam inner faces)
-                all_parts = slb.get("polygons") or ([poly_pts] if poly_pts else [])
-                for part in all_parts:
-                    if len(part) >= 3:
-                        qpoly = QPolygonF([QPointF(float(pt[0]) * s, -float(pt[1]) * s) for pt in part])
-                        self.scene_2d.addPolygon(qpoly, border_pen, QBrush(fill_col))
-                if not all_parts and (cmax_x > cmin_x and cmax_y > cmin_y):
-                    rect = QRectF(cmin_x * s, -cmax_y * s, (cmax_x - cmin_x) * s, (cmax_y - cmin_y) * s)
-                    self.scene_2d.addRect(rect, border_pen, QBrush(fill_col))
+                pts = [QPointF(float(x) * s, -float(y) * s) for x, y in poly_pts]
+                qpoly = QPolygonF(pts)
+                self.scene_2d.addPolygon(qpoly, border_pen, QBrush(fill_col))
 
+                # Clip rib hatching lines strictly inside the Shapely polygon bounds so they don't bleed across beams
                 rib_dir = int(slb.get("rib_direction_deg", 0))
                 rib_pen = QPen(QColor(234, 179, 8, 75), 1, Qt.PenStyle.DashLine)
                 if rib_dir == 0:
-                    y_step = cmin_y + 0.55
-                    while y_step < cmax_y - 0.15:
-                        self.scene_2d.addLine((cmin_x + 0.05) * s, -y_step * s, (cmax_x - 0.05) * s, -y_step * s, rib_pen)
+                    y_step = min_y + 0.55
+                    while y_step < max_y - 0.15:
+                        scan_line = LineString([(min_x - 1.0, y_step), (max_x + 1.0, y_step)])
+                        inter = scan_line.intersection(spoly)
+                        if inter.geom_type == 'LineString' and not inter.is_empty:
+                            c = list(inter.coords)
+                            self.scene_2d.addLine(c[0][0] * s, -c[0][1] * s, c[1][0] * s, -c[1][1] * s, rib_pen)
+                        elif inter.geom_type == 'MultiLineString':
+                            for mls_seg in inter.geoms:
+                                if not mls_seg.is_empty:
+                                    c = list(mls_seg.coords)
+                                    self.scene_2d.addLine(c[0][0] * s, -c[0][1] * s, c[1][0] * s, -c[1][1] * s, rib_pen)
                         y_step += 0.55
                 else:
-                    x_step = cmin_x + 0.55
-                    while x_step < cmax_x - 0.15:
-                        self.scene_2d.addLine(x_step * s, -(cmin_y + 0.05) * s, x_step * s, -(cmax_y - 0.05) * s, rib_pen)
+                    x_step = min_x + 0.55
+                    while x_step < max_x - 0.15:
+                        scan_line = LineString([(x_step, min_y - 1.0), (x_step, max_y + 1.0)])
+                        inter = scan_line.intersection(spoly)
+                        if inter.geom_type == 'LineString' and not inter.is_empty:
+                            c = list(inter.coords)
+                            self.scene_2d.addLine(c[0][0] * s, -c[0][1] * s, c[1][0] * s, -c[1][1] * s, rib_pen)
+                        elif inter.geom_type == 'MultiLineString':
+                            for mls_seg in inter.geoms:
+                                if not mls_seg.is_empty:
+                                    c = list(mls_seg.coords)
+                                    self.scene_2d.addLine(c[0][0] * s, -c[0][1] * s, c[1][0] * s, -c[1][1] * s, rib_pen)
                         x_step += 0.55
 
-                cx = float(slb.get("cx", (cmin_x + cmax_x) / 2.0))
-                cy = float(slb.get("cy", (cmin_y + cmax_y) / 2.0))
+                # Central rib orientation arrow
                 arrow_pen = QPen(QColor("#FACC15"), 2.2)
                 if rib_dir == 0:
-                    self.scene_2d.addLine((cx - 0.65) * s, -cy * s, (cx + 0.65) * s, -cy * s, arrow_pen)
+                    self.scene_2d.addLine((scx - 0.65) * s, -scy * s, (scx + 0.65) * s, -scy * s, arrow_pen)
                 else:
-                    self.scene_2d.addLine(cx * s, -(cy - 0.65) * s, cx * s, -(cy + 0.65) * s, arrow_pen)
+                    self.scene_2d.addLine(scx * s, -(scy - 0.65) * s, scx * s, -(scy + 0.65) * s, arrow_pen)
 
                 # Format dimensions: read lx_m and ly_m properly
                 lx_val = float(slb.get("lx_m", 0.0))
                 ly_val = float(slb.get("ly_m", 0.0))
                 if lx_val <= 0.0:
-                    lx_val = round(cmax_x - cmin_x, 2)
+                    lx_val = round(max_x - min_x, 2)
                 if ly_val <= 0.0:
-                    ly_val = round(cmax_y - cmin_y, 2)
+                    ly_val = round(max_y - min_y, 2)
 
                 if self.layer_show_tags:
                     is_locked = bool(slb.get("rib_direction_locked", False)) or bool(slb.get("backspan_to_cantilever_id"))
                     lock_icon = " 🔒" if is_locked else ""
                     slb_tag = f"{slb['id']}{lock_icon} ({lx_val:.1f}m, {ly_val:.1f}m)"
                     badge_w = max(88.0, len(slb_tag) * 7.0 + 16.0)
-                    badge_rect = QRectF(cx * s - badge_w / 2.0, -cy * s - 11, badge_w, 22)
+                    badge_rect = QRectF(scx * s - badge_w / 2.0, -scy * s - 11, badge_w, 22)
                     self.scene_2d.addRect(badge_rect, QPen(QColor("#FACC15"), 1), QBrush(QColor(15, 23, 42, 220)))
                     stxt = self.scene_2d.addText(slb_tag, QFont("Segoe UI", 8, QFont.Weight.Bold))
                     stxt.setDefaultTextColor(QColor("#FDE047"))
-                    stxt.setPos(cx * s - badge_w / 2.0 + 4, -cy * s - 12)
+                    stxt.setPos(scx * s - badge_w / 2.0 + 4, -scy * s - 12)
 
             for op in openings_list:
                 min_x, max_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))

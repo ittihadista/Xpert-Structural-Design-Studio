@@ -2671,11 +2671,11 @@ class TestXpertStudioEngine(unittest.TestCase):
         centroids = [(round(s["cx"], 2), round(s["cy"], 2)) for s in slabs]
         self.assertEqual(len(centroids), len(set(centroids)))
 
-        # Slivers policy: in v2.4.14 boundary slivers are absorbed (0 slivers remaining) or kept (4 slivers)
+        # Slivers policy: boundary slivers are separated without disconnected multi-polygon absorption
         slivers = [s for s in slabs if s.get("is_sliver")]
-        self.assertIn(len(slivers), [0, 4])
+        self.assertIn(len(slivers), [0, 4, 5])
         sliver_warns = [w for w in warns if "Sliver slab" in w]
-        self.assertIn(len(sliver_warns), [0, 4])
+        self.assertIn(len(sliver_warns), [0, 4, 5])
 
     def test_v2411_zero_beam_slab_overlap(self):
         """
@@ -3148,10 +3148,26 @@ class TestXpertStudioEngine(unittest.TestCase):
         slabs, warns = infer_story_slabs_face_based(story)
         story["slabs"] = slabs
 
-        # 1. Exactly 15 panels (all boundary slivers absorbed)
-        self.assertEqual(len(slabs), 15)
-        for s in slabs:
-            self.assertFalse(s.get("is_sliver", False))
+        # 1. Exactly 15 main room panels + 5 perimeter slivers with ZERO disconnected multi-polygon absorption
+        main_panels = [s for s in slabs if not s.get("is_sliver")]
+        slivers = [s for s in slabs if s.get("is_sliver")]
+        self.assertEqual(len(main_panels), 15)
+        self.assertEqual(len(slivers), 5)
+        self.assertEqual(len(slabs), 20)
+
+        # S1 has NO floating piece across beams/openings (strictly inside room bay above beam B2)
+        s1 = next(s for s in slabs if s["id"] == "S1")
+        self.assertEqual(len(s1.get("polygons", [s1["polygon"]])), 1)
+        self.assertGreaterEqual(s1["min_y"], 12.8)
+
+        # S11 is strictly flush with B5 and B6 inner faces (does not cut through beam B5)
+        s11 = next(s for s in slabs if s["id"] == "S11")
+        s11_poly_max_y = max(pt[1] for pt in s11["polygon"])
+        s11_poly_min_y = min(pt[1] for pt in s11["polygon"])
+        self.assertLessEqual(s11_poly_max_y, 1.90)
+        self.assertGreaterEqual(s11_poly_min_y, 0.25)
+        self.assertLessEqual(s11["clear_max_y"], 1.90)
+        self.assertGreaterEqual(s11["clear_min_y"], 0.25)
 
         # 2. Exact coverage
         roof_poly = Polygon(story["slab_edge_polygon"])
@@ -3290,6 +3306,78 @@ class TestXpertStudioEngine(unittest.TestCase):
             msg5,
             "Cantilever Back-Span Lock: Slab S5 is the back-span extension for Cantilever Slab S1.",
         )
+
+    def test_v2415_exact_shapely_polygon_rendering_and_zero_disconnected_sliver_absorption(self):
+        """
+        v2.4.15 Acceptance Tests:
+        1. Exact Shapely polygon rendering with zero disconnected multi-polygon slivers absorbed across beams/openings.
+        2. Slab S1 is strictly bounded within its room bay (y >= 12.8m) with zero floating pieces outside the building.
+        3. Slab S11 is strictly flush with beam B5 (inner face y <= 1.90m) and B6 (inner face y >= 0.25m), zero overlap with B5.
+        4. All slabs have len(polygons) == 1 (strictly single continuous N-sided polygons).
+        5. Coverage equation satisfied exactly within <= 0.001 m2.
+        """
+        import json
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        from xpert_structural_engine import infer_story_slabs_face_based
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, warns = infer_story_slabs_face_based(story)
+
+        # 1. Zero disconnected multi-polygons
+        for s in slabs:
+            self.assertEqual(len(s.get("polygons", [s["polygon"]])), 1, f"Slab {s['id']} has multi-polygon parts!")
+
+        # 2. Slab S1 has zero floating piece
+        s1 = next(s for s in slabs if s["id"] == "S1")
+        p1 = Polygon(s1["polygon"])
+        self.assertGreaterEqual(p1.bounds[1], 12.8)  # min_y >= 12.8 (strictly above B2)
+        self.assertLessEqual(p1.bounds[3], 17.4)   # max_y <= 17.4 (strictly below B1)
+        for op in story.get("openings", []):
+            op_p = Polygon(op["polygon"])
+            self.assertFalse(p1.intersects(op_p), "Slab S1 polygon intersects an opening!")
+
+        # 3. Slab S11 does not cut through beam B5 (B5 inner face is y=1.90)
+        s11 = next(s for s in slabs if s["id"] == "S11")
+        p11 = Polygon(s11["polygon"])
+        self.assertLessEqual(p11.bounds[3], 1.9001, f"S11 max_y={p11.bounds[3]} cuts through B5 inner face (1.90m)!")
+        self.assertGreaterEqual(p11.bounds[1], 0.2499, f"S11 min_y={p11.bounds[1]} cuts through B6 inner face (0.25m)!")
+
+        # 4. S4, S6, S12, S15 are exact N-sided polygons (vertices >= 6)
+        s4 = next(s for s in slabs if s["id"] == "S4")
+        s6 = next(s for s in slabs if s["id"] == "S6")
+        s12 = next(s for s in slabs if s["id"] == "S12")
+        s15 = next(s for s in slabs if s["id"] == "S15")
+        self.assertGreaterEqual(len(s4["polygon"]), 6)
+        self.assertGreaterEqual(len(s6["polygon"]), 6)
+        self.assertGreaterEqual(len(s12["polygon"]), 6)
+        self.assertGreaterEqual(len(s15["polygon"]), 6)
+
+        # 5. Coverage equation exactness
+        roof_poly = Polygon(story["slab_edge_polygon"])
+        openings_union = unary_union([Polygon(op["polygon"]) for op in story.get("openings", []) if len(op.get("polygon", [])) >= 3])
+        b_polys = []
+        for b in story["beams"]:
+            w = round(float(b.get("width_m", 0.20)), 4)
+            hw = w / 2.0
+            sx, sy, ex, ey = float(b["start_x"]), float(b["start_y"]), float(b["end_x"]), float(b["end_y"])
+            L = ((ex-sx)**2 + (ey-sy)**2)**0.5
+            if L < 0.05: continue
+            dx, dy = (ex-sx)/L, (ey-sy)/L
+            nx, ny = -dy * hw, dx * hw
+            b_polys.append(Polygon([(sx+nx, sy+ny), (ex+nx, ey+ny), (ex-nx, ey-ny), (sx-nx, sy-ny)]))
+        beams_union = unary_union(b_polys)
+
+        roof_area = roof_poly.area
+        openings_area = roof_poly.intersection(openings_union).area
+        beams_in_roof_area = roof_poly.difference(openings_union).intersection(beams_union).area
+        slabs_area = sum(s["area_m2"] for s in slabs)
+        reconstructed = slabs_area + beams_in_roof_area + openings_area
+        diff = abs(roof_area - reconstructed)
+        self.assertLessEqual(diff, 0.001)
 
 
 
