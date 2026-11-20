@@ -6,7 +6,7 @@ This document is the primary reference for **Eng. Yousef Mohammed Keshlaf** (`xp
 
 ## 1. Project Identity & Core Architecture
 - **Application Name:** `Xpert Structural Design Studio`
-- **Current Release:** `v1.0.0-studio-foundation`
+- **Current Release:** `v2.4.14-structural-bim-pro`
 - **Architectural Paradigm:** Standalone structural engineering studio inspired by **ETABS / SAFE / Autodesk Robot**, featuring a built-in AutoCAD-comfort 2D CAD modeler, topological load distributor, Slope-Deflection continuous beam solver, ACI 318 R.C. designer, column 4-way framing & P-M interaction engine, foundation designer, and master calculation report generator.
 - **Language Rule:** **100% English-Only UI (`LTR`)** across all menus, toolbars, dialogs, CAD layers, diagrams, and calculation reports.
 

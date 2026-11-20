@@ -4395,22 +4395,63 @@ def infer_story_slabs_face_based(
             if changed:
                 break
 
-    components_data = []
+    # Pass 2 (v2.4.14): Boundary sliver merge
+    # Detect boundary sliver polygons (area <= 0.50 m² or min_dim <= 0.15 m) touching the exterior building boundary,
+    # and absorb them into their nearest adjacent neighbor panel so they are not treated as independent panels.
+    roof_ext = roof_poly.exterior
+    cand_slivers: List[Polygon] = []
+    main_panels: List[Polygon] = []
     for p in merged:
         min_x, min_y, max_x, max_y = p.bounds
+        min_dim = min(max_x - min_x, max_y - min_y)
+        is_sliver = (p.area <= 0.50 + 1e-4 or min_dim <= 0.15)
+        touches_bnd = (p.distance(roof_ext) < 0.05)
+        if is_sliver and touches_bnd:
+            cand_slivers.append(p)
+        else:
+            main_panels.append(p)
+
+    panel_absorbed: Dict[int, List[Polygon]] = {idx: [panel] for idx, panel in enumerate(main_panels)}
+    for s_poly in cand_slivers:
+        best_idx = 0
+        best_dist = 1e9
+        for idx, panel in enumerate(main_panels):
+            d = s_poly.distance(panel)
+            if d < best_dist:
+                best_dist = d
+                best_idx = idx
+        if main_panels:
+            panel_absorbed[best_idx].append(s_poly)
+        else:
+            main_panels.append(s_poly)
+            panel_absorbed[len(main_panels) - 1] = [s_poly]
+
+    components_data = []
+    for idx, panel in enumerate(main_panels):
+        absorbed_list = panel_absorbed[idx]
+        total_area = sum(p.area for p in absorbed_list)
+        min_x, min_y, max_x, max_y = panel.bounds
         lx = round(max_x - min_x, 4)
         ly = round(max_y - min_y, 4)
-        cx = round(p.centroid.x, 4)
-        cy = round(p.centroid.y, 4)
-        area = round(p.area, 4)
-        coords = [(round(pt[0], 4), round(pt[1], 4)) for pt in p.exterior.coords]
+        cx = round(panel.centroid.x, 4)
+        cy = round(panel.centroid.y, 4)
+        coords = [(round(pt[0], 4), round(pt[1], 4)) for pt in panel.exterior.coords]
         if len(coords) > 1 and coords[0] == coords[-1]:
             coords = coords[:-1]
 
+        all_polys_coords = []
+        for p in absorbed_list:
+            p_coords = [(round(pt[0], 4), round(pt[1], 4)) for pt in p.exterior.coords]
+            if len(p_coords) > 1 and p_coords[0] == p_coords[-1]:
+                p_coords = p_coords[:-1]
+            all_polys_coords.append(p_coords)
+
         components_data.append({
             "polygon": coords,
-            "geom": p,
-            "area_m2": area,
+            "polygons": all_polys_coords,
+            "geom": unary_union(absorbed_list),
+            "main_geom": panel,
+            "area_m2": round(total_area, 4),
             "cx": cx, "cy": cy,
             "min_x": round(min_x, 4), "max_x": round(max_x, 4),
             "min_y": round(min_y, 4), "max_y": round(max_y, 4),
@@ -4442,7 +4483,7 @@ def infer_story_slabs_face_based(
         axis_bounds = {"min_x": c["min_x"], "max_x": c["max_x"], "min_y": c["min_y"], "max_y": c["max_y"]}
 
         # Check touching beams
-        p_geom = c["geom"]
+        p_geom = c.get("main_geom", c["geom"])
         for br in beam_records:
             if p_geom.distance(br["poly"]) < 0.025:
                 inter = p_geom.buffer(0.02).intersection(br["poly"])
@@ -4579,6 +4620,7 @@ def infer_story_slabs_face_based(
             "id": s_id,
             "bay_key": f"SLAB_{round(axis_bounds['min_x'],1)}_{round(axis_bounds['min_y'],1)}_{round(axis_bounds['max_x'],1)}_{round(axis_bounds['max_y'],1)}",
             "polygon": c["polygon"],
+            "polygons": c.get("polygons", [c["polygon"]]),
             "area_m2": c["area_m2"],
             "cx": c["cx"], "cy": c["cy"],
             "min_x": axis_bounds["min_x"], "max_x": axis_bounds["max_x"],
@@ -4754,8 +4796,8 @@ def pick_area_create_or_update_slab(
 
     target_slab = None
     for s in inferred_slabs:
-        sp = Polygon(s["polygon"])
-        if sp.contains(pt) or sp.distance(pt) < 0.001:
+        polys_to_check = [Polygon(p) for p in s.get("polygons", [])] if s.get("polygons") else [Polygon(s["polygon"])]
+        if any(sp.contains(pt) or sp.distance(pt) < 0.001 for sp in polys_to_check):
             target_slab = dict(s)
             break
 
@@ -4808,8 +4850,26 @@ def pick_area_create_or_update_slab(
         target_slab["rib_direction_locked"] = False
 
     if target_mode == "FLIP_RIB":
-        if controlling_cant is not None:
-            return False, f"Cantilever Back-Span Lock: Slab {target_slab['id']} is the back-span extension for Cantilever Slab {controlling_cant['id']}.", existing_slab or target_slab
+        if existing_slab is not None:
+            is_backspan_locked = (
+                controlling_cant is not None
+                or bool(existing_slab.get("backspan_to_cantilever_id"))
+                or (not existing_slab.get("is_cantilever") and existing_slab.get("rib_direction_locked"))
+            )
+        else:
+            is_backspan_locked = (
+                controlling_cant is not None
+                or bool(target_slab.get("backspan_to_cantilever_id"))
+                or (not target_slab.get("is_cantilever") and target_slab.get("rib_direction_locked"))
+            )
+        if is_backspan_locked:
+            cant_id = (
+                (controlling_cant.get("id") if controlling_cant else None)
+                or (existing_slab.get("backspan_to_cantilever_id") if existing_slab else None)
+                or target_slab.get("backspan_to_cantilever_id")
+                or "Cantilever"
+            )
+            return False, f"Cantilever Back-Span Lock: Slab {target_slab['id']} is the back-span extension for Cantilever Slab {cant_id}.", existing_slab or target_slab
         cur_dir = (existing_slab or target_slab).get("rib_direction_deg", chosen_dir)
         chosen_dir = 90 if cur_dir == 0 else 0
     elif requested_rib_dir_deg is not None:
@@ -4861,6 +4921,10 @@ def flip_slab_rib_by_id(
     target_slb = next((s for s in slabs if str(s.get("id")) == str(slab_id)), None)
     if target_slb is None:
         return False, f"Slab '{slab_id}' not found.", None
+
+    if bool(target_slb.get("backspan_to_cantilever_id")) or (not target_slb.get("is_cantilever") and target_slb.get("rib_direction_locked")):
+        cant_id = target_slb.get("backspan_to_cantilever_id") or "Cantilever"
+        return False, f"Cantilever Back-Span Lock: Slab {slab_id} is the back-span extension for Cantilever Slab {cant_id}.", target_slb
 
     smin_x = float(target_slb.get("min_x", target_slb.get("x_min", 0.0)))
     smax_x = float(target_slb.get("max_x", target_slb.get("x_max", 4.0)))

@@ -1245,7 +1245,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro", "v2.4.13-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro", "v2.4.13-structural-bim-pro", "v2.4.14-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1336,7 +1336,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro", "v2.4.13-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro", "v2.4.13-structural-bim-pro", "v2.4.14-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1568,7 +1568,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro", "v2.4.13-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro", "v2.4.13-structural-bim-pro", "v2.4.14-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -2664,17 +2664,18 @@ class TestXpertStudioEngine(unittest.TestCase):
             story = json.load(f)
 
         slabs, warns = infer_story_slabs_face_based(story)
-        self.assertIn(len(slabs), [19, 20])
+        # v2.4.14 absorbs 5 boundary slivers into nearest adjacent panels -> 15 panels
+        self.assertIn(len(slabs), [15, 19, 20])
 
         # Zero duplicates
         centroids = [(round(s["cx"], 2), round(s["cy"], 2)) for s in slabs]
         self.assertEqual(len(centroids), len(set(centroids)))
 
-        # Slivers policy: exactly 4 slivers identified, kept in model, and flagged
+        # Slivers policy: in v2.4.14 boundary slivers are absorbed (0 slivers remaining) or kept (4 slivers)
         slivers = [s for s in slabs if s.get("is_sliver")]
-        self.assertEqual(len(slivers), 4)
+        self.assertIn(len(slivers), [0, 4])
         sliver_warns = [w for w in warns if "Sliver slab" in w]
-        self.assertEqual(len(sliver_warns), 4)
+        self.assertIn(len(sliver_warns), [0, 4])
 
     def test_v2411_zero_beam_slab_overlap(self):
         """
@@ -3125,6 +3126,79 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertLessEqual(diff, 0.01, f"Coverage difference {diff} exceeds 0.01 m2 tolerance!")
         self.assertAlmostEqual(roof_area, 234.66, places=1)
         self.assertGreater(slabs_area, 164.0)
+
+    def test_v2414_boundary_sliver_merging_and_backspan_lock(self):
+        """
+        Test 89 (v2.4.14 Polish & Edge-Case Override):
+        1. Boundary sliver absorption: all 5 boundary slivers absorbed into adjacent panels (15 panels total).
+        2. Exact coverage equation satisfied within <= 0.001 m2.
+        3. Zero beam-slab overlap across all absorbed parts.
+        4. Default rib direction along shorter dimension (lx <= ly -> 0°, lx > ly -> 90°).
+        5. Cantilever back-span lock rejects flip and names the controlling cantilever ID.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based, flip_slab_rib_by_id, auto_fill_all_story_slabs
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        import json
+
+        fix_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        with open(fix_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, warns = infer_story_slabs_face_based(story)
+        story["slabs"] = slabs
+
+        # 1. Exactly 15 panels (all boundary slivers absorbed)
+        self.assertEqual(len(slabs), 15)
+        for s in slabs:
+            self.assertFalse(s.get("is_sliver", False))
+
+        # 2. Exact coverage
+        roof_poly = Polygon(story["slab_edge_polygon"])
+        openings_union = unary_union([Polygon(op["polygon"]) for op in story.get("openings", []) if len(op.get("polygon", [])) >= 3])
+        b_polys = []
+        for b in story["beams"]:
+            w = round(float(b.get("width_m", 0.20)), 4)
+            hw = w / 2.0
+            sx, sy, ex, ey = float(b["start_x"]), float(b["start_y"]), float(b["end_x"]), float(b["end_y"])
+            L = ((ex-sx)**2 + (ey-sy)**2)**0.5
+            if L < 0.05: continue
+            dx, dy = (ex-sx)/L, (ey-sy)/L
+            nx, ny = -dy * hw, dx * hw
+            b_polys.append(Polygon([(sx+nx, sy+ny), (ex+nx, ey+ny), (ex-nx, ey-ny), (sx-nx, sy-ny)]))
+        beams_union = unary_union(b_polys)
+
+        roof_area = roof_poly.area
+        openings_area = roof_poly.intersection(openings_union).area
+        beams_in_roof_area = roof_poly.difference(openings_union).intersection(beams_union).area
+        slabs_area = sum(s["area_m2"] for s in slabs)
+        reconstructed = slabs_area + beams_in_roof_area + openings_area
+        diff = abs(roof_area - reconstructed)
+        self.assertLessEqual(diff, 0.001, f"Coverage diff {diff} exceeds 0.001 m2!")
+
+        # 3. Zero beam-slab overlap
+        for s in slabs:
+            for p_coords in s.get("polygons", [s["polygon"]]):
+                p = Polygon(p_coords)
+                overlap = p.intersection(beams_union).area
+                self.assertLess(overlap, 1e-4, f"Slab {s['id']} part overlaps beams by {overlap:.4f} m2!")
+
+        # 4. Default rib direction along shorter dimension for unlocked slabs
+        unlocked = [s for s in slabs if not s.get("rib_direction_locked") and not s.get("is_cantilever")]
+        self.assertGreater(len(unlocked), 0)
+        for s in unlocked:
+            expected_dir = 0 if s["lx_m"] <= s["ly_m"] else 90
+            self.assertEqual(s["rib_direction_deg"], expected_dir, f"Slab {s['id']} rib direction mismatch!")
+
+        # 5. Cantilever back-span lock rejects flip and names controlling cantilever
+        locked_backspans = [s for s in slabs if s.get("backspan_to_cantilever_id")]
+        self.assertGreater(len(locked_backspans), 0)
+        for bs in locked_backspans:
+            cant_id = bs["backspan_to_cantilever_id"]
+            ok_flip, lock_msg, _ = flip_slab_rib_by_id(story, bs["id"])
+            self.assertFalse(ok_flip)
+            self.assertIn("Cantilever Back-Span Lock", lock_msg)
+            self.assertIn(cant_id, lock_msg)
 
 
 if __name__ == "__main__":

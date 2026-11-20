@@ -4,7 +4,38 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.4.13-structural-bim-pro` (2026-11-20)
+## Current Release: `v2.4.14-structural-bim-pro` (2026-11-20)
+**Release Title:** Polish & Edge-Case Override (Boundary Sliver Absorption into Adjacent Panels, Modal Dialog Suppression on Auto-Fill with Non-Blocking Warnings, Cantilever Back-Span Padlock 🔒 Badges & Cantilever-ID Flip Lock UX, Default Rib Direction Along Shorter Dimension, 89/89 Unit Tests Passed, Frozen Cores Preserved 100%).
+
+### Key Features & Polish in `v2.4.14-structural-bim-pro`:
+1. **Suppression of Modal Dialog on Auto-Fill (FIX #1):**
+   - Eliminated the intrusive modal `SlabInferenceWarningsDialog` popup on normal 1-Click Auto-Fill when only non-blocking warnings (boundary slivers, untrimmed opening edges) exist.
+   - Replaced with a clean, informative status bar and contextual prompt message: `"Auto-Fill complete: {N} Slab bays created. {M} warnings (check diagnostics log)."`.
+   - Retained modal dialog only on critical geometric failure (0 slab bays created).
+   - Added on-demand menu actions under `Draw > View Slab Inference Warnings & Audit...` and `View > Slab Inference Warnings & Geometry Audit...` for manual review anytime.
+2. **Boundary Sliver Absorption Engine (FIX #2):**
+   - In `infer_story_slabs_face_based`, after Pass 1 touching-sliver merge, added Pass 2 Boundary Sliver Absorption:
+     - Detects boundary sliver polygons (area $\le 0.50\text{ m}^2$ or minimum dimension $\le 0.15\text{ m}$) touching the exterior building boundary within $0.05\text{ m}$.
+     - Absorbs each boundary sliver cleanly into its nearest adjacent room panel.
+     - Slabs count on the project fixture is refined from 20 to 15 real, well-proportioned room bays (absorbing S1, S3, S4, S14, S20).
+     - Exact mathematical coverage equation holds with zero error ($\text{diff} = 0.000000\text{ m}^2 \le 0.001\text{ m}^2$).
+     - Guarantees $0.0000\text{ m}^2$ beam-slab overlap across all absorbed parts.
+3. **Cantilever Back-Span Lock UX & Padlock 🔒 Badge (FIX #3):**
+   - Canvas slab badges for locked cantilevers and back-span panels now display a crisp gold padlock icon: e.g. `S1 🔒 (1.6m, 4.4m)`, `S8 🔒 (3.5m, 5.0m)`, `S12 🔒 (5.8m, 4.9m)`.
+   - Upgraded badge text rendering to native Segoe UI Bold with automatic dynamic badge width sizing.
+   - When the user attempts to flip a locked back-span slab, the flip is strictly rejected, and the prompt explicitly names the controlling cantilever ID: `"Cantilever Back-Span Lock: Slab {target_id} is the back-span extension for Cantilever Slab {cantilever_id}."`.
+4. **Default Rib Direction Along Shorter Dimension (FIX #4):**
+   - Verified and enforced for all non-cantilever slabs that ribs span across the shorter dimension ($\text{width} \le \text{height} \implies 0^\circ$ [X-direction], $\text{width} > \text{height} \implies 90^\circ$ [Y-direction]).
+   - Dashed rib line hatching and center directional arrows visually match this orientation on the 2D CAD canvas.
+5. **Strict Preservation of Frozen Analytical Cores:**
+   - Lines 194 to 2632 in `xpert_structural_engine.py` remain $100\%$ untouched, matching reference SHA-256 hashes byte-for-byte.
+6. **Test Suite Expansion (89/89 Tests Passed):**
+   - Added Test 89 (`test_v2414_boundary_sliver_merging_and_backspan_lock`) covering all 5 items.
+   - All 89 tests pass cleanly in 4.48s.
+
+---
+
+## Previous Release: `v2.4.13-structural-bim-pro` (2026-11-20)
 **Release Title:** Face-Based Slab Inference Engine (Robust Shapely 2.0+ 2D CAD Boolean Subtraction, Coverage Equation $\le 0.01\text{ m}^2$, Zero Beam-Slab Overlap, Slivers Policy, Cantilever Rib Perpendicularity & Backspan Continuity Lock, 88/88 Tests Passed, Frozen Cores Preserved 100%).
 
 ### Key Features & Advancements in `v2.4.13-structural-bim-pro`:

@@ -1,4 +1,4 @@
-# Xpert Structural Design Studio (v2.4.13-structural-bim-pro)
+# Xpert Structural Design Studio (v2.4.14-structural-bim-pro)
 """
 Xpert Structural Design Studio (v2.4.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
@@ -3071,10 +3071,12 @@ class StructuralCadCanvas2D(QGraphicsView):
                 border_pen = QPen(QColor("#F8FAFC" if is_sel_slab else "#38BDF8"), 2 if is_sel_slab else 1, Qt.PenStyle.DotLine)
 
                 # Render exact face-based Shapely polygon (aligns flush with beam inner faces)
-                if len(poly_pts) >= 3:
-                    qpoly = QPolygonF([QPointF(float(pt[0]) * s, -float(pt[1]) * s) for pt in poly_pts])
-                    self.scene_2d.addPolygon(qpoly, border_pen, QBrush(fill_col))
-                else:
+                all_parts = slb.get("polygons") or ([poly_pts] if poly_pts else [])
+                for part in all_parts:
+                    if len(part) >= 3:
+                        qpoly = QPolygonF([QPointF(float(pt[0]) * s, -float(pt[1]) * s) for pt in part])
+                        self.scene_2d.addPolygon(qpoly, border_pen, QBrush(fill_col))
+                if not all_parts and (cmax_x > cmin_x and cmax_y > cmin_y):
                     rect = QRectF(cmin_x * s, -cmax_y * s, (cmax_x - cmin_x) * s, (cmax_y - cmin_y) * s)
                     self.scene_2d.addRect(rect, border_pen, QBrush(fill_col))
 
@@ -3108,11 +3110,13 @@ class StructuralCadCanvas2D(QGraphicsView):
                     ly_val = round(cmax_y - cmin_y, 2)
 
                 if self.layer_show_tags:
-                    slb_tag = f"{slb['id']} ({lx_val:.1f}m, {ly_val:.1f}m)"
-                    badge_w = max(88.0, len(slb_tag) * 6.5 + 14.0)
+                    is_locked = bool(slb.get("rib_direction_locked", False)) or bool(slb.get("backspan_to_cantilever_id"))
+                    lock_icon = " 🔒" if is_locked else ""
+                    slb_tag = f"{slb['id']}{lock_icon} ({lx_val:.1f}m, {ly_val:.1f}m)"
+                    badge_w = max(88.0, len(slb_tag) * 7.0 + 16.0)
                     badge_rect = QRectF(cx * s - badge_w / 2.0, -cy * s - 11, badge_w, 22)
                     self.scene_2d.addRect(badge_rect, QPen(QColor("#FACC15"), 1), QBrush(QColor(15, 23, 42, 220)))
-                    stxt = self.scene_2d.addText(slb_tag, QFont("Arial", 8, QFont.Weight.Bold))
+                    stxt = self.scene_2d.addText(slb_tag, QFont("Segoe UI", 8, QFont.Weight.Bold))
                     stxt.setDefaultTextColor(QColor("#FDE047"))
                     stxt.setPos(cx * s - badge_w / 2.0 + 4, -cy * s - 12)
 
@@ -5114,10 +5118,13 @@ class XpertStudioMainWindow(QMainWindow):
         act_diag_log = QAction("Open Session Diagnostic Log...", self)
         act_diag_log.triggered.connect(self.open_diagnostic_log_dialog)
         m_view.addAction(act_diag_log)
+        act_slab_warn = QAction("Slab Inference Warnings & Geometry Audit...", self)
+        act_slab_warn.triggered.connect(lambda: self.activate_cad_tool("SHOW_SLAB_WARNINGS"))
+        m_view.addAction(act_slab_warn)
 
         # 3. DRAW MENU
         m_draw = mbar.addMenu("&Draw")
-        slab_only_tids = {"DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "DRAW_OPENING", "AUTO_FILL_SLABS"}
+        slab_only_tids = {"DRAW_SLAB_EDGE", "DRAW_BEAM_HID", "PICK_SLAB", "FLIP_RIB", "PICK_OPENING", "DRAW_OPENING", "AUTO_FILL_SLABS", "SHOW_SLAB_WARNINGS"}
         for label, tool_id in [
             ("Select / Box-Select Elements", "SELECT"),
             ("Step 1: Draw Building Boundary Polyline (00-XD-EDGE)", "DRAW_SLAB_EDGE"),
@@ -5130,6 +5137,7 @@ class XpertStudioMainWindow(QMainWindow):
             ("Step 4C: Pick Area -> Toggle Void Opening", "PICK_OPENING"),
             ("Step 4D: Draw Slab Opening [Rect / Space=Poly] (00-XD-OPEN)", "DRAW_OPENING"),
             ("Auto-Fill All Story Slabs (1-Click)", "AUTO_FILL_SLABS"),
+            ("View Slab Inference Warnings & Audit...", "SHOW_SLAB_WARNINGS"),
             ("Convert Columns from Imported Arch .DXF", "CONVERT_ARCH_COLS"),
             ("Load Standard 2-Bay Structural Layout", "LOAD_TEMPLATE"),
         ]:
@@ -6238,13 +6246,26 @@ class XpertStudioMainWindow(QMainWindow):
             count, msg = auto_fill_all_story_slabs(self.current_story_data)
             self.save_and_sync_current_story()
             self.refresh_story_ui()
-            self.update_contextual_prompt(msg)
             warns = self.current_story_data.get("slab_inference_warnings", [])
-            if warns:
-                dlg = SlabInferenceWarningsDialog(self, warns)
-                dlg.exec()
+            if count == 0:
+                if warns:
+                    dlg = SlabInferenceWarningsDialog(self, warns)
+                    dlg.exec()
+                else:
+                    QMessageBox.warning(self, "Auto-Fill Slabs", msg)
+                self.update_contextual_prompt(msg)
             else:
-                QMessageBox.information(self, "Auto-Fill Slabs", msg)
+                if warns:
+                    status_summary = f"Auto-Fill complete: {count} Slab bays created. {len(warns)} warnings (check diagnostics log)."
+                    self.update_contextual_prompt(status_summary)
+                else:
+                    self.update_contextual_prompt(f"Auto-Fill complete: {count} Slab bays created.")
+            return
+
+        if tool_id == "SHOW_SLAB_WARNINGS":
+            warns = self.current_story_data.get("slab_inference_warnings", [])
+            dlg = SlabInferenceWarningsDialog(self, warns)
+            dlg.exec()
             return
 
         if tool_id == "CONVERT_ARCH_COLS":
