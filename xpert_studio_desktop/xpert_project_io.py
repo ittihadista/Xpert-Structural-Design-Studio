@@ -1127,28 +1127,75 @@ def sync_story_to_dxf(story_data: Dict[str, Any], dxf_path: str, role: str = "ST
         ex = float(bm.get("end_x", 5.0))
         ey = float(bm.get("end_y", 0.0))
         b_kind = bm.get("beam_kind", "hidden")
-        b_width = float(bm.get("width_m", 0.30 if b_kind == "hidden" else 0.20))
+        b_width = float(bm.get("designed_width_m", bm.get("width_m", 0.30 if b_kind == "hidden" else 0.20)))
+        b_depth = float(bm.get("designed_depth_m", bm.get("depth_m", 0.30 if b_kind == "hidden" else 0.40)))
         layer = "00-XD-BEAM-HID" if b_kind == "hidden" else "00-XD-BEAM-DROP"
         color = 2 if b_kind == "hidden" else 3
 
-        msp.add_lwpolyline(
-            [(sx, sy), (ex, ey)],
-            dxfattribs={"layer": layer, "color": color, "const_width": b_width},
-        )
+        # Beam 4-corner outline
+        dx, dy = ex - sx, ey - sy
+        L = max(0.01, (dx * dx + dy * dy) ** 0.5)
+        nx, ny = -dy / L, dx / L
+        hw = b_width / 2.0
+        c1 = (sx + nx * hw, sy + ny * hw)
+        c2 = (ex + nx * hw, ey + ny * hw)
+        c3 = (ex - nx * hw, ey - ny * hw)
+        c4 = (sx - nx * hw, sy - ny * hw)
+        b_poly = msp.add_lwpolyline([c1, c2, c3, c4], dxfattribs={"layer": layer, "color": color})
+        b_poly.closed = True
 
-        # Place B# tag at clear-span midpoint in Bright Orange (ACI Color 30)
+        # Centerline
+        msp.add_line((sx, sy), (ex, ey), dxfattribs={"layer": layer, "color": color, "linetype": "DASHED"})
+
+        # Tag with unified tag and designed dimensions
+        u_tag = bm.get("unified_tag") or str(bm["id"])
+        w_cm = int(round(b_width * 100))
+        h_cm = int(round(b_depth * 100))
+        callout = f"{u_tag} ({w_cm}x{h_cm})"
+
         tx, ty, rot_deg = compute_smart_beam_tag_position(bm, columns, placed_tags)
         msp.add_text(
-            str(bm["id"]),
+            callout,
             dxfattribs={
                 "layer": "00-XD-TAG-BEAM",
                 "style": "XD_TAG_STYLE",
-                "height": 0.25,
+                "height": 0.22,
                 "color": 30,
                 "rotation": rot_deg,
                 "insert": (tx, ty, 0.0),
             },
         )
+
+    # 4. Slab outlines & Rib directions
+    slabs = story_data.get("slabs", [])
+    for slb in slabs:
+        poly_pts = slb.get("polygon", [])
+        if len(poly_pts) >= 3:
+            s_poly = msp.add_lwpolyline([(float(p[0]), float(p[1])) for p in poly_pts], dxfattribs={"layer": "00-XD-SLAB", "color": 4})
+            s_poly.closed = True
+
+            scx = float(slb.get("cx", (min(p[0] for p in poly_pts) + max(p[0] for p in poly_pts)) / 2.0))
+            scy = float(slb.get("cy", (min(p[1] for p in poly_pts) + max(p[1] for p in poly_pts)) / 2.0))
+            rib_dir = int(slb.get("rib_direction_deg", 0))
+
+            if rib_dir == 0:
+                msp.add_line((scx - 0.75, scy), (scx + 0.75, scy), dxfattribs={"layer": "00-XD-SLAB", "color": 2})
+            else:
+                msp.add_line((scx, scy - 0.75), (scx, scy + 0.75), dxfattribs={"layer": "00-XD-SLAB", "color": 2})
+
+            sid = str(slb.get("id", "S"))
+            lx = float(slb.get("lx_m", 0.0))
+            ly = float(slb.get("ly_m", 0.0))
+            msp.add_text(
+                f"{sid} ({lx:.1f}x{ly:.1f})",
+                dxfattribs={
+                    "layer": "00-XD-SLAB",
+                    "style": "XD_TAG_STYLE",
+                    "height": 0.20,
+                    "color": 4,
+                    "insert": (scx - 0.5, scy + 0.15, 0.0),
+                },
+            )
 
     doc.saveas(dxf_path)
 

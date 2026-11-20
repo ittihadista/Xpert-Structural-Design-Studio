@@ -118,6 +118,9 @@ from xpert_structural_engine import (
     enforce_opening_adjacent_drop_beams_and_cascade,
     find_nearest_solid_edge_for_column,
     create_opening_with_priority_resolution,
+    unify_and_classify_beams,
+    calculate_boq,
+    export_story_to_dxf,
 )
 
 
@@ -526,6 +529,101 @@ class StudioOptionsDialog(QDialog):
             }
 
         self.accept()
+
+
+class BoqDialog(QDialog):
+    """
+    Bill of Quantities (BOQ) & Material Takeoff Dialog (v2.4.16 Task C):
+    Displays Concrete Volume (m3), Steel Weight (kg & Ton), and Formwork Area (m2)
+    for Beams, Slabs, and Columns.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None, boq_data: Optional[Dict[str, Any]] = None, story_id: str = "Story"):
+        super().__init__(parent)
+        self.setWindowTitle(f"Bill of Quantities (BOQ) & Material Takeoff — {story_id} (ACI 318-19)")
+        self.setMinimumSize(850, 520)
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.boq_data = boq_data or {}
+        self._build_ui(story_id)
+
+    def _build_ui(self, story_id: str) -> None:
+        vbox = QVBoxLayout(self)
+        vbox.setSpacing(12)
+
+        lbl_title = QLabel(f"<h2>Bill of Quantities (BOQ) — {story_id}</h2>")
+        vbox.addWidget(lbl_title)
+
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(10)
+
+        tots = self.boq_data.get("totals", {})
+        cards = [
+            ("Total Concrete", f"{tots.get('concrete_m3', 0.0):.2f} m³", "#16A34A", "#DCFCE7"),
+            ("Total Steel", f"{tots.get('steel_ton', 0.0):.3f} Ton", "#0284C7", "#E0F2FE"),
+            ("Total Formwork", f"{tots.get('formwork_m2', 0.0):.2f} m²", "#D97706", "#FEF3C7"),
+            ("Avg Steel Ratio", f"{tots.get('steel_ratio_kg_m3', 0.0):.1f} kg/m³", "#7C3AED", "#F3E8FF"),
+        ]
+        for title, val, text_c, bg_c in cards:
+            f = QFrame()
+            f.setStyleSheet(f"QFrame {{ background-color: {bg_c}; border: 1px solid {text_c}; border-radius: 6px; padding: 6px; }}")
+            vl = QVBoxLayout(f)
+            vl.setContentsMargins(4, 4, 4, 4)
+            vl.setSpacing(2)
+            t_lbl = QLabel(title)
+            t_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #475569;")
+            v_lbl = QLabel(val)
+            v_lbl.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {text_c};")
+            vl.addWidget(t_lbl)
+            vl.addWidget(v_lbl)
+            kpi_row.addWidget(f)
+
+        vbox.addLayout(kpi_row)
+
+        self.tbl_boq = QTableWidget(4, 7)
+        self.tbl_boq.setHorizontalHeaderLabels([
+            "Structural Element",
+            "Units / Count",
+            "Concrete (m³)",
+            "Steel (kg)",
+            "Steel (Ton)",
+            "Formwork (m²)",
+            "Engineering Notes",
+        ])
+        self.tbl_boq.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tbl_boq.verticalHeader().setVisible(False)
+
+        slb = self.boq_data.get("slabs", {})
+        bm = self.boq_data.get("beams", {})
+        col = self.boq_data.get("columns", {})
+
+        row_defs = [
+            ("Slabs (One-Way Hollow-Block / Hordi)", f"{slb.get('area_m2', 0.0):.1f} m²", f"{slb.get('concrete_m3', 0.0):.2f}", f"{slb.get('steel_kg', 0.0):.1f}", f"{slb.get('steel_ton', 0.0):.3f}", f"{slb.get('formwork_m2', 0.0):.1f}", "Topping + Ribs (excl. blocks)"),
+            ("Beams (Hidden & Drop Beams)", f"{bm.get('count', 0)} Beams", f"{bm.get('concrete_m3', 0.0):.2f}", f"{bm.get('steel_kg', 0.0):.1f}", f"{bm.get('steel_ton', 0.0):.3f}", f"{bm.get('formwork_m2', 0.0):.1f}", "Designed sections & stirrups"),
+            ("Columns (Floor Height)", f"{col.get('count', 0)} Columns", f"{col.get('concrete_m3', 0.0):.2f}", f"{col.get('steel_kg', 0.0):.1f}", f"{col.get('steel_ton', 0.0):.3f}", f"{col.get('formwork_m2', 0.0):.1f}", "Vertical bars (1.2% Ag) + ties"),
+            ("TOTAL FLOOR TAKEOFF", "Floor Total", f"{tots.get('concrete_m3', 0.0):.2f}", f"{tots.get('steel_kg', 0.0):.1f}", f"{tots.get('steel_ton', 0.0):.3f}", f"{tots.get('formwork_m2', 0.0):.1f}", f"{tots.get('steel_ratio_kg_m3', 0.0):.1f} kg steel / m³ concrete"),
+        ]
+
+        for r_idx, (elem, cnt, c_m3, s_kg, s_ton, form_m2, notes) in enumerate(row_defs):
+            is_tot = (r_idx == 3)
+            fnt = QFont()
+            if is_tot:
+                fnt.setBold(True)
+            for c_idx, val in enumerate([elem, cnt, c_m3, s_kg, s_ton, form_m2, notes]):
+                item = QTableWidgetItem(val)
+                item.setFont(fnt)
+                if is_tot:
+                    item.setBackground(QColor("#E2E8F0"))
+                    item.setForeground(QColor("#0F172A"))
+                self.tbl_boq.setItem(r_idx, c_idx, item)
+
+        vbox.addWidget(self.tbl_boq, 1)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch(1)
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        btn_box.addWidget(btn_close)
+        vbox.addLayout(btn_box)
 
 
 class StartupWelcomeDialog(QDialog):
@@ -2446,7 +2544,20 @@ class StructuralCadCanvas2D(QGraphicsView):
                 self.studio.statusBar().showMessage(msg, 5000)
                 return msg
 
-        # 4. Outside boundary
+        # 4. If no slab yet exists in story['slabs'] at this point, infer and create it via Shapely (v2.4.16 FIX #3)
+        ok, pick_msg, added_slb = pick_area_create_or_update_slab(story, px, py, target_mode="SLAB")
+        if ok and added_slb is not None:
+            s_id = str(added_slb.get("id", "S"))
+            self.selected_items = [("slab", s_id)]
+            self.studio.save_and_sync_current_story()
+            self.render_story(story)
+            self.studio.refresh_story_ui()
+            msg = f"Created Slab {s_id} via Pick Area: Area={added_slb['area_m2']:.2f} m², {added_slb['lx_m']:.2f}×{added_slb['ly_m']:.2f} m, Ribs={added_slb['rib_direction_deg']}°"
+            self.studio.update_contextual_prompt(msg)
+            self.studio.statusBar().showMessage(msg, 5000)
+            return msg
+
+        # 5. Outside boundary
         bnd = story.get("slab_edge_polygon", [])
         if len(bnd) >= 3 and not _point_in_polygon(px, py, bnd):
             msg = "Clicked outside building boundary"
@@ -2454,8 +2565,8 @@ class StructuralCadCanvas2D(QGraphicsView):
             self.studio.statusBar().showMessage(msg, 5000)
             return msg
 
-        # 5. Inside boundary but no slab panel found
-        msg = f"Clicked inside building boundary at ({px:.2f}, {py:.2f}): no slab panel found."
+        # 6. Inside boundary but no slab panel found
+        msg = f"Clicked inside building boundary at ({px:.2f}, {py:.2f}): no bounded slab bay found."
         self.studio.update_contextual_prompt(msg)
         self.studio.statusBar().showMessage(msg, 5000)
         return msg
@@ -3153,7 +3264,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
                 ex, ey = float(bm.get("end_x", 5.0)), float(bm.get("end_y", 0.0))
                 b_kind = bm.get("beam_kind", "hidden")
-                b_width = float(bm.get("width_m", 0.40 if b_kind == "hidden" else 0.20))
+                b_width = float(bm.get("modeling_width_m") or bm.get("width_m", 0.40 if b_kind == "hidden" else 0.20))
                 half_w = b_width / 2.0
 
                 dx, dy = ex - sx, ey - sy
@@ -5284,6 +5395,24 @@ class XpertStudioMainWindow(QMainWindow):
         btn_run_all.clicked.connect(lambda: self.run_analyze_all_beams(switch_to_tab=1))
         self.top_tb.addWidget(btn_run_all)
 
+        btn_unify = QPushButton("Unify Beams")
+        btn_unify.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_unify.setStyleSheet("background-color: #4338CA; color: white; font-weight: bold; padding: 5px 10px;")
+        btn_unify.clicked.connect(self.unify_story_beams)
+        self.top_tb.addWidget(btn_unify)
+
+        btn_draw_plans = QPushButton("Draw Plans (DXF)")
+        btn_draw_plans.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_draw_plans.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold; padding: 5px 10px;")
+        btn_draw_plans.clicked.connect(self.export_dxf_plans)
+        self.top_tb.addWidget(btn_draw_plans)
+
+        btn_boq = QPushButton("Calculate Quantities (BOQ)")
+        btn_boq.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_boq.setStyleSheet("background-color: #7C3AED; color: white; font-weight: bold; padding: 5px 10px;")
+        btn_boq.clicked.connect(self.show_boq_dialog)
+        self.top_tb.addWidget(btn_boq)
+
         # ======================================================================
         # TOP ROW 2 (Context-Specific for 2D Drawing Mode ONLY):
         #   - Dedicated ZOOM Toolbar
@@ -6454,11 +6583,38 @@ class XpertStudioMainWindow(QMainWindow):
             return False
         fc = float(self.master_project["materials_and_soil"]["fc_mpa"])
         fy = float(self.master_project["materials_and_soil"]["fy_mpa"])
+        
+        orig_beam_dims = {
+            bm.get("id"): (
+                float(bm.get("modeling_width_m", bm.get("width_m", 0.20))),
+                float(bm.get("modeling_depth_m", bm.get("depth_m", 0.30))),
+            )
+            for bm in beams if bm.get("id")
+        }
+
         self.last_analysis_bundle = analyze_all_story_beams_and_columns(self.current_story_data, fc, fy)
         conv, alerts = enforce_beam_footprint_and_cascade(self.current_story_data)
         if conv:
             self.last_analysis_bundle["post_sizing_drop_conversions"] = list(self.last_analysis_bundle.get("post_sizing_drop_conversions", [])) + conv
             self.last_analysis_bundle["post_sizing_alerts"] = list(self.last_analysis_bundle.get("post_sizing_alerts", [])) + alerts
+
+        # v2.4.16 Fix 1: Restore modeling dimensions on canvas so beams never expand or create gaps
+        b_designs = self.last_analysis_bundle.get("beam_designs", {}) if self.last_analysis_bundle else {}
+        for bm in beams:
+            bid = bm.get("id")
+            des = b_designs.get(bid, {})
+            des_w = round(float(des.get("b_mm", 0.0)) / 1000.0, 3)
+            des_h = round(float(des.get("h_mm", 0.0)) / 1000.0, 3)
+            if des_w > 0:
+                bm["designed_width_m"] = des_w
+            if des_h > 0:
+                bm["designed_depth_m"] = des_h
+            if bid in orig_beam_dims:
+                w_mod, d_mod = orig_beam_dims[bid]
+                bm["width_m"] = w_mod
+                bm["depth_m"] = d_mod
+                bm["modeling_width_m"] = w_mod
+                bm["modeling_depth_m"] = d_mod
 
         self.beam_diagrams_view.populate_results(self.current_story_data, self.last_analysis_bundle, select_beam_id=select_beam_id)
         self.beam_design_view.populate_results(self.current_story_data, self.last_analysis_bundle, select_beam_id=select_beam_id)
@@ -6501,6 +6657,68 @@ class XpertStudioMainWindow(QMainWindow):
             )
         except Exception as exc:
             _report_studio_exception(self, "Structural Analysis & Design Error", exc)
+
+    def unify_story_beams(self) -> None:
+        if not self.master_project:
+            return
+        if not getattr(self, "last_analysis_bundle", None):
+            self._solve_story_and_refresh_views()
+        b_designs = getattr(self, "last_analysis_bundle", {}).get("beam_designs", {})
+        res = unify_and_classify_beams(self.current_story_data, b_designs)
+        self.save_and_sync_current_story()
+        self.cad_canvas.render_story(self.current_story_data)
+        self.refresh_story_ui()
+        msg = f"Unified {len(self.current_story_data.get('beams', []))} beams into {res['count']} schedule groups (B1..B{res['count']})."
+        self.update_contextual_prompt(msg)
+        self.statusBar().showMessage(msg, 5000)
+
+        lines = [
+            f"• {g['unified_tag']}: {g['section_cm']} cm | Top: {g['top_rebar']} | Bot: {g['bottom_rebar']} | Stirrups: {g['stirrups']} (Count: {g['beam_count']}, Beams: {', '.join(g['beam_ids'])})"
+            for g in res["groups"]
+        ]
+        QMessageBox.information(
+            self,
+            "Beam Unification Schedule (Sorting & Classification)",
+            f"Successfully unified and classified beams into {res['count']} standard groups:\n\n" + "\n".join(lines),
+        )
+
+    def export_dxf_plans(self) -> None:
+        if not self.master_project:
+            return
+        if not getattr(self, "last_analysis_bundle", None):
+            self._solve_story_and_refresh_views()
+        b_designs = getattr(self, "last_analysis_bundle", {}).get("beam_designs", {})
+        unify_and_classify_beams(self.current_story_data, b_designs)
+
+        proj_dir = self.master_project.get("project_directory") or os.path.abspath(".")
+        cad_dir = os.path.join(proj_dir, "CAD_Drawings")
+        os.makedirs(cad_dir, exist_ok=True)
+        st_meta = self.master_project["stories"][self.current_story_index]
+        sid = st_meta.get("story_id", "Story")
+        dxf_name = f"{sid}_structural_plan.dxf"
+        dxf_path = os.path.join(cad_dir, dxf_name)
+
+        export_story_to_dxf(self.current_story_data, dxf_path, getattr(self, "last_analysis_bundle", None))
+
+        msg = f"Exported structural DXF plan with designed dimensions to: {dxf_path}"
+        self.update_contextual_prompt(msg)
+        self.statusBar().showMessage(msg, 5000)
+        QMessageBox.information(
+            self,
+            "Draw Plans (DXF Export)",
+            f"Successfully exported structural plan with DESIGNED dimensions and unified tags to:\n\n{dxf_path}\n\nLayers included:\n• 00-XD-EDGE (Building Boundary)\n• 00-XD-COL & 00-XD-TAG-COL (Columns)\n• 00-XD-BEAM-HID & 00-XD-BEAM-DROP (Beams with Designed Width)\n• 00-XD-TAG-BEAM (Unified Tags e.g. B1 (20x50))\n• 00-XD-SLAB & 00-XD-SLAB-RIBS (Slab Outlines & Ribs)",
+        )
+
+    def show_boq_dialog(self) -> None:
+        if not self.master_project:
+            return
+        if not getattr(self, "last_analysis_bundle", None):
+            self._solve_story_and_refresh_views()
+        st_meta = self.master_project["stories"][self.current_story_index]
+        sid = st_meta.get("story_name", st_meta.get("story_id", "Current Story"))
+        boq_data = calculate_boq(self.current_story_data, getattr(self, "last_analysis_bundle", None))
+        dlg = BoqDialog(self, boq_data, sid)
+        dlg.exec()
 
     def switch_workspace_mode(self, mode_idx: int, auto_solve: bool = True) -> None:
         try:

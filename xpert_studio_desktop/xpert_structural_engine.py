@@ -4948,16 +4948,17 @@ def pick_area_create_or_update_slab(
 
     if chosen_slab.get("is_cantilever"):
         c_dir = chosen_slab["rib_direction_deg"]
-        b_slb = find_geometric_backspan_for_cantilever(chosen_slab, slabs)
+        cid = chosen_slab.get("id")
         for s in slabs:
-            if s.get("backspan_to_cantilever_id") == chosen_slab.get("id"):
+            if s.get("backspan_to_cantilever_id") == cid:
                 s["backspan_to_cantilever_id"] = None
                 s["rib_direction_locked"] = False
+        b_slb = find_geometric_backspan_for_cantilever(chosen_slab, slabs)
         if b_slb is not None:
             b_slb["rib_direction_deg"] = c_dir
             b_slb["rib_direction_label"] = "X-Direction (0°)" if c_dir == 0 else "Y-Direction (90°)"
             b_slb["rib_direction_locked"] = True
-            b_slb["backspan_to_cantilever_id"] = chosen_slab.get("id")
+            b_slb["backspan_to_cantilever_id"] = cid
 
     return True, f"Slab {chosen_slab['id']} set with Rib Direction = {chosen_slab['rib_direction_deg']}.", chosen_slab
 
@@ -5021,6 +5022,21 @@ def flip_slab_rib_by_id(
     lx = float(target_slb.get("lx_m", smax_x - smin_x))
     ly = float(target_slb.get("ly_m", smax_y - smin_y))
     target_slb["axis_span_m"] = lx if new_dir == 0 else ly
+
+    # Dynamic Cantilever Backspan Unlock & Re-evaluation (v2.4.16 FIX #4)
+    if target_slb.get("is_cantilever"):
+        cid = target_slb.get("id")
+        for s in slabs:
+            if s.get("backspan_to_cantilever_id") == cid:
+                s["backspan_to_cantilever_id"] = None
+                s["rib_direction_locked"] = False
+        b_slb = find_geometric_backspan_for_cantilever(target_slb, slabs)
+        if b_slb is not None:
+            b_slb["rib_direction_deg"] = new_dir
+            b_slb["rib_direction_label"] = "X-Direction (0°)" if new_dir == 0 else "Y-Direction (90°)"
+            b_slb["rib_direction_locked"] = True
+            b_slb["backspan_to_cantilever_id"] = cid
+
     return True, f"Slab {slab_id} ({lx:.2f}×{ly:.2f} m) flipped to Rib Direction = {new_dir}°.", target_slb
 
 
@@ -6653,3 +6669,406 @@ def enforce_beam_footprint_and_cascade(story_data):
         c2, a2 = enforce_opening_adjacent_drop_beams_and_cascade(story_data)
         converted.extend([c for c in c2 if c not in converted]); alerts.extend(a2)
     return converted, alerts
+
+
+def unify_and_classify_beams(
+    story_data: Dict[str, Any],
+    beam_designs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Groups designed beams by critical section and reinforcement properties (v2.4.16 Task A):
+    (width_m, depth_m, top_rebar, bottom_rebar, stirrups)
+    Assigns a unified tag to each group (e.g. B1, B2, B3...).
+    Updates each beam dictionary with bm["unified_tag"], bm["designed_width_m"], bm["designed_depth_m"].
+    Saves the group schedule to story_data["beam_schedule_groups"].
+    """
+    beams = story_data.get("beams", [])
+    if not beams:
+        return {"groups": [], "count": 0}
+
+    groups: Dict[Tuple, List[Dict[str, Any]]] = {}
+    for bm in beams:
+        bid = str(bm.get("id"))
+        des = (beam_designs or {}).get(bid, {})
+        w = round(float(des.get("b_mm", bm.get("designed_width_m", bm.get("width_m", 0.20)) * 1000.0)) / 1000.0, 3)
+        h = round(float(des.get("h_mm", bm.get("designed_depth_m", bm.get("depth_m", 0.40)) * 1000.0)) / 1000.0, 3)
+        top = str(des.get("top_bars") or des.get("top_bars_callout") or bm.get("top_bars") or bm.get("top_rebar") or "-")
+        bot = str(des.get("bottom_bars") or des.get("bottom_bars_callout") or bm.get("bottom_bars") or bm.get("bottom_rebar") or "-")
+        stir = str(des.get("stirrups") or bm.get("stirrups") or "-")
+
+        bm["designed_width_m"] = w
+        bm["designed_depth_m"] = h
+        bm["top_bars"] = top
+        bm["bottom_bars"] = bot
+        bm["stirrups"] = stir
+
+        key = (w, h, top, bot, stir)
+        groups.setdefault(key, []).append(bm)
+
+    sorted_group_keys = sorted(
+        groups.keys(),
+        key=lambda k: (-k[0], -k[1], -len(groups[k]))
+    )
+
+    group_records = []
+    for g_idx, key in enumerate(sorted_group_keys):
+        tag = f"B{g_idx + 1}"
+        w, h, top, bot, stir = key
+        b_cm = int(round(w * 100))
+        h_cm = int(round(h * 100))
+        bms = groups[key]
+        for bm in bms:
+            bm["unified_tag"] = tag
+            bm["unified_callout"] = f"{tag} ({b_cm}x{h_cm})"
+
+        group_records.append({
+            "unified_tag": tag,
+            "width_m": w,
+            "depth_m": h,
+            "section_cm": f"{b_cm}×{h_cm}",
+            "top_rebar": top,
+            "bottom_rebar": bot,
+            "stirrups": stir,
+            "beam_count": len(bms),
+            "beam_ids": [b["id"] for b in bms],
+            "callout": f"{tag} ({b_cm}x{h_cm})",
+        })
+
+    story_data["beam_schedule_groups"] = group_records
+    return {"groups": group_records, "count": len(group_records)}
+
+
+def calculate_boq(
+    story_data: Dict[str, Any],
+    bundle: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Calculates Bill of Quantities (BOQ) for the story (v2.4.16 Task C):
+    - Concrete Volume (m³) for beams, slabs, columns.
+    - Steel Weight (kg & tons) for beams, slabs, columns.
+    - Formwork Area (m²) for beams, slabs, columns.
+    """
+    if bundle is None:
+        bundle = analyze_all_story_beams_and_columns(story_data)
+
+    beam_designs = bundle.get("beam_designs", {})
+    beams = story_data.get("beams", [])
+    slabs = story_data.get("slabs", [])
+    columns = [c for c in story_data.get("columns", []) if c.get("active", True)]
+    h_story = float(story_data.get("height_m", 3.0))
+
+    t_slab_cm = float(story_data.get("adopted_slab_thickness_cm", 30.0))
+    t_slab_m = t_slab_cm / 100.0
+    hb = story_data.get("hollow_block", {})
+    hs_m = float(hb.get("topping_thickness_cm", 8.0)) / 100.0
+    blk_h_m = float(hb.get("block_height_cm", 20.0)) / 100.0
+    bw_m = float(hb.get("rib_width_cm", 15.0)) / 100.0
+    s_m = float(hb.get("block_width_cm", 40.0)) / 100.0
+    t_eff_m = hs_m + (bw_m / max(0.1, s_m + bw_m)) * blk_h_m
+
+    # 1. Slabs
+    slabs_area_m2 = sum(float(s.get("area_m2", 0.0)) for s in slabs)
+    slabs_concrete_m3 = round(slabs_area_m2 * t_eff_m, 2)
+    slabs_formwork_m2 = round(slabs_area_m2, 2)
+    slabs_steel_kg = round(slabs_area_m2 * 9.5, 2)
+
+    # 2. Beams
+    beams_concrete_m3 = 0.0
+    beams_formwork_m2 = 0.0
+    beams_steel_kg = 0.0
+
+    for bm in beams:
+        bid = str(bm["id"])
+        des = beam_designs.get(bid, {})
+        w = round(float(des.get("b_mm", bm.get("designed_width_m", bm.get("width_m", 0.20)) * 1000.0)) / 1000.0, 3)
+        h = round(float(des.get("h_mm", bm.get("designed_depth_m", bm.get("depth_m", 0.40)) * 1000.0)) / 1000.0, 3)
+        sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+        ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+        L = math.hypot(ex - sx, ey - sy)
+        if L < 0.1:
+            L = sum(float(sp) for sp in bm.get("spans", [4.0]))
+
+        b_kind = str(bm.get("beam_kind", "drop")).lower()
+        vol = L * w * h
+        beams_concrete_m3 += vol
+
+        if "drop" in b_kind:
+            side_h = max(0.10, h - t_slab_m)
+            form = L * w + 2.0 * L * side_h
+        else:
+            form = L * w
+        beams_formwork_m2 += form
+
+        top_str = des.get("top_bars") or bm.get("top_bars") or "2 Φ 16"
+        bot_str = des.get("bottom_bars") or bm.get("bottom_bars") or "3 Φ 16"
+        stir_str = des.get("stirrups") or bm.get("stirrups") or "Φ 6 @ 150 mm"
+
+        def _bar_wt(b_str: str, span_l: float) -> float:
+            try:
+                parts = b_str.replace("Φ", " ").replace("T", " ").replace("Y", " ").split()
+                if len(parts) >= 2:
+                    nb = float(parts[0])
+                    dia = float(parts[1])
+                    unit_w = (dia * dia) / 162.0
+                    return nb * unit_w * (span_l * 1.15)
+            except Exception:
+                pass
+            return 2.0 * (16.0 * 16.0 / 162.0) * span_l * 1.15
+
+        def _stir_wt(s_str: str, span_l: float, bw: float, bh: float) -> float:
+            try:
+                dia = 8.0
+                spacing = 0.15
+                legs = 2
+                if "@" in s_str:
+                    pre, post = s_str.split("@")
+                    pre_clean = pre.replace("Φ", "").replace("T", "").strip()
+                    if pre_clean:
+                        dia = float(pre_clean)
+                    post_clean = post.replace("mm", "").replace("m", "").split()[0].strip()
+                    spacing = max(0.05, float(post_clean) / 1000.0 if float(post_clean) > 2.0 else float(post_clean))
+                    if "4-legs" in s_str.lower() or "4 legs" in s_str.lower():
+                        legs = 4
+                unit_w = (dia * dia) / 162.0
+                n_ties = max(2, int(span_l / spacing))
+                perim = 2.0 * ((bw - 0.05) + (bh - 0.05)) * (2.0 if legs == 4 else 1.0)
+                return n_ties * perim * unit_w
+            except Exception:
+                return (span_l / 0.15) * (2.0 * (bw + bh)) * (8.0 * 8.0 / 162.0)
+
+        bm_steel = _bar_wt(top_str, L) + _bar_wt(bot_str, L) + _stir_wt(stir_str, L, w, h)
+        beams_steel_kg += bm_steel
+
+    # 3. Columns
+    cols_concrete_m3 = 0.0
+    cols_formwork_m2 = 0.0
+    cols_steel_kg = 0.0
+    for col in columns:
+        b = float(col.get("b_m", 0.20))
+        h = float(col.get("h_m", 0.40))
+        H = h_story * (2.0 if col.get("double_height") else 1.0)
+        c_vol = b * h * H
+        cols_concrete_m3 += c_vol
+        cols_formwork_m2 += 2.0 * (b + h) * H
+        cols_steel_kg += (b * h * 0.012) * H * 7850.0
+
+    beams_concrete_m3 = round(beams_concrete_m3, 2)
+    beams_formwork_m2 = round(beams_formwork_m2, 2)
+    beams_steel_kg = round(beams_steel_kg, 2)
+
+    cols_concrete_m3 = round(cols_concrete_m3, 2)
+    cols_formwork_m2 = round(cols_formwork_m2, 2)
+    cols_steel_kg = round(cols_steel_kg, 2)
+
+    tot_concrete = round(slabs_concrete_m3 + beams_concrete_m3 + cols_concrete_m3, 2)
+    tot_steel_kg = round(slabs_steel_kg + beams_steel_kg + cols_steel_kg, 2)
+    tot_steel_ton = round(tot_steel_kg / 1000.0, 3)
+    tot_formwork = round(slabs_formwork_m2 + beams_formwork_m2 + cols_formwork_m2, 2)
+    steel_ratio = round(tot_steel_kg / max(1.0, tot_concrete), 1)
+
+    return {
+        "slabs": {
+            "area_m2": round(slabs_area_m2, 2),
+            "concrete_m3": slabs_concrete_m3,
+            "steel_kg": slabs_steel_kg,
+            "steel_ton": round(slabs_steel_kg / 1000.0, 3),
+            "formwork_m2": slabs_formwork_m2,
+        },
+        "beams": {
+            "count": len(beams),
+            "concrete_m3": beams_concrete_m3,
+            "steel_kg": beams_steel_kg,
+            "steel_ton": round(beams_steel_kg / 1000.0, 3),
+            "formwork_m2": beams_formwork_m2,
+        },
+        "columns": {
+            "count": len(columns),
+            "concrete_m3": cols_concrete_m3,
+            "steel_kg": cols_steel_kg,
+            "steel_ton": round(cols_steel_kg / 1000.0, 3),
+            "formwork_m2": cols_formwork_m2,
+        },
+        "totals": {
+            "concrete_m3": tot_concrete,
+            "steel_kg": tot_steel_kg,
+            "steel_ton": tot_steel_ton,
+            "formwork_m2": tot_formwork,
+            "steel_ratio_kg_m3": steel_ratio,
+        },
+    }
+
+
+def export_story_to_dxf(
+    story_data: Dict[str, Any],
+    dxf_path: str,
+    bundle: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Exports the structural story plan to DXF using ezdxf (v2.4.16 Task B):
+    1. Building boundary (00-XD-EDGE).
+    2. Columns and column tags (00-XD-COL, 00-XD-TAG-COL).
+    3. Beams drawn with DESIGNED dimensions (designed_width_m) (00-XD-BEAM-HID, 00-XD-BEAM-DROP).
+    4. Slab outlines and rib directions (00-XD-SLAB, 00-XD-SLAB-RIBS).
+    5. Beam tags with unified names and dimensions, e.g. 'B1 (20x50)' (00-XD-TAG-BEAM).
+    """
+    import os
+    import ezdxf
+
+    if bundle is None:
+        bundle = analyze_all_story_beams_and_columns(story_data)
+
+    beam_designs = bundle.get("beam_designs", {})
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 6  # Meters
+
+    if "XD_TAG_STYLE" not in doc.styles:
+        doc.styles.add("XD_TAG_STYLE", font="arial.ttf")
+
+    layers = [
+        ("00-XD-EDGE", 4, "Continuous"),
+        ("00-XD-OPEN", 6, "Continuous"),
+        ("00-XD-COL", 1, "Continuous"),
+        ("00-XD-BEAM-HID", 2, "DASHED"),
+        ("00-XD-BEAM-DROP", 3, "Continuous"),
+        ("00-XD-SLAB", 140, "Continuous"),
+        ("00-XD-SLAB-RIBS", 2, "DASHED"),
+        ("00-XD-TAG-COL", 3, "Continuous"),
+        ("00-XD-TAG-BEAM", 30, "Continuous"),
+        ("00-XD-TAG-SLAB", 4, "Continuous"),
+    ]
+    for l_name, l_col, l_type in layers:
+        if l_name not in doc.layers:
+            doc.layers.add(name=l_name, color=l_col)
+
+    msp = doc.modelspace()
+
+    # 1. Building Boundary
+    edge_pts = story_data.get("slab_edge_polygon", [])
+    if len(edge_pts) >= 3:
+        p2d = [(float(p[0]), float(p[1])) for p in edge_pts]
+        poly = msp.add_lwpolyline(p2d, dxfattribs={"layer": "00-XD-EDGE"})
+        poly.closed = True
+
+    # 2. Columns
+    cols = story_data.get("columns", [])
+    for col in cols:
+        if not col.get("active", True):
+            continue
+        cx = float(col["x"])
+        cy = float(col["y"])
+        b = float(col.get("b_m", 0.25))
+        h = float(col.get("h_m", 0.50))
+        cid = str(col["id"]) + (" (2H)" if col.get("double_height") else "")
+        corners = [
+            (cx - b / 2.0, cy - h / 2.0),
+            (cx + b / 2.0, cy - h / 2.0),
+            (cx + b / 2.0, cy + h / 2.0),
+            (cx - b / 2.0, cy + h / 2.0),
+        ]
+        cpoly = msp.add_lwpolyline(corners, dxfattribs={"layer": "00-XD-COL", "color": 1})
+        cpoly.closed = True
+        msp.add_text(
+            cid,
+            dxfattribs={
+                "layer": "00-XD-TAG-COL",
+                "style": "XD_TAG_STYLE",
+                "height": 0.22,
+                "color": 3,
+                "insert": (round(cx + b / 2.0 + 0.12, 3), round(cy + h / 2.0 + 0.12, 3), 0.0),
+            },
+        )
+
+    # 3. Openings
+    for op in story_data.get("openings", []):
+        pts = op.get("polygon")
+        if pts and len(pts) >= 3:
+            opoly = msp.add_lwpolyline([(float(p[0]), float(p[1])) for p in pts], dxfattribs={"layer": "00-XD-OPEN", "color": 6})
+            opoly.closed = True
+            omin_x, omax_x = min(p[0] for p in pts), max(p[0] for p in pts)
+            omin_y, omax_y = min(p[1] for p in pts), max(p[1] for p in pts)
+            msp.add_line((omin_x, omin_y), (omax_x, omax_y), dxfattribs={"layer": "00-XD-OPEN", "color": 6})
+            msp.add_line((omin_x, omax_y), (omax_x, omin_y), dxfattribs={"layer": "00-XD-OPEN", "color": 6})
+
+    # 4. Beams Drawn with DESIGNED dimensions
+    beams = story_data.get("beams", [])
+    for bm in beams:
+        bid = str(bm["id"])
+        des = beam_designs.get(bid, {})
+        w = round(float(des.get("b_mm", bm.get("designed_width_m", bm.get("width_m", 0.20)) * 1000.0)) / 1000.0, 3)
+        h = round(float(des.get("h_mm", bm.get("designed_depth_m", bm.get("depth_m", 0.40)) * 1000.0)) / 1000.0, 3)
+        sx = float(bm.get("start_x", 0.0))
+        sy = float(bm.get("start_y", 0.0))
+        ex = float(bm.get("end_x", 5.0))
+        ey = float(bm.get("end_y", 0.0))
+        b_kind = bm.get("beam_kind", "hidden")
+        layer = "00-XD-BEAM-HID" if b_kind == "hidden" else "00-XD-BEAM-DROP"
+        color = 2 if b_kind == "hidden" else 3
+
+        dx, dy = ex - sx, ey - sy
+        L = max(0.01, (dx * dx + dy * dy) ** 0.5)
+        nx, ny = -dy / L, dx / L
+        hw = w / 2.0
+        c1 = (sx + nx * hw, sy + ny * hw)
+        c2 = (ex + nx * hw, ey + ny * hw)
+        c3 = (ex - nx * hw, ey - ny * hw)
+        c4 = (sx - nx * hw, sy - ny * hw)
+        b_poly = msp.add_lwpolyline([c1, c2, c3, c4], dxfattribs={"layer": layer, "color": color})
+        b_poly.closed = True
+
+        msp.add_line((sx, sy), (ex, ey), dxfattribs={"layer": layer, "color": color, "linetype": "DASHED"})
+
+        u_tag = bm.get("unified_tag") or bid
+        w_cm = int(round(w * 100))
+        h_cm = int(round(h * 100))
+        callout = f"{u_tag} ({w_cm}x{h_cm})"
+
+        mx = (sx + ex) / 2.0
+        my = (sy + ey) / 2.0
+        rot = 0.0 if abs(dx) >= abs(dy) else 90.0
+        msp.add_text(
+            callout,
+            dxfattribs={
+                "layer": "00-XD-TAG-BEAM",
+                "style": "XD_TAG_STYLE",
+                "height": 0.22,
+                "color": 30,
+                "rotation": rot,
+                "insert": (mx + nx * (hw + 0.15), my + ny * (hw + 0.15), 0.0),
+            },
+        )
+
+    # 5. Slabs: Outlines and Rib Directions
+    slabs = story_data.get("slabs", [])
+    for slb in slabs:
+        poly_pts = slb.get("polygon", [])
+        if len(poly_pts) >= 3:
+            s_poly = msp.add_lwpolyline([(float(p[0]), float(p[1])) for p in poly_pts], dxfattribs={"layer": "00-XD-SLAB", "color": 140})
+            s_poly.closed = True
+
+            scx = float(slb.get("cx", (min(p[0] for p in poly_pts) + max(p[0] for p in poly_pts)) / 2.0))
+            scy = float(slb.get("cy", (min(p[1] for p in poly_pts) + max(p[1] for p in poly_pts)) / 2.0))
+            rib_dir = int(slb.get("rib_direction_deg", 0))
+
+            if rib_dir == 0:
+                msp.add_line((scx - 0.75, scy), (scx + 0.75, scy), dxfattribs={"layer": "00-XD-SLAB-RIBS", "color": 2})
+            else:
+                msp.add_line((scx, scy - 0.75), (scx, scy + 0.75), dxfattribs={"layer": "00-XD-SLAB-RIBS", "color": 2})
+
+            sid = str(slb.get("id", "S"))
+            lx = float(slb.get("lx_m", 0.0))
+            ly = float(slb.get("ly_m", 0.0))
+            msp.add_text(
+                f"{sid} ({lx:.1f}x{ly:.1f})",
+                dxfattribs={
+                    "layer": "00-XD-TAG-SLAB",
+                    "style": "XD_TAG_STYLE",
+                    "height": 0.20,
+                    "color": 4,
+                    "insert": (scx - 0.5, scy + 0.15, 0.0),
+                },
+            )
+
+    os.makedirs(os.path.dirname(os.path.abspath(dxf_path)), exist_ok=True)
+    doc.saveas(dxf_path)
+    return dxf_path
+

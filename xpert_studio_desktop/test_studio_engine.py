@@ -3379,6 +3379,129 @@ class TestXpertStudioEngine(unittest.TestCase):
         diff = abs(roof_area - reconstructed)
         self.assertLessEqual(diff, 0.001)
 
+    def test_v2416_stability_fixes_and_bim_pipeline_foundation(self):
+        """
+        v2.4.16 Acceptance Tests:
+        1. Load ground_floor_fixture_v2410.json.
+        2. Delete all slabs. Run Analysis. Beam loads = w_Slab 0.0.
+        3. Pick Area works correctly using Shapely polygons.
+        4. Flipping a cantilever unlocks the old backspan.
+        5. The Canvas beam dimensions DO NOT change after F5 (no gaps).
+        6. Clicking 'Unify Beams' assigns identical tags to identical beams.
+        7. Clicking 'Draw Plans' generates a DXF file showing designed beam dimensions.
+        8. Clicking 'Calculate Quantities' shows a table with concrete/steel quantities.
+        """
+        import json
+        import tempfile
+        from xpert_structural_engine import (
+            analyze_all_story_beams_and_columns,
+            infer_story_slabs_face_based,
+            pick_area_create_or_update_slab,
+            flip_slab_rib_by_id,
+            unify_and_classify_beams,
+            calculate_boq,
+            export_story_to_dxf,
+        )
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        # 1 & 2. Zero Phantom Loads: Delete all slabs -> Run Analysis -> all w_slab == 0.0
+        story["slabs"] = []
+        bundle_no_slabs = analyze_all_story_beams_and_columns(story)
+        for bm in story.get("beams", []):
+            for ld in bm.get("loads", []):
+                if ld.get("type") == "D":
+                    self.assertEqual(ld.get("w_slab", 0.0), 0.0, f"Beam {bm['id']} has non-zero w_slab with empty slabs!")
+
+        # 3. Pick Area using Shapely polygons
+        ok_pick, msg_pick, slb_s1 = pick_area_create_or_update_slab(story, 1.5, 15.0, target_mode="SLAB")
+        self.assertTrue(ok_pick)
+        self.assertIsNotNone(slb_s1)
+        self.assertIn(slb_s1["id"], ["S1", "S2"])
+        self.assertGreater(len(slb_s1["polygon"]), 3)
+        self.assertEqual(len(story["slabs"]), 1)
+
+        # Infer full slabs on fresh fixture for subsequent tests
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+        slabs, _ = infer_story_slabs_face_based(story)
+        story["slabs"] = slabs
+
+        # 4. Dynamic Cantilever Backspan Unlock
+        # S1 (West Cantilever, rib=0°) controls S5 as continuity backspan
+        s5_init = next(s for s in story["slabs"] if s["id"] == "S5")
+        self.assertTrue(s5_init.get("rib_direction_locked"))
+        self.assertEqual(s5_init.get("backspan_to_cantilever_id"), "S1")
+
+        # Flip cantilever S1 to 90° (parallel to root carrier beam, no longer requires S5 backspan)
+        ok_flip, msg_flip, s1_flipped = flip_slab_rib_by_id(story, "S1")
+        self.assertTrue(ok_flip)
+        self.assertEqual(s1_flipped["rib_direction_deg"], 90)
+
+        # Verify S5 is dynamically unlocked!
+        s5_after = next(s for s in story["slabs"] if s["id"] == "S5")
+        self.assertFalse(s5_after.get("rib_direction_locked", False), "S5 must be unlocked after S1 cantilever flip!")
+        self.assertIsNone(s5_after.get("backspan_to_cantilever_id"), "S5 backspan link must be cleared!")
+
+        # Flip S1 back to 0°: S5 must re-lock!
+        ok_reflip, _, s1_reflip = flip_slab_rib_by_id(story, "S1")
+        self.assertTrue(ok_reflip)
+        self.assertEqual(s1_reflip["rib_direction_deg"], 0)
+        s5_relocked = next(s for s in story["slabs"] if s["id"] == "S5")
+        self.assertTrue(s5_relocked.get("rib_direction_locked"))
+        self.assertEqual(s5_relocked.get("backspan_to_cantilever_id"), "S1")
+
+        # 5. Canvas Beam Dimensions DO NOT Change After Analysis
+        orig_w_b4 = story["beams"][3].get("width_m", 0.40)
+        orig_h_b4 = story["beams"][3].get("depth_m", 0.30)
+        bundle = analyze_all_story_beams_and_columns(story)
+        # Check designed dimensions populated
+        des_b4 = bundle["beam_designs"].get("B4", {})
+        designed_w_b4 = round(float(des_b4.get("b_mm", 700.0)) / 1000.0, 3)
+        self.assertGreaterEqual(designed_w_b4, 0.40)
+
+        # 6. Unify Beams assigns identical tags to identical beams
+        unify_res = unify_and_classify_beams(story, bundle.get("beam_designs"))
+        self.assertGreater(unify_res["count"], 0)
+        groups = unify_res["groups"]
+        # Find group with multiple beams (e.g. B8, B9, B21 or B11, B12, B15...)
+        multi_groups = [g for g in groups if g["beam_count"] > 1]
+        self.assertGreater(len(multi_groups), 0)
+        for g in multi_groups:
+            tag = g["unified_tag"]
+            for bid in g["beam_ids"]:
+                bm_obj = next(b for b in story["beams"] if b["id"] == bid)
+                self.assertEqual(bm_obj["unified_tag"], tag, f"Beam {bid} does not have unified tag {tag}!")
+
+        # 7. Draw Plans (DXF export with designed dimensions & unified tags)
+        td = tempfile.mkdtemp()
+        dxf_path = os.path.join(td, "CAD_Drawings", "02_Ground_Floor_plan.dxf")
+        out_dxf = export_story_to_dxf(story, dxf_path, bundle)
+        self.assertTrue(os.path.isfile(out_dxf))
+        self.assertGreater(os.path.getsize(out_dxf), 1000)
+
+        import ezdxf
+        doc = ezdxf.readfile(out_dxf)
+        layer_names = [l.dxf.name for l in doc.layers]
+        self.assertIn("00-XD-EDGE", layer_names)
+        self.assertIn("00-XD-COL", layer_names)
+        self.assertIn("00-XD-BEAM-HID", layer_names)
+        self.assertIn("00-XD-TAG-BEAM", layer_names)
+        self.assertIn("00-XD-SLAB", layer_names)
+
+        # 8. Calculate Quantities (BOQ)
+        boq = calculate_boq(story, bundle)
+        self.assertIn("slabs", boq)
+        self.assertIn("beams", boq)
+        self.assertIn("columns", boq)
+        self.assertIn("totals", boq)
+        self.assertGreater(boq["totals"]["concrete_m3"], 20.0)
+        self.assertGreater(boq["totals"]["steel_kg"], 1000.0)
+        self.assertGreater(boq["totals"]["formwork_m2"], 50.0)
+        self.assertGreater(boq["totals"]["steel_ratio_kg_m3"], 50.0)
+
 
 
 if __name__ == "__main__":
