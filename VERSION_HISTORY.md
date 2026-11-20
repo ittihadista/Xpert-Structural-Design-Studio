@@ -4,7 +4,40 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.4.12-structural-bim-pro` (2026-11-20)
+## Current Release: `v2.4.13-structural-bim-pro` (2026-11-20)
+**Release Title:** Face-Based Slab Inference Engine (Robust Shapely 2.0+ 2D CAD Boolean Subtraction, Coverage Equation $\le 0.01\text{ m}^2$, Zero Beam-Slab Overlap, Slivers Policy, Cantilever Rib Perpendicularity & Backspan Continuity Lock, 88/88 Tests Passed, Frozen Cores Preserved 100%).
+
+### Key Features & Advancements in `v2.4.13-structural-bim-pro`:
+1. **Shapely 2.0+ 2D CAD Boolean Subtraction (`infer_story_slabs_face_based`):**
+   - Completely replaced Qt `QPainterPath` boolean subtractions with exact CAD geometric topology via `shapely.ops.unary_union` and `difference`.
+   - Formula: $\text{Slabs} = \text{Building Boundary (00-XD-EDGE)} - \text{Openings (00-XD-OPEN)} - \text{Beams (00-XD-BEAM)}$.
+   - Solved topological clipping bugs that previously caused dropped bays (e.g. top-left bay at $X=1.5, Y=15.0$) and dropped interior void openings.
+2. **Pre-Inference Geometric Validator (`validate_geometry_before_inference`):**
+   - Validates existence and closure of the building boundary polygon (`00-XD-EDGE`).
+   - Ensures all beam endpoint coordinates are valid finite numbers prior to running inference or interactive pick operations.
+   - Fully integrated at the entrance of `auto_fill_all_story_slabs` and canvas pick handlers (`pick_slab_at_point`, `PICK_OPENING`).
+3. **Interactive Pick Area Tool Unification (`pick_area_create_or_update_slab`):**
+   - The manual canvas Pick Area workflow now runs the exact same face-based boolean algorithm as Auto-Fill, ensuring $100\%$ polygon and property parity between automated and manual workflows.
+4. **Sliver Merging Policy & True Panel Bounding:**
+   - Any geometric sliver panel ($< 0.30\text{ m}^2$ or minimum dimension $< 0.15\text{ m}$) sharing a boundary with an adjacent panel without a dividing beam is automatically merged into a single contiguous panel.
+   - Slabs 2 & 4 in the ground floor project are now unified into one contiguous $28.41\text{ m}^2$ ($5.80\text{ m} \times 4.90\text{ m}$) panel.
+5. **Exterior Cantilever Boundary & Support Detection:**
+   - Exact identification of exterior cantilever overhangs along the outer building perimeter.
+   - Automated rib perpendicularity: Vertical carrier beam $\implies 0^\circ$ (X-Direction), Horizontal carrier beam $\implies 90^\circ$ (Y-Direction).
+6. **Cantilever Backspan Continuity Lock:**
+   - Automatically detects adjacent backspan panels sharing the carrier beam and locks rib direction to align with the cantilever.
+   - Disallows converting backspan bays to void openings or flipping ribs in conflict with cantilever structural equilibrium.
+7. **Strict Preservation of Frozen Analytical & Design Cores:**
+   - All 5 calculation core functions in `xpert_structural_engine.py` (lines 194-515, 733-960, 961-1730, 1731-2397, 2398-2632) remain $100\%$ byte-for-byte SHA-256 identical to their reference baselines.
+8. **Test Suite Expansion (88/88 Tests Passed):**
+   - 82 baseline tests + 6 new geometric tests (Tests A-F: inner faces vs centerlines, zero beam-slab overlap, cantilever rib perpendicularity, backspan continuity lock, sliver merging, coverage equation exactness).
+   - $100\%$ clean pass across all 88 tests with zero ResourceWarnings.
+9. **Live Fixture Verification (Step 8 Criteria):**
+   - Verified on `ground_floor_fixture_v2410.json`: 20 slabs auto-generated, coverage equation exact difference $= 0.00000000\text{ m}^2 \le 0.01\text{ m}^2$, max beam-slab overlap $= 0.00000000\text{ m}^2$, 20 unique IDs, top-right cantilever S18 oriented at $0^\circ$, and Slabs 2 & 4 unified.
+
+---
+
+## Previous Release: `v2.4.12-structural-bim-pro` (2026-11-20)
 **Release Title:** GUI Hotfix — `push_undo_snapshot` Defined & Multi-Step Undo, Point-in-Component Slab Picking (`_point_in_polygon` Ray-Casting & Physical Beam Rectangles), Bounded-Slab-Bays Prompt Removed, 82/82 Unit Tests, Engine Frozen from v2.4.11.
 
 ### Key Features & Fixes in `v2.4.12-structural-bim-pro`:

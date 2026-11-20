@@ -1,4 +1,4 @@
-# Xpert Structural Design Studio (v2.4.12-structural-bim-pro)
+# Xpert Structural Design Studio (v2.4.13-structural-bim-pro)
 """
 Xpert Structural Design Studio (v2.4.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
@@ -89,6 +89,7 @@ from xpert_structural_engine import (
     _dist_point_to_segment,
     detect_story_grid_bays,
     reconcile_and_split_slabs_after_beam_change,
+    validate_geometry_before_inference,
     auto_fill_all_story_slabs,
     rotate_column_90_deg,
     pick_area_create_or_update_slab,
@@ -2404,14 +2405,16 @@ class StructuralCadCanvas2D(QGraphicsView):
 
     def pick_slab_at_point(self, raw_x: float, raw_y: float) -> str:
         """
-        v2.4.12 Point-in-Component Pick Slab Workflow:
-        1. Checks Openings (00-XD-OPEN) -> 'Clicked on Opening: {id}'
-        2. Checks Beams (00-XD-BEAM) actual physical rectangle -> 'Clicked on Beam: {id} ({kind})'
-        3. Checks Slabs in story['slabs'] -> Selects slab and formats properties message
-        4. Checks Building Boundary (00-XD-EDGE) -> 'Clicked outside building boundary'
-        5. Inside boundary but no slab component -> Informational fallback
+        v2.4.13 Point-in-Component Pick Slab Workflow:
+        Validates story geometry, then locates element under cursor.
         """
         story = self.studio.current_story_data
+        is_val, issues = validate_geometry_before_inference(story)
+        if not is_val:
+            msg = issues[0] if issues else "Draw Outer Slab Boundary and Beams first."
+            self.studio.update_contextual_prompt(msg)
+            self.studio.statusBar().showMessage(msg, 5000)
+            return msg
         px, py = float(raw_x), float(raw_y)
 
         # 1. Openings
@@ -2886,6 +2889,10 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         # STEP 4C: Pick Opening Toggle
         if tool == "PICK_OPENING":
+            is_val, issues = validate_geometry_before_inference(story)
+            if not is_val:
+                QMessageBox.warning(self, "Invalid Geometry", issues[0] if issues else "Draw Outer Slab Boundary and Beams first.")
+                return
             ok, msg, _ = pick_area_create_or_update_slab(
                 story, raw_x, raw_y, target_mode="TOGGLE_OPENING"
             )
