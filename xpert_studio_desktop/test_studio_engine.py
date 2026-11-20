@@ -2015,7 +2015,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             m = pio.initialize_studio_project(cfg)
             win = XpertStudioMainWindow(initial_master_project=m)
             win.show(); _app.processEvents()
-            expect = {"00_TieBeams": "2. Neck Column (Ties)", "01_Basement_Slab": "2. Column (Basement-only)",
+            expect = {"00_TieBeams": "2. Add Neck Column", "01_Basement_Slab": "2. Column (Basement-only)",
                       "02_Ground_Floor": "2. Place Column"}
             for idx in range(len(m["stories"])):
                 win.cb_story.setCurrentIndex(idx); _app.processEvents()
@@ -3501,6 +3501,206 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertGreater(boq["totals"]["steel_kg"], 1000.0)
         self.assertGreater(boq["totals"]["formwork_m2"], 50.0)
         self.assertGreater(boq["totals"]["steel_ratio_kg_m3"], 50.0)
+
+    def test_phase1_rebuild_modeling_columns_boundaries_and_locks(self):
+        """
+        Phase 1 Verification:
+        1. Boundary polyline drawing, vertex lock toggle, layer visibility toggle, vertex dragging.
+        2. Openings creation and boolean subtraction from slab area.
+        3. Column orientation flip (Spacebar), minimum size 0.20x0.40m, lock columns prevents selection & deletion.
+        4. Upper floor column visibility management (EditColumnsDialog) and visible_in_story data key.
+        5. Tie Beams story shows '2. Add Neck Column', adds 0.20x0.20m neck column with is_neck_column=True.
+        """
+        import os, json
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication, QPushButton
+        from PyQt6.QtCore import Qt, QPointF
+        from PyQt6.QtGui import QKeyEvent, QMouseEvent
+        import xpert_project_io as pio
+        from xpert_studio_app import XpertStudioMainWindow, EditColumnsDialog
+
+        _app = QApplication.instance() or QApplication([])
+        cfg = {
+            "project_name": "Phase1Rebuild",
+            "root_directory": self.tmp_dir,
+            "ground_floor_height_m": 3.2,
+            "include_basement": False,
+            "floors_above_ground": 2,
+            "upper_floors_mode": "distinct",
+            "include_penthouse": False
+        }
+        m = pio.initialize_studio_project(cfg)
+        win = XpertStudioMainWindow(initial_master_project=m)
+        win.show()
+        _app.processEvents()
+
+        # -------------------------------------------------------------
+        # AC1: Boundary Polyline, Lock Toggle, Layer Toggle, Vertex Drag
+        # -------------------------------------------------------------
+        g_idx = next(i for i, s in enumerate(m["stories"]) if s["story_id"] == "02_Ground_Floor")
+        win.cb_story.setCurrentIndex(g_idx)
+        _app.processEvents()
+
+        self.assertTrue(win.cad_canvas.boundary_locked)
+        self.assertTrue(win.btn_lock_boundary.isChecked())
+
+        win.current_story_data["slab_edge_polygon"] = [[0.0, 0.0], [10.0, 0.0], [10.0, 8.0], [0.0, 8.0]]
+        win.cad_canvas.render_story(win.current_story_data)
+
+        hit = win.cad_canvas._find_element_near(5.0, 0.0)
+        self.assertIsNone(hit)
+
+        win.btn_lock_boundary.setChecked(False)
+        self.assertFalse(win.cad_canvas.boundary_locked)
+        win.cad_canvas.ortho_enabled = False
+
+        v_event = QMouseEvent(
+            QMouseEvent.Type.MouseButtonPress,
+            QPointF(win.cad_canvas.mapFromScene(QPointF(0.0, 0.0))),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier
+        )
+        win.cad_canvas.active_tool = "SELECT"
+        win.cad_canvas.mousePressEvent(v_event)
+        self.assertEqual(win.cad_canvas._dragging_vertex_idx, 0)
+
+        move_event = QMouseEvent(
+            QMouseEvent.Type.MouseMove,
+            QPointF(win.cad_canvas.mapFromScene(QPointF(-1.0 * win.cad_canvas.scale_px, 1.0 * win.cad_canvas.scale_px))),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier
+        )
+        win.cad_canvas.mouseMoveEvent(move_event)
+        rel_event = QMouseEvent(
+            QMouseEvent.Type.MouseButtonRelease,
+            QPointF(win.cad_canvas.mapFromScene(QPointF(-1.0 * win.cad_canvas.scale_px, 1.0 * win.cad_canvas.scale_px))),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier
+        )
+        win.cad_canvas.mouseReleaseEvent(rel_event)
+        self.assertIsNone(win.cad_canvas._dragging_vertex_idx)
+        self.assertEqual(win.current_story_data["slab_edge_polygon"][0], [-1.0, -1.0])
+
+        self.assertTrue(win.chk_layer_edge.isChecked())
+        win.chk_layer_edge.setChecked(False)
+        self.assertFalse(win.cad_canvas.layer_show_edge)
+        win.chk_layer_edge.setChecked(True)
+        self.assertTrue(win.cad_canvas.layer_show_edge)
+
+        win.btn_lock_boundary.setChecked(True)
+        self.assertTrue(win.cad_canvas.boundary_locked)
+
+        # -------------------------------------------------------------
+        # AC2: Column Orientation Flipping via Spacebar & Minimum Size
+        # -------------------------------------------------------------
+        win.activate_cad_tool("DRAW_COL")
+        self.assertEqual(win.cb_col_orient.currentIndex(), 0)
+        space_ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier)
+        win.cad_canvas.keyPressEvent(space_ev)
+        self.assertEqual(win.cb_col_orient.currentIndex(), 1)
+        win.cad_canvas.keyPressEvent(space_ev)
+        self.assertEqual(win.cb_col_orient.currentIndex(), 0)
+
+        win.cad_canvas._handle_left_click_at(2.0, 2.0, 2.0, 2.0, "FREE")
+        win.cb_col_orient.setCurrentIndex(1)
+        win.cad_canvas._handle_left_click_at(6.0, 2.0, 6.0, 2.0, "FREE")
+
+        cols = win.current_story_data.get("columns", [])
+        self.assertEqual(len(cols), 2)
+        c1 = next(c for c in cols if c["id"] == "C1")
+        c2 = next(c for c in cols if c["id"] == "C2")
+        self.assertAlmostEqual(c1["b_m"], 0.20)
+        self.assertAlmostEqual(c1["h_m"], 0.40)
+        self.assertAlmostEqual(c2["b_m"], 0.40)
+        self.assertAlmostEqual(c2["h_m"], 0.20)
+
+        # -------------------------------------------------------------
+        # AC3: Lock Columns Prevents Selection & Deletion
+        # -------------------------------------------------------------
+        win.activate_cad_tool("SELECT")
+        hit_col = win.cad_canvas._find_element_near(2.0, 2.0)
+        self.assertIsNotNone(hit_col)
+        self.assertEqual(hit_col["kind"], "column")
+        self.assertEqual(hit_col["id"], "C1")
+
+        win.btn_lock_columns.setChecked(True)
+        self.assertTrue(win.cad_canvas.columns_locked)
+        hit_locked = win.cad_canvas._find_element_near(2.0, 2.0)
+        self.assertIsNone(hit_locked)
+
+        win.cad_canvas.selected_items = [("column", "C1")]
+        win.delete_selected_object()
+        self.assertEqual(len(win.current_story_data["columns"]), 2)
+
+        win.btn_lock_columns.setChecked(False)
+        self.assertFalse(win.cad_canvas.columns_locked)
+
+        # -------------------------------------------------------------
+        # AC4: Floor 2/Upper Floor Edit Columns Dialog Hides Column
+        # -------------------------------------------------------------
+        pio.propagate_ground_columns_to_all_stories(win.master_project, win.current_story_data["columns"])
+        
+        u1_idx = next(i for i, s in enumerate(m["stories"]) if s["story_id"] == "03_Upper_Floor_1")
+        win.cb_story.setCurrentIndex(u1_idx)
+        _app.processEvents()
+
+        slot_btn = getattr(win, "_btn_place_col", None)
+        self.assertEqual(slot_btn.text(), "2. Edit Columns")
+
+        dlg = EditColumnsDialog(win)
+        for row in range(dlg.tbl.rowCount()):
+            if dlg.tbl.item(row, 0).text() == "C1":
+                dlg.tbl.cellWidget(row, 1).setCurrentIndex(1)
+        dlg._save()
+        _app.processEvents()
+
+        u1_cols = {c["id"]: c for c in win.current_story_data["columns"]}
+        self.assertFalse(u1_cols["C1"]["active"])
+        self.assertTrue(u1_cols["C2"]["active"])
+        self.assertFalse(u1_cols["C1"]["visible_in_story"]["03_Upper_Floor_1"])
+        self.assertTrue(u1_cols["C2"]["visible_in_story"]["03_Upper_Floor_1"])
+
+        u2_idx = next(i for i, s in enumerate(m["stories"]) if s["story_id"] == "04_Upper_Floor_2")
+        win.cb_story.setCurrentIndex(u2_idx)
+        _app.processEvents()
+        u2_cols = {c["id"]: c for c in win.current_story_data["columns"]}
+        self.assertFalse(u2_cols["C1"]["active"])
+        self.assertTrue(u2_cols["C2"]["active"])
+
+        win.cb_story.setCurrentIndex(g_idx)
+        _app.processEvents()
+        g_cols_map = {c["id"]: c for c in win.current_story_data["columns"]}
+        self.assertTrue(g_cols_map["C1"]["active"])
+
+        # -------------------------------------------------------------
+        # AC5: Tie Beams Story Shows '2. Add Neck Column' & Places 0.20x0.20m
+        # -------------------------------------------------------------
+        t_idx = next(i for i, s in enumerate(m["stories"]) if s["story_id"] == "00_TieBeams")
+        win.cb_story.setCurrentIndex(t_idx)
+        _app.processEvents()
+
+        self.assertEqual(slot_btn.text(), "2. Add Neck Column")
+
+        slot_btn.click()
+        self.assertEqual(win.cad_canvas.active_tool, "DRAW_NECK_COL")
+
+        win.cad_canvas._handle_left_click_at(3.0, 3.0, 3.0, 3.0, "FREE")
+        tie_cols = win.current_story_data.get("columns", [])
+        nc1 = next((c for c in tie_cols if c["id"] == "NC1"), None)
+        self.assertIsNotNone(nc1)
+        self.assertAlmostEqual(nc1["b_m"], 0.20)
+        self.assertAlmostEqual(nc1["h_m"], 0.20)
+        self.assertTrue(nc1.get("is_neck_column"))
+
+        win.cad_canvas.active_tool = "DRAW_COL"
+        win.cad_canvas._handle_left_click_at(5.0, 5.0, 5.0, 5.0, "FREE")
+        tie_cols_after = win.current_story_data.get("columns", [])
+        self.assertFalse(any(c["id"] == "C3" for c in tie_cols_after))
+
+        win.hide()
 
 
 

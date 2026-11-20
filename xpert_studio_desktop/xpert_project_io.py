@@ -1632,6 +1632,34 @@ def propagate_ground_columns_to_all_stories(master_payload, ground_columns):
             _j.dump(sd, f, indent=2)
         if dp:
             sync_story_to_dxf(sd, dp)
+    all_stories = (master_payload or {}).get("stories", [])
+    story_ids = [s.get("story_id") for s in all_stories if s.get("story_id")]
+    ov_all = (master_payload or {}).get("column_overrides", {})
+    for s in all_stories:
+        sid = s.get("story_id", "")
+        jp = s.get("json_file", "")
+        if not jp or not os.path.isfile(jp):
+            continue
+        with open(jp, "r", encoding="utf-8") as f:
+            sd = _j.load(f)
+        ch = False
+        for col in sd.get("columns", []):
+            cid = str(col.get("id"))
+            vis_map = {}
+            for other_sid in story_ids:
+                if other_sid in ("02_Ground_Floor", "00_TieBeams"):
+                    vis_map[other_sid] = True
+                else:
+                    vis_map[other_sid] = bool(ov_all.get(cid, {}).get(other_sid, {}).get("active", True))
+            col["visible_in_story"] = vis_map
+            col["active"] = bool(vis_map.get(sid, True))
+            ch = True
+        for bm in sd.get("beams", []):
+            bm["visible_in_story"] = {other_sid: (other_sid == sid) for other_sid in story_ids}
+            ch = True
+        if ch:
+            with open(jp, "w", encoding="utf-8") as f:
+                _j.dump(sd, f, indent=2)
     return None
 
 def set_column_continuity_cascade(master, col_id, story_id, active, upper_story_ids):
