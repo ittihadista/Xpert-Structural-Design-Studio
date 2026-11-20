@@ -1,4 +1,4 @@
-# Xpert Structural Design Studio (v2.4.10-structural-bim-pro)
+# Xpert Structural Design Studio (v2.4.11-structural-bim-pro)
 """
 Xpert Structural Design Studio (v2.4.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
@@ -907,6 +907,56 @@ class DiagnosticLogDialog(QDialog):
         self.refresh_log()
 
 
+class SlabInferenceWarningsDialog(QDialog):
+    """
+    v2.4.11 Slab Inference & Geometry Audit Warnings Dialog:
+    Surfaces slivers, beam-opening overlaps, and untrimmed opening edges to Eng. Yousef.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None, warnings: Optional[List[str]] = None):
+        super().__init__(parent)
+        self.warnings = warnings or []
+        self.setWindowTitle("Slab Inference Warnings & Geometry Audit")
+        self.setMinimumSize(680, 400)
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        vbox = QVBoxLayout(self)
+        vbox.setSpacing(10)
+        vbox.setContentsMargins(14, 14, 14, 14)
+
+        lbl_title = QLabel(f"⚠️ Geometry & Slab Inference Audit: {len(self.warnings)} warning(s) detected")
+        lbl_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #D97706;")
+        vbox.addWidget(lbl_title)
+
+        lbl_desc = QLabel(
+            "The following non-blocking conditions were flagged during face-based slab inference:\n"
+            "• Slivers are retained in the model per policy (coverage equation satisfied).\n"
+            "• Overlaps or untrimmed edges indicate locations where trim beams may be recommended."
+        )
+        lbl_desc.setStyleSheet("color: #475569; font-size: 11px;")
+        vbox.addWidget(lbl_desc)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setStyleSheet(
+            "QListWidget { background: #0F172A; color: #FDE047; font-family: Consolas, monospace; "
+            "font-size: 11px; border: 1px solid #334155; border-radius: 4px; padding: 6px; } "
+            "QListWidget::item { padding: 4px; border-bottom: 1px solid #1E293B; }"
+        )
+        for w in self.warnings:
+            self.list_widget.addItem(f"• {w}")
+        vbox.addWidget(self.list_widget)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_close = QPushButton("Close")
+        btn_close.setStyleSheet("background: #0284C7; color: white; font-weight: bold; padding: 6px 20px; border-radius: 4px;")
+        btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(btn_close)
+        vbox.addLayout(btn_row)
+
+
 class SlabRibDesignDialog(QDialog):
     """
     Hollow-Block (Hordi) Slab Rib Design & Cross-Section Window (v2.0.0-structural-bim-pro):
@@ -1499,6 +1549,7 @@ class StructuralCadCanvas2D(QGraphicsView):
         self._polyline_pts: List[Tuple[float, float]] = []
         self._opening_poly_pts: List[Tuple[float, float]] = []
         self._opening_poly_mode: bool = False  # False = Rectangle (2-click default), True = Polyline [Spacebar toggle]
+        self._hovered_extend_beam_id: Optional[str] = None
         self._first_click_pt: Optional[Tuple[float, float]] = None
         self._second_click_pt: Optional[Tuple[float, float]] = None
         self._current_snap_info: Optional[Dict[str, Any]] = None
@@ -2111,6 +2162,26 @@ class StructuralCadCanvas2D(QGraphicsView):
             else:
                 snap["x"] = fx
 
+        if self.active_tool == "DRAW_EXTEND_BEAM":
+            if getattr(self, "_extend_beam_id", None) is None:
+                self.studio.statusBar().showMessage("Step 1/2: pick beam to extend")
+                beams = self.studio.current_story_data.get("beams", [])
+                hovered = None
+                min_d = 0.50
+                for bm in beams:
+                    bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                    bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+                    d = _dist_point_to_segment(raw_x, raw_y, bsx, bsy, bex, bey)
+                    if d < min_d:
+                        min_d = d
+                        hovered = str(bm["id"])
+                if hovered != getattr(self, "_hovered_extend_beam_id", None):
+                    self._hovered_extend_beam_id = hovered
+            else:
+                self.studio.statusBar().showMessage(
+                    f"Step 2/2: pick extension limit for beam {self._extend_beam_id} (click node/point/edge)"
+                )
+
         self._current_snap_info = snap
         self.studio.lbl_coords_bar.setText(f"X: {snap['x']:.2f}, Y: {snap['y']:.2f} m | {snap['label']}")
         self.render_story(self.studio.current_story_data)
@@ -2544,7 +2615,7 @@ class StructuralCadCanvas2D(QGraphicsView):
             self.studio.update_contextual_prompt(f"Placed Column {updated_col['id']} ({b_m:.2f}×{h_m:.2f} m): {msg}")
             return
 
-        # STEP 3C: Extend Beam (EX)
+        # STEP 3C: Extend Beam (EX) - v2.4.11 Two-Step Interactive Workflow
         if tool == "DRAW_EXTEND_BEAM":
             beams = story.get("beams", [])
             if not beams:
@@ -2562,26 +2633,34 @@ class StructuralCadCanvas2D(QGraphicsView):
                         min_d = d
                         found_b = bm
                 if found_b:
-                    self._extend_beam_id = found_b["id"]
-                    self.studio.update_contextual_prompt(
-                        f"Selected beam {found_b['id']}. Click boundary/target point on beam line via OSNAP to extend..."
-                    )
+                    self._extend_beam_id = str(found_b["id"])
+                    self._hovered_extend_beam_id = None
+                    prompt_msg = f"Step 2/2: pick extension limit for beam {found_b['id']} (click node/point/edge)"
+                    self.studio.update_contextual_prompt(prompt_msg)
+                    self.studio.statusBar().showMessage(prompt_msg)
                 else:
-                    self.studio.update_contextual_prompt("No beam found near click. Click directly on a beam to extend.")
+                    err_msg = "Step 1/2: No beam found near click. Click directly on a beam to extend."
+                    self.studio.update_contextual_prompt(err_msg)
+                    self.studio.statusBar().showMessage(err_msg)
+                self.render_story(story)
                 return
             else:
                 target_pt = (sx, sy)
                 target_bid = self._extend_beam_id
                 self._extend_beam_id = None
-                ok_ext, ext_bm, msg_ext = extend_beam_with_target(story, target_bid, target_pt)
+                self._hovered_extend_beam_id = None
+                ok_ext, ext_bm, msg_ext = extend_beam_with_target(story, target_bid, target_pt, tol2=0.150)
                 if not ok_ext:
-                    QMessageBox.warning(self, "Extend Beam Error", msg_ext)
+                    QMessageBox.warning(self, "Extend Beam Error", f"Extension Rejected:\n{msg_ext}")
                     self.studio.update_contextual_prompt(f"Extend Rejected: {msg_ext}")
+                    self.studio.statusBar().showMessage(f"Extend Rejected: {msg_ext}")
                     self.render_story(story)
                     return
                 self.studio.save_and_sync_current_story()
                 self.studio.refresh_story_ui()
-                self.studio.update_contextual_prompt(f"Beam {target_bid} extended successfully: {msg_ext}")
+                success_msg = f"Beam {target_bid} extended successfully: {msg_ext}"
+                self.studio.update_contextual_prompt(success_msg)
+                self.studio.statusBar().showMessage(success_msg)
                 return
 
         # STEP 3: Draw Full-Width Hidden (0.40m) or Drop (0.20x0.40m) Beam
@@ -2943,7 +3022,16 @@ class StructuralCadCanvas2D(QGraphicsView):
                 beam_poly = QPolygonF([c1, c2, c3, c4])
 
                 is_sel_bm = ("beam", str(bm.get("id"))) in self.selected_items
-                if b_kind == "hidden":
+                is_extend_target = (
+                    getattr(self, "_hovered_extend_beam_id", None) == str(bm.get("id"))
+                    or getattr(self, "_extend_beam_id", None) == str(bm.get("id"))
+                )
+                if is_extend_target:
+                    border_col = QColor("#06B6D4")
+                    pen_style = Qt.PenStyle.SolidLine
+                    hatch_brush = QBrush(QColor(6, 182, 212, 140), Qt.BrushStyle.DiagCrossPattern)
+                    bg_brush = QBrush(QColor(6, 182, 212, 45))
+                elif b_kind == "hidden":
                     border_col = QColor("#38BDF8" if is_sel_bm else "#EAB308")
                     pen_style = Qt.PenStyle.DashLine
                     hatch_brush = QBrush(QColor(234, 179, 8, 130), Qt.BrushStyle.DiagCrossPattern)
@@ -2955,7 +3043,11 @@ class StructuralCadCanvas2D(QGraphicsView):
                     bg_brush = QBrush(QColor(16, 185, 129, 30))
 
                 self.scene_2d.addPolygon(beam_poly, QPen(Qt.PenStyle.NoPen), bg_brush)
-                self.scene_2d.addPolygon(beam_poly, QPen(border_col, 2.5 if is_sel_bm else 1.5, pen_style), hatch_brush)
+                self.scene_2d.addPolygon(
+                    beam_poly,
+                    QPen(border_col, 3.5 if is_extend_target else (2.5 if is_sel_bm else 1.5), pen_style),
+                    hatch_brush
+                )
 
                 if self.layer_show_tags:
                     tx, ty, _ = compute_smart_beam_tag_position(
@@ -5991,10 +6083,17 @@ class XpertStudioMainWindow(QMainWindow):
             return
 
         if tool_id == "AUTO_FILL_SLABS":
+            self.push_undo_snapshot()
             count, msg = auto_fill_all_story_slabs(self.current_story_data)
             self.save_and_sync_current_story()
             self.refresh_story_ui()
             self.update_contextual_prompt(msg)
+            warns = self.current_story_data.get("slab_inference_warnings", [])
+            if warns:
+                dlg = SlabInferenceWarningsDialog(self, warns)
+                dlg.exec()
+            else:
+                QMessageBox.information(self, "Auto-Fill Slabs", msg)
             return
 
         if tool_id == "CONVERT_ARCH_COLS":

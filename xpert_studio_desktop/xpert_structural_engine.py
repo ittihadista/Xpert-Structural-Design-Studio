@@ -3057,7 +3057,7 @@ def extend_beam_with_target(
     beam_id: str,
     target_pt: Tuple[float, float],
     tol: float = 0.010,
-    tol2: float = 0.025,
+    tol2: float = 0.150,
 ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """
     Modification 2 — Extend Beam Command:
@@ -4197,33 +4197,370 @@ def reconcile_and_split_slabs_after_beam_change(story_data: Dict[str, Any]) -> T
         return 0, f"Slab reconciliation note: {exc}"
 
 
-def auto_fill_all_story_slabs(story_data: Dict[str, Any]) -> Tuple[int, str]:
+def poly_area(points: List[Tuple[float, float]]) -> float:
+    """Calculates polygon area via shoelace formula."""
+    n = len(points)
+    if n < 3:
+        return 0.0
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += points[i][0] * points[j][1] - points[j][0] * points[i][1]
+    return abs(area) / 2.0
+
+
+def infer_story_slabs_face_based(story_data: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
-    1-Click Productivity Tool: Automatically populates all closed beam-bounded bays (>= 3 beams)
-    that are not Void Openings (including polygonal / merged openings) with Hollow-Block Slabs
-    using optimal default rib directions and enforces Cantilever Back-Span continuity.
+    v2.4.11 Face-Based Slab Inference Engine:
+    Infers hollow-block slab panels and overhangs as connected geometric components
+    by boolean subtraction: Building Boundary (00-XD-EDGE) - Openings (00-XD-OPEN) - Beams (00-XD-BEAM).
+    Classifies all supporting edges, detects cantilevers, locks backspan continuity,
+    and returns (inferred_slabs, warnings).
     """
-    bays = detect_story_grid_bays(story_data)
-    if not bays:
-        return 0, "Draw Building Boundary and Beams first before Auto-Filling Slabs."
+    from PyQt6.QtGui import QPainterPath, QPolygonF
+    from PyQt6.QtCore import QPointF
+
+    raw_poly = story_data.get("slab_edge_polygon", [])
+    if len(raw_poly) < 3:
+        return [], ["No valid slab_edge_polygon found."]
+
+    roof_pts = [(round(float(x), 4), round(float(y), 4)) for x, y in raw_poly]
+    path_roof = QPainterPath()
+    path_roof.addPolygon(QPolygonF([QPointF(x, y) for x, y in roof_pts]))
+    path_roof.closeSubpath()
 
     openings = story_data.get("openings", [])
-    open_keys = {o.get("bay_key") for o in openings if o.get("bay_key")}
-    created = 0
-    for b in bays:
-        cx = (b["min_x"] + b["max_x"]) / 2.0
-        cy = (b["min_y"] + b["max_y"]) / 2.0
-        in_op = any(is_point_in_opening(cx, cy, op, include_edge=False, tol=0.05) for op in openings)
-        if b["beam_count"] >= 3 and b["bay_key"] not in open_keys and not in_op:
-            ok, _, _ = pick_area_create_or_update_slab(story_data, cx, cy, target_mode="SLAB")
-            if ok:
-                created += 1
+    path_openings = QPainterPath()
+    op_polys = []
+    for op in openings:
+        op_pts = [(round(float(x), 4), round(float(y), 4)) for x, y in op.get("polygon", [])]
+        if len(op_pts) >= 3:
+            op_polys.append((op.get("id", "OP"), op_pts))
+            p_op = QPainterPath()
+            p_op.addPolygon(QPolygonF([QPointF(x, y) for x, y in op_pts]))
+            p_op.closeSubpath()
+            path_openings = path_openings.united(p_op)
 
-    # Renumber sequentially S1..Sn
-    for idx, s in enumerate(story_data.get("slabs", [])):
-        s["id"] = f"S{idx + 1}"
+    beams = story_data.get("beams", [])
+    path_beams = QPainterPath()
+    beam_rects = []
 
-    return created, f"Auto-Generated {created} Slab bay(s) across the story."
+    opts = story_data.get("options", {}).get("hollow_block_slab", {})
+    def_hid_w = float(opts.get("hidden_beam_min_width_cm", 30.0)) / 100.0
+    def_drop_w = float(opts.get("drop_beam_width_cm", 20.0)) / 100.0
+
+    for b in beams:
+        b_id = str(b.get("id", "B"))
+        b_kind = str(b.get("beam_kind", "drop")).lower()
+        def_w = def_hid_w if "hid" in b_kind else def_drop_w
+        w = round(float(b.get("width_m", def_w)), 4)
+        hw = round(w / 2.0, 4)
+        sx = round(float(b.get("start_x", 0.0)), 4)
+        sy = round(float(b.get("start_y", 0.0)), 4)
+        ex = round(float(b.get("end_x", 0.0)), 4)
+        ey = round(float(b.get("end_y", 0.0)), 4)
+        is_horiz = abs(ex - sx) >= abs(ey - sy)
+
+        p_bm = QPainterPath()
+        if is_horiz:
+            min_x, max_x = min(sx, ex), max(sx, ex)
+            y_bot, y_top = round(sy - hw, 4), round(sy + hw, 4)
+            p_bm.addRect(min_x, y_bot, round(max_x - min_x, 4), w)
+            beam_rects.append({
+                "id": b_id, "kind": b_kind, "is_horiz": True,
+                "x1": min_x, "x2": max_x, "y1": y_bot, "y2": y_top,
+                "axis_coord": sy,
+                "width_m": w, "depth_m": float(b.get("depth_m", 0.40)),
+                "raw_beam": b
+            })
+        else:
+            min_y, max_y = min(sy, ey), max(sy, ey)
+            x_left, x_right = round(sx - hw, 4), round(sx + hw, 4)
+            p_bm.addRect(x_left, min_y, w, round(max_y - min_y, 4))
+            beam_rects.append({
+                "id": b_id, "kind": b_kind, "is_horiz": False,
+                "x1": x_left, "x2": x_right, "y1": min_y, "y2": max_y,
+                "axis_coord": sx,
+                "width_m": w, "depth_m": float(b.get("depth_m", 0.40)),
+                "raw_beam": b
+            })
+        path_beams = path_beams.united(p_bm)
+
+    warnings: List[str] = []
+
+    # 1. Beam-Opening Overlap (> 0.01 m2)
+    for br in beam_rects:
+        p_single_bm = QPainterPath()
+        p_single_bm.addRect(br["x1"], br["y1"], br["x2"] - br["x1"], br["y2"] - br["y1"])
+        for op_id, op_pts in op_polys:
+            p_single_op = QPainterPath()
+            p_single_op.addPolygon(QPolygonF([QPointF(x, y) for x, y in op_pts]))
+            p_single_op.closeSubpath()
+            overlap_p = p_single_bm.intersected(p_single_op)
+            ov_subpaths = overlap_p.toSubpathPolygons()
+            if ov_subpaths:
+                ov_area = sum(poly_area([(pt.x(), pt.y()) for pt in sp]) for sp in ov_subpaths)
+                if ov_area > 0.01:
+                    warnings.append(
+                        f"Beam {br['id']} overlaps with Opening {op_id} (overlap area: {ov_area:.3f} m² > 0.01 m²)"
+                    )
+
+    # Boolean polygon subtraction: Roof - Openings - Beams
+    path_slabs = path_roof.subtracted(path_openings).subtracted(path_beams)
+    subpaths = path_slabs.toSubpathPolygons()
+
+    raw_components = []
+    for sp in subpaths:
+        pts = [(round(pt.x(), 4), round(pt.y(), 4)) for pt in sp]
+        if len(pts) > 1 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        if len(pts) < 3:
+            continue
+        a = poly_area(pts)
+        if a < 1e-4:
+            continue
+        xs = [pt[0] for pt in pts]
+        ys = [pt[1] for pt in pts]
+        cx = round(sum(xs) / len(xs), 4)
+        cy = round(sum(ys) / len(ys), 4)
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        lx = round(max_x - min_x, 4)
+        ly = round(max_y - min_y, 4)
+
+        raw_components.append({
+            "polygon": pts,
+            "area_m2": round(a, 4),
+            "cx": cx, "cy": cy,
+            "min_x": min_x, "max_x": max_x,
+            "min_y": min_y, "max_y": max_y,
+            "lx_m": lx, "ly_m": ly,
+        })
+
+    # Central deterministic sorting: X then Y
+    raw_components.sort(key=lambda c: (round(c["cx"], 2), round(c["cy"], 2)))
+
+    cols = [c for c in story_data.get("columns", []) if c.get("active", True)]
+    def has_col_near_edge(x1: float, y1: float, x2: float, y2: float) -> bool:
+        is_h = abs(x2 - x1) >= abs(y2 - y1)
+        for c in cols:
+            cx, cy = float(c["x"]), float(c["y"])
+            if is_h and abs(cy - y1) <= 0.45 and (min(x1, x2) - 0.35) <= cx <= (max(x1, x2) + 0.35):
+                return True
+            if (not is_h) and abs(cx - x1) <= 0.45 and (min(y1, y2) - 0.35) <= cy <= (max(y1, y2) + 0.35):
+                return True
+        return False
+
+    final_slabs = []
+    cantilever_slabs = []
+
+    for idx, c in enumerate(raw_components):
+        s_id = f"S{idx + 1}"
+        pts = c["polygon"]
+        n_pts = len(pts)
+        edges = []
+        sup_beams: Dict[str, Dict[str, Any]] = {}
+        axis_bounds = {"min_x": c["min_x"], "max_x": c["max_x"], "min_y": c["min_y"], "max_y": c["max_y"]}
+
+        for k in range(n_pts):
+            p1 = pts[k]
+            p2 = pts[(k + 1) % n_pts]
+            ex1, ey1 = p1[0], p1[1]
+            ex2, ey2 = p2[0], p2[1]
+            seg_len = math.hypot(ex2 - ex1, ey2 - ey1)
+            if seg_len < 1e-4:
+                continue
+            is_seg_horiz = abs(ey2 - ey1) < 1e-3
+            is_seg_vert = abs(ex2 - ex1) < 1e-3
+            mid_x, mid_y = (ex1 + ex2) / 2.0, (ey1 + ey2) / 2.0
+
+            matched_beam = None
+
+            # Check beam face match
+            for br in beam_rects:
+                if is_seg_horiz and br["is_horiz"]:
+                    if (abs(ey1 - br["y1"]) <= 0.015 or abs(ey1 - br["y2"]) <= 0.015):
+                        if min(ex1, ex2) >= br["x1"] - 0.05 and max(ex1, ex2) <= br["x2"] + 0.05:
+                            matched_beam = br
+                            break
+                elif is_seg_vert and (not br["is_horiz"]):
+                    if (abs(ex1 - br["x1"]) <= 0.015 or abs(ex1 - br["x2"]) <= 0.015):
+                        if min(ey1, ey2) >= br["y1"] - 0.05 and max(ey1, ey2) <= br["y2"] + 0.05:
+                            matched_beam = br
+                            break
+                elif is_seg_horiz and (not br["is_horiz"]):
+                    if (abs(ey1 - br["y1"]) <= 0.015 or abs(ey1 - br["y2"]) <= 0.015):
+                        if min(ex1, ex2) >= br["x1"] - 0.05 and max(ex1, ex2) <= br["x2"] + 0.05:
+                            matched_beam = br
+                            break
+                elif is_seg_vert and br["is_horiz"]:
+                    if (abs(ex1 - br["x1"]) <= 0.015 or abs(ex1 - br["x2"]) <= 0.015):
+                        if min(ey1, ey2) >= br["y1"] - 0.05 and max(ey1, ey2) <= br["y2"] + 0.05:
+                            matched_beam = br
+                            break
+
+            if matched_beam:
+                sup_beams[matched_beam["id"]] = matched_beam
+                side = "South" if is_seg_horiz and ey1 <= c["cy"] else ("North" if is_seg_horiz else ("West" if ex1 <= c["cx"] else "East"))
+                if side == "South": axis_bounds["min_y"] = matched_beam["axis_coord"]
+                elif side == "North": axis_bounds["max_y"] = matched_beam["axis_coord"]
+                elif side == "West": axis_bounds["min_x"] = matched_beam["axis_coord"]
+                elif side == "East": axis_bounds["max_x"] = matched_beam["axis_coord"]
+                edges.append({
+                    "kind": "beam_face", "beam_id": matched_beam["id"],
+                    "beam_kind": matched_beam["kind"], "side": side,
+                    "p1": p1, "p2": p2
+                })
+            else:
+                is_op = False
+                for op_id, op_pts in op_polys:
+                    for oi in range(len(op_pts)):
+                        op1 = op_pts[oi]
+                        op2 = op_pts[(oi + 1) % len(op_pts)]
+                        d_op = abs((op2[1] - op1[1]) * mid_x - (op2[0] - op1[0]) * mid_y + op2[0]*op1[1] - op2[1]*op1[0]) / max(1e-5, math.hypot(op2[1]-op1[1], op2[0]-op1[0]))
+                        if d_op <= 0.02 and min(op1[0], op2[0]) - 0.02 <= mid_x <= max(op1[0], op2[0]) + 0.02 and min(op1[1], op2[1]) - 0.02 <= mid_y <= max(op1[1], op2[1]) + 0.02:
+                            is_op = True
+                            side = "South" if is_seg_horiz and ey1 <= c["cy"] else ("North" if is_seg_horiz else ("West" if ex1 <= c["cx"] else "East"))
+                            edges.append({"kind": "opening_edge", "opening_id": op_id, "side": side, "p1": p1, "p2": p2})
+                            break
+                    if is_op:
+                        break
+                if not is_op:
+                    side = "South" if is_seg_horiz and ey1 <= c["cy"] else ("North" if is_seg_horiz else ("West" if ex1 <= c["cx"] else "East"))
+                    edges.append({"kind": "roof_free_edge", "side": side, "p1": p1, "p2": p2})
+
+        n_sup = len(sup_beams)
+        is_sliver = (c["area_m2"] < 0.30 or min(c["lx_m"], c["ly_m"]) < 0.15)
+        if is_sliver:
+            warnings.append(
+                f"Sliver slab at ({c['cx']:.2f}, {c['cy']:.2f}) [ID: {s_id}, Area: {c['area_m2']:.3f} m², Dim: {c['lx_m']:.2f}×{c['ly_m']:.2f} m]"
+            )
+
+        if n_sup == 0:
+            warnings.append(f"Zero-support slab at ({c['cx']:.2f}, {c['cy']:.2f}) [ID: {s_id}] with 0 supporting beams")
+
+        for ed in edges:
+            if ed["kind"] == "opening_edge":
+                warnings.append(f"Slab {s_id} borders Opening {ed.get('opening_id', '')} without a trim beam on {ed.get('side', '')} edge")
+
+        is_cantilever = False
+        cant_free_edge = None
+        rib_dir = 0
+        locked = False
+
+        sup_sides = {ed["side"] for ed in edges if ed["kind"] == "beam_face"}
+
+        # Check overhanging edge without columns
+        has_cant_edge = False
+        if len(cols) >= 2:
+            for side in ("South", "North", "West", "East"):
+                if side in sup_sides or any(ed["kind"] == "roof_free_edge" and ed["side"] == side for ed in edges):
+                    if side == "South" and not has_col_near_edge(c["min_x"], c["min_y"], c["max_x"], c["min_y"]):
+                        if "North" in sup_sides and has_col_near_edge(c["min_x"], axis_bounds["max_y"], c["max_x"], axis_bounds["max_y"]):
+                            is_cantilever = True
+                            cant_free_edge = "South"
+                            rib_dir = 90
+                            locked = True
+                            has_cant_edge = True
+                            break
+                    elif side == "North" and not has_col_near_edge(c["min_x"], c["max_y"], c["max_x"], c["max_y"]):
+                        if "South" in sup_sides and has_col_near_edge(c["min_x"], axis_bounds["min_y"], c["max_x"], axis_bounds["min_y"]):
+                            is_cantilever = True
+                            cant_free_edge = "North"
+                            rib_dir = 90
+                            locked = True
+                            has_cant_edge = True
+                            break
+
+        if not has_cant_edge:
+            if n_sup == 1:
+                is_cantilever = True
+                sup_side = next(iter(sup_sides)) if sup_sides else "West"
+                opp = {"North": "South", "South": "North", "East": "West", "West": "East"}.get(sup_side, "East")
+                cant_free_edge = opp
+                rib_dir = 90 if opp in ("North", "South") else 0
+                locked = True
+            elif len(sup_sides) == 2 and (("North" in sup_sides and "South" in sup_sides) or ("East" in sup_sides and "West" in sup_sides)):
+                if "North" in sup_sides and "South" in sup_sides:
+                    rib_dir = 90
+                else:
+                    rib_dir = 0
+                locked = True
+            else:
+                rib_dir = 0 if c["lx_m"] <= c["ly_m"] else 90
+                locked = False
+
+        ln_m = c["lx_m"] if rib_dir == 0 else c["ly_m"]
+
+        slab_obj = {
+            "id": s_id,
+            "bay_key": f"SLAB_{round(axis_bounds['min_x'],1)}_{round(axis_bounds['min_y'],1)}_{round(axis_bounds['max_x'],1)}_{round(axis_bounds['max_y'],1)}",
+            "polygon": c["polygon"],
+            "area_m2": c["area_m2"],
+            "cx": c["cx"], "cy": c["cy"],
+            "min_x": axis_bounds["min_x"], "max_x": axis_bounds["max_x"],
+            "min_y": axis_bounds["min_y"], "max_y": axis_bounds["max_y"],
+            "clear_min_x": c["min_x"], "clear_max_x": c["max_x"],
+            "clear_min_y": c["min_y"], "clear_max_y": c["max_y"],
+            "lx_m": c["lx_m"], "ly_m": c["ly_m"],
+            "ln_m": ln_m,
+            "rib_direction_deg": rib_dir,
+            "rib_direction_label": "X-Direction (0°)" if rib_dir == 0 else "Y-Direction (90°)",
+            "rib_direction_locked": locked,
+            "is_cantilever": is_cantilever,
+            "cantilever_free_edge": cant_free_edge,
+            "is_sliver": is_sliver,
+            "supporting_beams": [
+                {"id": sb["id"], "kind": sb["kind"], "width_m": sb["width_m"], "depth_m": sb["depth_m"]}
+                for sb in sup_beams.values()
+            ],
+            "supporting_beam_count": n_sup,
+            "edges": edges,
+            "backspan_to_cantilever_id": None,
+        }
+
+        if is_cantilever:
+            cantilever_slabs.append(slab_obj)
+        final_slabs.append(slab_obj)
+
+    for cant in cantilever_slabs:
+        c_sup_beam_ids = {sb["id"] for sb in cant["supporting_beams"]}
+        c_dir = cant["rib_direction_deg"]
+        for slb in final_slabs:
+            if slb["id"] == cant["id"] or slb["is_cantilever"]:
+                continue
+            s_sup_ids = {sb["id"] for sb in slb["supporting_beams"]}
+            shared = c_sup_beam_ids.intersection(s_sup_ids)
+            if shared:
+                slb["rib_direction_deg"] = c_dir
+                slb["rib_direction_label"] = "X-Direction (0°)" if c_dir == 0 else "Y-Direction (90°)"
+                slb["rib_direction_locked"] = True
+                slb["backspan_to_cantilever_id"] = cant["id"]
+                slb["lock_reason"] = (
+                    f"Cannot flip ribs: Slab {slb['id']} acts as continuity back-span for Cantilever {cant['id']}."
+                )
+
+    return final_slabs, warnings
+
+def auto_fill_all_story_slabs(story_data: Dict[str, Any]) -> Tuple[int, str]:
+    """
+    1-Click Productivity Tool (v2.4.11 Face-Based Slab Inference Engine):
+    Automatically populates all closed slab components using face-based geometric boolean subtraction:
+    Slabs = Building Boundary (00-XD-EDGE) - Openings (00-XD-OPEN) - Beams (00-XD-BEAM).
+    Slivers are preserved in the model per policy and generate non-blocking warnings.
+    """
+    raw_poly = story_data.get("slab_edge_polygon", [])
+    if len(raw_poly) < 3:
+        return 0, "Draw Outer Slab Boundary (00-XD-EDGE) and Beams first before Auto-Filling Slabs."
+
+    slabs, warnings = infer_story_slabs_face_based(story_data)
+    story_data["slab_inference_warnings"] = warnings
+    if not slabs:
+        return 0, warnings[0] if warnings else "No closed slab panels could be inferred."
+
+    story_data["slabs"] = slabs
+    return len(slabs), f"Auto-Generated {len(slabs)} Slab bay(s) across the story."
+
 
 
 
@@ -4323,6 +4660,19 @@ def pick_area_create_or_update_slab(
     """
     bays = detect_story_grid_bays(story_data)
     if not bays:
+        inferred_slabs, _ = infer_story_slabs_face_based(story_data)
+        if inferred_slabs:
+            from PyQt6.QtGui import QPainterPath, QPolygonF
+            from PyQt6.QtCore import QPointF
+            for inf_s in inferred_slabs:
+                qp = QPainterPath()
+                qp.addPolygon(QPolygonF([QPointF(float(p[0]), float(p[1])) for p in inf_s["polygon"]]))
+                qp.closeSubpath()
+                if qp.contains(QPointF(click_x, click_y)):
+                    slabs = story_data.setdefault("slabs", [])
+                    inf_s["id"] = f"S{len(slabs) + 1}"
+                    slabs.append(inf_s)
+                    return True, f"Created Slab {inf_s['id']} via Face-Based Pick.", inf_s
         return False, "Draw Outer Slab Boundary and Beams first before using Pick Area.", None
 
     # Find all candidate bays containing (click_x, click_y) and prioritize:
@@ -4348,10 +4698,11 @@ def pick_area_create_or_update_slab(
     target_bay = candidate_bays[0][3]
 
     beam_count = target_bay["beam_count"]
-    if beam_count < 3:
+    # Relaxed in v2.4.11: allow 1-beam cantilevers and 2-beam 1-way panels
+    if beam_count < 1:
         return (
             False,
-            f"Selected region is bounded by only {beam_count} beam(s). At least 3 bounding beams are required to pick a Slab or Opening.",
+            f"Selected region is bounded by 0 beams. At least 1 bounding beam is required to pick a Slab or Opening.",
             None,
         )
 

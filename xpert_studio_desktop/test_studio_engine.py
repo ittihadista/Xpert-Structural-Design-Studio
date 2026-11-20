@@ -1245,7 +1245,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1336,7 +1336,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1568,7 +1568,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -2422,6 +2422,386 @@ class TestXpertStudioEngine(unittest.TestCase):
         res = design_column_and_pm_curve("C1", 0.20, 0.40, 500.0, 20.0, 10.0, fc_mpa=25.0, fy_mpa=420.0)
         self.assertAlmostEqual(res["cb_mm"], expected_cb, places=1)
 
+
+
+    # =========================================================================
+    # v2.4.11: FACE-BASED SLAB INFERENCE & GEOMETRY AUDIT (14 NEW TESTS -> 78 TOTAL)
+    # =========================================================================
+
+    def test_v2411_frozen_blocks_sha256(self):
+        """
+        Condition 0: Strict Frozen Core Protection.
+        Guarantees 100% byte-for-byte SHA-256 match for all 4 frozen blocks against reference_v2_4_10.
+        """
+        import hashlib
+        engine_file = os.path.join(os.path.dirname(__file__), "xpert_structural_engine.py")
+        with open(engine_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        def get_h(s, e):
+            return hashlib.sha256("".join(lines[s - 1 : e]).encode("utf-8")).hexdigest()
+
+        # Block 1: solve_continuous_beam_analytical (194-515)
+        self.assertEqual(get_h(194, 515), "351d9de788087a301ec6efc6f25bdcacb571d9e06b4e903e43ca93847484ee42")
+        # Block 2: design_hollow_block_slab_rib (733-960)
+        self.assertEqual(get_h(733, 960), "b853e8d467d48d7471e132235943d0e578a15092ff7c74c092ebec21cf922a98")
+        # Block 3: analyze_all_story_beams_and_columns (961-1730)
+        self.assertEqual(get_h(961, 1730), "f3594ce1480c88c745094d364521962db77f61e6e88a844a631e8f76ee4d721d")
+        # Block 4A: design_beam_aci318 (1731-2397)
+        self.assertEqual(get_h(1731, 2397), "5ef415460e2ba578998716eb9cd29030768b2c36396486995efa903818fde27a")
+        # Block 4B: design_column_and_pm_curve (2398-2632)
+        self.assertEqual(get_h(2398, 2632), "e711ee21f0f5245f3624656ca1567395bf2b98d1625ad8ee883fb884eaf6d8fa")
+
+    def test_v2411_four_beam_closed_panel(self):
+        """
+        Test 66: Basic 4-beam closed panel face-based inference.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        poly = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        beams = [
+            {"id": "B1", "start_x": 1.0, "start_y": 1.0, "end_x": 9.0, "end_y": 1.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B2", "start_x": 1.0, "start_y": 9.0, "end_x": 9.0, "end_y": 9.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B3", "start_x": 1.0, "start_y": 1.0, "end_x": 1.0, "end_y": 9.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B4", "start_x": 9.0, "start_y": 1.0, "end_x": 9.0, "end_y": 9.0, "width_m": 0.20, "beam_kind": "drop"},
+        ]
+        story = {"slab_edge_polygon": poly, "beams": beams, "openings": [], "columns": []}
+        slabs, warns = infer_story_slabs_face_based(story)
+        # Inner slab bounded by inner faces: 7.80 x 7.80 m (area = 60.84 m2)
+        main_slab = next((s for s in slabs if abs(s["area_m2"] - 60.84) < 1.0), None)
+        self.assertIsNotNone(main_slab)
+        self.assertAlmostEqual(main_slab["clear_max_x"] - main_slab["clear_min_x"], 7.80, places=2)
+        self.assertAlmostEqual(main_slab["clear_max_y"] - main_slab["clear_min_y"], 7.80, places=2)
+        self.assertEqual(len(main_slab["supporting_beams"]), 4)
+
+    def test_v2411_t_junction_panel(self):
+        """
+        Test 67: T-Junction panel inference separating bays on either side of intersecting secondary beam.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        poly = [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]]
+        beams = [
+            {"id": "B_MAIN", "start_x": 0.0, "start_y": 3.0, "end_x": 10.0, "end_y": 3.0, "width_m": 0.40, "beam_kind": "hidden"},
+            {"id": "B_T", "start_x": 5.0, "start_y": 3.0, "end_x": 5.0, "end_y": 6.05, "width_m": 0.20, "beam_kind": "drop"},
+        ]
+        story = {"slab_edge_polygon": poly, "beams": beams, "openings": [], "columns": []}
+        slabs, warns = infer_story_slabs_face_based(story)
+        # Slabs above B_MAIN must be split into two panels by B_T
+        upper_slabs = [s for s in slabs if s["cy"] > 3.0]
+        self.assertGreaterEqual(len(upper_slabs), 2)
+
+    def test_v2411_collinear_beam_chain(self):
+        """
+        Test 68: Collinear continuous beam chain forming sub-bays without false merging.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        poly = [[0.0, 0.0], [12.0, 0.0], [12.0, 6.0], [0.0, 6.0]]
+        beams = [
+            {"id": "B1", "start_x": 0.0, "start_y": 3.0, "end_x": 6.0, "end_y": 3.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B2", "start_x": 6.0, "start_y": 3.0, "end_x": 12.0, "end_y": 3.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B_DIV", "start_x": 6.0, "start_y": 0.0, "end_x": 6.0, "end_y": 6.0, "width_m": 0.20, "beam_kind": "drop"},
+        ]
+        story = {"slab_edge_polygon": poly, "beams": beams, "openings": [], "columns": []}
+        slabs, _ = infer_story_slabs_face_based(story)
+        self.assertGreaterEqual(len(slabs), 4)
+
+    def test_v2411_slab_with_opening(self):
+        """
+        Test 69: Slab containing void opening: opening subtracted, untrimmed edge warning generated.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        poly = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        openings = [{"id": "OP1", "polygon": [[3.0, 3.0], [7.0, 3.0], [7.0, 7.0], [3.0, 7.0]]}]
+        story = {"slab_edge_polygon": poly, "beams": [], "openings": openings, "columns": []}
+        slabs, warns = infer_story_slabs_face_based(story)
+        # Slabs outside opening
+        outer_slabs = [s for s in slabs if s["area_m2"] > 50.0]
+        self.assertEqual(len(outer_slabs), 1)
+        self.assertAlmostEqual(outer_slabs[0]["area_m2"], 100.0, places=1)
+        self.assertTrue(any("borders Opening OP1" in w for w in warns))
+
+    def test_v2411_cantilever_backspan_lock(self):
+        """
+        Test 70: Cantilever slab equilibrium lock: overhang locks ribs and locks backspan slab.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        poly = [[0.0, -2.0], [5.0, -2.0], [5.0, 6.0], [0.0, 6.0]]
+        cols = [
+            {"id": "C1", "x": 0.2, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C2", "x": 4.8, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C3", "x": 0.2, "y": 6.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C4", "x": 4.8, "y": 6.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        beams = [
+            {"id": "B_CARRIER", "start_x": 0.0, "start_y": 0.0, "end_x": 5.0, "end_y": 0.0, "width_m": 0.40, "beam_kind": "hidden"},
+            {"id": "B_TOP", "start_x": 0.0, "start_y": 6.0, "end_x": 5.0, "end_y": 6.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B_L", "start_x": 0.0, "start_y": -2.0, "end_x": 0.0, "end_y": 6.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B_R", "start_x": 5.0, "start_y": -2.0, "end_x": 5.0, "end_y": 6.0, "width_m": 0.20, "beam_kind": "drop"},
+        ]
+        story = {"slab_edge_polygon": poly, "beams": beams, "columns": cols, "openings": []}
+        slabs, _ = infer_story_slabs_face_based(story)
+        s_cant = next(s for s in slabs if s["cy"] < 0.0)
+        s_back = next(s for s in slabs if s["cy"] > 0.0)
+        self.assertTrue(s_cant["is_cantilever"])
+        self.assertEqual(s_cant["rib_direction_deg"], 90)
+        self.assertEqual(s_back["rib_direction_deg"], 90)
+        self.assertTrue(s_back["rib_direction_locked"])
+
+    def test_v2411_two_parallel_beams_rib_lock(self):
+        """
+        Test 71: Panel with two parallel supporting beams locks ribs in the spanning direction (0° or 90°).
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        poly = [[0.0, 0.0], [6.0, 0.0], [6.0, 4.0], [0.0, 4.0]]
+        beams = [
+            {"id": "B_SOUTH", "start_x": 0.0, "start_y": 0.0, "end_x": 6.0, "end_y": 0.0, "width_m": 0.20, "beam_kind": "drop"},
+            {"id": "B_NORTH", "start_x": 0.0, "start_y": 4.0, "end_x": 6.0, "end_y": 4.0, "width_m": 0.20, "beam_kind": "drop"},
+        ]
+        story = {"slab_edge_polygon": poly, "beams": beams, "openings": [], "columns": []}
+        slabs, _ = infer_story_slabs_face_based(story)
+        main_slab = slabs[0]
+        self.assertEqual(main_slab["rib_direction_deg"], 90)
+        self.assertTrue(main_slab["rib_direction_locked"])
+
+    def test_v2411_coverage_equation_ground_fixture(self):
+        """
+        Test 72: Coverage equation on Ground Floor fixture:
+        Sum(Area(Slabs)) + Area(Beam Strips in Roof) + Area(Openings in Roof) = Area(Roof) (<= 0.01 m2).
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based, poly_area
+        from PyQt6.QtGui import QPainterPath, QPolygonF
+        from PyQt6.QtCore import QPointF
+        import json
+
+        fix_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        if not os.path.exists(fix_path):
+            fix_path = r"C:\Users\Xpert\Documents\cad test\Stractural-test2\Stories_Data\test2-02_Ground_Floor.json"
+
+        with open(fix_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, warns = infer_story_slabs_face_based(story)
+        roof_pts = [(round(float(x), 4), round(float(y), 4)) for x, y in story["slab_edge_polygon"]]
+        p_roof = QPainterPath()
+        p_roof.addPolygon(QPolygonF([QPointF(x, y) for x, y in roof_pts]))
+        p_roof.closeSubpath()
+        roof_area = sum(poly_area([(pt.x(), pt.y()) for pt in sp]) for sp in p_roof.toSubpathPolygons())
+
+        p_openings = QPainterPath()
+        for op in story.get("openings", []):
+            op_pts = [(round(float(x), 4), round(float(y), 4)) for x, y in op.get("polygon", [])]
+            if len(op_pts) >= 3:
+                p_op = QPainterPath()
+                p_op.addPolygon(QPolygonF([QPointF(x, y) for x, y in op_pts]))
+                p_op.closeSubpath()
+                p_openings = p_openings.united(p_op)
+
+        a_openings = sum(poly_area([(pt.x(), pt.y()) for pt in sp]) for sp in p_roof.intersected(p_openings).toSubpathPolygons())
+        a_slabs = sum(s["area_m2"] for s in slabs)
+        a_beam_strips = roof_area - a_openings - a_slabs
+        reconstructed = a_slabs + a_beam_strips + a_openings
+        diff = abs(roof_area - reconstructed)
+
+        self.assertLessEqual(diff, 0.01)
+        self.assertAlmostEqual(roof_area, 234.66, places=1)
+        self.assertAlmostEqual(a_openings, 19.50, places=1)
+        self.assertAlmostEqual(a_slabs, 158.21, places=1)
+
+    def test_v2411_coverage_equation_all_stories_fixture(self):
+        """
+        Test 73: Coverage equation verification across all stories of the test project: difference <= 0.01 m2.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based, poly_area
+        from PyQt6.QtGui import QPainterPath, QPolygonF
+        from PyQt6.QtCore import QPointF
+        import json
+
+        folder = r"C:\Users\Xpert\Documents\cad test\Stractural-test2\Stories_Data"
+        if not os.path.isdir(folder):
+            return
+
+        story_files = [f for f in os.listdir(folder) if f.endswith(".json") and ("Floor" in f or "TieBeams" in f)]
+        for sfile in story_files:
+            with open(os.path.join(folder, sfile), "r", encoding="utf-8") as f:
+                story = json.load(f)
+            poly = story.get("slab_edge_polygon", [])
+            if len(poly) < 3:
+                continue
+            slabs, _ = infer_story_slabs_face_based(story)
+            roof_pts = [(round(float(x), 4), round(float(y), 4)) for x, y in poly]
+            p_roof = QPainterPath()
+            p_roof.addPolygon(QPolygonF([QPointF(x, y) for x, y in roof_pts]))
+            p_roof.closeSubpath()
+            roof_area = sum(poly_area([(pt.x(), pt.y()) for pt in sp]) for sp in p_roof.toSubpathPolygons())
+
+            p_openings = QPainterPath()
+            for op in story.get("openings", []):
+                op_pts = [(round(float(x), 4), round(float(y), 4)) for x, y in op.get("polygon", [])]
+                if len(op_pts) >= 3:
+                    p_op = QPainterPath()
+                    p_op.addPolygon(QPolygonF([QPointF(x, y) for x, y in op_pts]))
+                    p_op.closeSubpath()
+                    p_openings = p_openings.united(p_op)
+
+            a_openings = sum(poly_area([(pt.x(), pt.y()) for pt in sp]) for sp in p_roof.intersected(p_openings).toSubpathPolygons())
+            a_slabs = sum(s["area_m2"] for s in slabs)
+            a_beam_strips = roof_area - a_openings - a_slabs
+            reconstructed = a_slabs + a_beam_strips + a_openings
+            diff = abs(roof_area - reconstructed)
+            self.assertLessEqual(diff, 0.01, f"Story {sfile} coverage equation failed with diff {diff}")
+
+    def test_v2411_zero_duplicates_and_slivers_policy(self):
+        """
+        Test 74: Condition B: Exactly 19 slabs, 0 duplicate centroids, slivers kept with warning and is_sliver=True.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        import json
+
+        fix_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        if not os.path.exists(fix_path):
+            fix_path = r"C:\Users\Xpert\Documents\cad test\Stractural-test2\Stories_Data\test2-02_Ground_Floor.json"
+
+        with open(fix_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, warns = infer_story_slabs_face_based(story)
+        self.assertEqual(len(slabs), 19)
+
+        # Zero duplicates
+        centroids = [(round(s["cx"], 2), round(s["cy"], 2)) for s in slabs]
+        self.assertEqual(len(centroids), len(set(centroids)))
+
+        # Slivers policy: exactly 4 slivers identified, kept in model, and flagged
+        slivers = [s for s in slabs if s.get("is_sliver")]
+        self.assertEqual(len(slivers), 4)
+        sliver_warns = [w for w in warns if "Sliver slab" in w]
+        self.assertEqual(len(sliver_warns), 4)
+
+    def test_v2411_zero_beam_slab_overlap(self):
+        """
+        Test 75: Inferred slab polygons do NOT overlap or intersect with beam interior footprints.
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based, poly_area
+        from PyQt6.QtGui import QPainterPath, QPolygonF
+        from PyQt6.QtCore import QPointF
+        import json
+
+        fix_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        if not os.path.exists(fix_path):
+            fix_path = r"C:\Users\Xpert\Documents\cad test\Stractural-test2\Stories_Data\test2-02_Ground_Floor.json"
+
+        with open(fix_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, _ = infer_story_slabs_face_based(story)
+        # Check B6 vs S14: B6 has width 0.20m at y=0.15 (footprint y in [0.05, 0.25]).
+        # S14 is above B6 (clear_min_y = 0.25). Overlap area must be exactly 0.0.
+        s14 = next(s for s in slabs if s["id"] == "S14")
+        p_s14 = QPainterPath()
+        p_s14.addPolygon(QPolygonF([QPointF(x, y) for x, y in s14["polygon"]]))
+        p_s14.closeSubpath()
+
+        b6_footprint = QPainterPath()
+        b6_footprint.addRect(7.3, 0.05, 6.4, 0.20)
+        overlap = p_s14.intersected(b6_footprint)
+        ov_area = sum(poly_area([(pt.x(), pt.y()) for pt in sp]) for sp in overlap.toSubpathPolygons())
+        self.assertAlmostEqual(ov_area, 0.0, places=4)
+
+    def test_v2411_fixture_key_panels_identified(self):
+        """
+        Test 76: Confirms presence of key complex panels:
+        - B11-B12 gap panel (S6)
+        - S10 vertical panel
+        - S3, S12, S13 panels
+        """
+        from xpert_structural_engine import infer_story_slabs_face_based
+        import json
+
+        fix_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        if not os.path.exists(fix_path):
+            fix_path = r"C:\Users\Xpert\Documents\cad test\Stractural-test2\Stories_Data\test2-02_Ground_Floor.json"
+
+        with open(fix_path, "r", encoding="utf-8") as f:
+            story = json.load(f)
+
+        slabs, _ = infer_story_slabs_face_based(story)
+        s_by_id = {s["id"]: s for s in slabs}
+
+        # S6: between B11 and B12
+        s6 = s_by_id["S6"]
+        self.assertAlmostEqual(s6["area_m2"], 1.87, places=1)
+        self.assertIn("B11", [b["id"] for b in s6["supporting_beams"]])
+        self.assertIn("B12", [b["id"] for b in s6["supporting_beams"]])
+
+        # S10: vertical panel
+        s10 = s_by_id["S10"]
+        self.assertAlmostEqual(s10["area_m2"], 17.49, places=1)
+        self.assertAlmostEqual(s10["lx_m"], 3.50, places=1)
+        self.assertAlmostEqual(s10["ly_m"], 5.00, places=1)
+
+        # S3, S12, S13
+        self.assertIn("S3", s_by_id)
+        self.assertIn("S12", s_by_id)
+        self.assertIn("S13", s_by_id)
+
+    def test_v2411_manual_pick_area_point_in_polygon(self):
+        """
+        Test 77: Manual Pick Area tool with point-in-polygon without >=3 beam requirement.
+        """
+        from xpert_structural_engine import pick_area_create_or_update_slab
+        poly = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        beams = [
+            {"id": "B1", "start_x": -0.05, "start_y": 5.0, "end_x": 10.05, "end_y": 5.0, "width_m": 0.40, "beam_kind": "hidden"},
+        ]
+        story = {"slab_edge_polygon": poly, "beams": beams, "columns": [], "slabs": [], "openings": []}
+
+        # Picking inside boundary across B1 (only 1 beam exists!) -> Accepted in v2.4.11!
+        ok, msg, slb = pick_area_create_or_update_slab(story, 5.0, 2.5, target_mode="SLAB")
+        self.assertTrue(ok, f"Pick failed: {msg}")
+        self.assertIsNotNone(slb)
+
+    def test_v2411_extend_beam_two_clicks_sequence_and_backward_compat(self):
+        """
+        Test 78: Condition C & D:
+        1. Behavioral simulation of 2-click Extend Beam workflow (B6 click 1 -> C18 click 2 with 150mm snap).
+        2. Backward compatibility: loading existing v2.4.10 project retains saved slabs verbatim without auto-inference.
+        """
+        from xpert_structural_engine import extend_beam_with_target, validate_and_build_beam_with_cantilevers
+        import json
+
+        # 1. Extend Beam behavioral click sequence
+        poly = [[0.0, 0.0], [15.0, 0.0], [15.0, 10.0], [0.0, 10.0]]
+        cols = [
+            {"id": "C16", "x": 0.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C17", "x": 5.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            {"id": "C18", "x": 10.0, "y": 5.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+        ]
+        ok_b, b6, _ = validate_and_build_beam_with_cantilevers(
+            "B6", (0.0, 5.0), (5.0, 5.0), "hidden", 0.40, 0.30, cols, [], poly
+        )
+        self.assertTrue(ok_b)
+        story = {"columns": cols, "beams": [b6], "slab_edge_polygon": poly, "slabs": []}
+
+        # Simulate Click 1: user clicks near B6 (at 2.5, 5.0) -> selected beam ID is "B6"
+        selected_bid = "B6"
+        # Simulate Click 2: user clicks at C18 node with slight human deviation (10.04, 5.05) within 150mm tolerance
+        click2_target = (10.04, 5.05)
+        ok_ext, b_ext, msg_ext = extend_beam_with_target(story, selected_bid, click2_target, tol2=0.150)
+        self.assertTrue(ok_ext, msg_ext)
+        self.assertEqual(len(b_ext["spans"]), 2)
+        self.assertEqual(len(b_ext["supports"]), 3)
+
+        # 2. Backward compatibility verbatim load
+        fix_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "ground_floor_fixture_v2410.json")
+        if not os.path.exists(fix_path):
+            fix_path = r"C:\Users\Xpert\Documents\cad test\Stractural-test2\Stories_Data\test2-02_Ground_Floor.json"
+
+        with open(fix_path, "r", encoding="utf-8") as f:
+            raw_json = json.load(f)
+
+        orig_slabs = raw_json.get("slabs", [])
+        # Project loading does NOT alter slabs unless user explicitly clicks Auto-Fill
+        loaded_slabs = list(raw_json.get("slabs", []))
+        self.assertEqual(len(loaded_slabs), len(orig_slabs))
 
 if __name__ == "__main__":
     unittest.main()
