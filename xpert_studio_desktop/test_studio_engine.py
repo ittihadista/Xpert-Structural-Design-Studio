@@ -1245,7 +1245,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1336,7 +1336,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import xpert_structural_engine as eng
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1568,7 +1568,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.4.1-structural-bim-pro","v2.4.2-structural-bim-pro","v2.4.3-structural-bim-pro","v2.4.4-structural-bim-pro","v2.4.5-structural-bim-pro","v2.4.6-structural-bim-pro","v2.4.7-structural-bim-pro", "v2.4.8-structural-bim-pro", "v2.4.9-structural-bim-pro", "v2.4.10-structural-bim-pro", "v2.4.11-structural-bim-pro", "v2.4.12-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -2802,6 +2802,165 @@ class TestXpertStudioEngine(unittest.TestCase):
         # Project loading does NOT alter slabs unless user explicitly clicks Auto-Fill
         loaded_slabs = list(raw_json.get("slabs", []))
         self.assertEqual(len(loaded_slabs), len(orig_slabs))
+
+    # =========================================================================
+    # v2.4.12 GUI Wiring Hotfix Tests (Tests 79-82)
+    # =========================================================================
+
+    def test_v2412_push_undo_snapshot_defined_and_callable(self):
+        """
+        Test 79: Condition A & C:
+        1. push_undo_snapshot is defined and callable on XpertStudioMainWindow.
+        2. AST check: verifies no undefined self.<method>() calls exist in XpertStudioMainWindow.
+        """
+        import ast
+        from xpert_studio_app import XpertStudioMainWindow
+        from PyQt6.QtWidgets import QMainWindow
+
+        # 1. Defined and callable
+        self.assertTrue(hasattr(XpertStudioMainWindow, "push_undo_snapshot"))
+        self.assertTrue(callable(getattr(XpertStudioMainWindow, "push_undo_snapshot")))
+
+        # 2. AST Verification
+        app_file = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
+        with open(app_file, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+
+        main_win_node = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "XpertStudioMainWindow":
+                main_win_node = node
+                break
+        self.assertIsNotNone(main_win_node)
+
+        defined_methods = {item.name for item in main_win_node.body if isinstance(item, ast.FunctionDef)}
+        qmain_methods = set(dir(QMainWindow))
+
+        undefined = []
+        for item in main_win_node.body:
+            if isinstance(item, ast.FunctionDef):
+                for sub in ast.walk(item):
+                    if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
+                        if isinstance(sub.func.value, ast.Name) and sub.func.value.id == "self":
+                            callee = sub.func.attr
+                            if callee not in defined_methods and callee not in qmain_methods:
+                                undefined.append((item.name, callee, sub.lineno))
+
+        self.assertEqual(undefined, [], f"Found undefined self methods in XpertStudioMainWindow: {undefined}")
+
+    def test_v2412_undo_stack_grows_and_trims(self):
+        """
+        Test 80: Condition A:
+        _undo_stack grows on push_undo_snapshot() and trims to maximum 20 snapshots.
+        Ctrl+Z (undo_action) pops the stack and restores current_story_data.
+        """
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        import xpert_project_io as pio
+        from xpert_studio_app import XpertStudioMainWindow
+        _app = QApplication.instance() or QApplication([])
+
+        cfg = {"project_name": "Undo2412", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.0,
+               "floors_above_ground": 1, "include_basement": False, "include_penthouse": False}
+        m = pio.initialize_studio_project(cfg)
+        win = XpertStudioMainWindow(initial_master_project=m)
+
+        # Push 25 snapshots
+        for i in range(25):
+            win.current_story_data["step_test"] = i
+            win.push_undo_snapshot()
+
+        # Stack must be trimmed to exactly 20
+        self.assertEqual(len(win._undo_stack), 20)
+        self.assertEqual(win._undo_stack[0]["step_test"], 5)
+        self.assertEqual(win._undo_stack[-1]["step_test"], 24)
+
+        # Modify state to step 999
+        win.current_story_data["step_test"] = 999
+        # Undo restores step 24
+        win.undo_action()
+        self.assertEqual(win.current_story_data["step_test"], 24)
+        self.assertEqual(len(win._undo_stack), 19)
+        win.hide()
+
+    def test_v2412_pick_point_in_slab_selects_it(self):
+        """
+        Test 81: Condition B:
+        Clicking inside a slab in PICK_SLAB mode selects the slab and shows its properties,
+        without returning or displaying the message 'bounded slab bays'.
+        """
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        import xpert_project_io as pio
+        from xpert_studio_app import XpertStudioMainWindow
+        _app = QApplication.instance() or QApplication([])
+
+        cfg = {"project_name": "PickSlab2412", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.0,
+               "floors_above_ground": 1, "include_basement": False, "include_penthouse": False}
+        m = pio.initialize_studio_project(cfg)
+        win = XpertStudioMainWindow(initial_master_project=m)
+
+        # Define boundary, beams, and an inferred slab
+        win.current_story_data["slab_edge_polygon"] = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        win.current_story_data["slabs"] = [{
+            "id": "S1",
+            "polygon": [[1.0, 1.0], [9.0, 1.0], [9.0, 9.0], [1.0, 9.0]],
+            "area_m2": 64.0,
+            "lx_m": 8.0,
+            "ly_m": 8.0,
+            "rib_direction_deg": 0.0,
+            "supporting_beams": []
+        }]
+        win.cad_canvas.active_tool = "PICK_SLAB"
+
+        # Click at (5.0, 5.0) inside Slab S1
+        msg = win.cad_canvas.pick_slab_at_point(5.0, 5.0)
+
+        # Assert selection
+        self.assertIn(("slab", "S1"), win.cad_canvas.selected_items)
+        self.assertIn("Selected Slab S1", msg)
+        self.assertNotIn("bounded slab bays", msg.lower())
+        win.hide()
+
+    def test_v2412_pick_point_in_beam_shows_beam_message(self):
+        """
+        Test 82: Condition B:
+        Clicking inside a beam's actual physical rectangle in PICK_SLAB mode
+        shows 'Clicked on Beam: {id} ({kind})' and does not show 'bounded slab bays'.
+        """
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QApplication
+        import xpert_project_io as pio
+        from xpert_studio_app import XpertStudioMainWindow
+        _app = QApplication.instance() or QApplication([])
+
+        cfg = {"project_name": "PickBeam2412", "root_directory": self.tmp_dir, "ground_floor_height_m": 3.0,
+               "floors_above_ground": 1, "include_basement": False, "include_penthouse": False}
+        m = pio.initialize_studio_project(cfg)
+        win = XpertStudioMainWindow(initial_master_project=m)
+
+        # Add a horizontal hidden beam B1 along Y=5.0 with width 0.40m (hw = 0.20m, Y in [4.80, 5.20])
+        win.current_story_data["slab_edge_polygon"] = [[0.0, 0.0], [12.0, 0.0], [12.0, 10.0], [0.0, 10.0]]
+        win.current_story_data["beams"] = [{
+            "id": "B1",
+            "start_x": 1.0, "start_y": 5.0,
+            "end_x": 11.0, "end_y": 5.0,
+            "width_m": 0.40,
+            "depth_m": 0.30,
+            "beam_kind": "hidden"
+        }]
+        win.cad_canvas.active_tool = "PICK_SLAB"
+
+        # Click at (6.0, 5.10) inside B1's rectangle
+        msg = win.cad_canvas.pick_slab_at_point(6.0, 5.10)
+
+        self.assertIn("Clicked on Beam: B1 (hidden)", msg)
+        self.assertNotIn("bounded slab bays", msg.lower())
+
+        # Also test clicking outside boundary
+        msg_out = win.cad_canvas.pick_slab_at_point(15.0, 15.0)
+        self.assertEqual(msg_out, "Clicked outside building boundary")
+        win.hide()
 
 if __name__ == "__main__":
     unittest.main()

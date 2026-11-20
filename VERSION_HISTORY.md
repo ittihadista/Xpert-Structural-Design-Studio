@@ -4,7 +4,34 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.4.11-structural-bim-pro` (2026-11-20)
+## Current Release: `v2.4.12-structural-bim-pro` (2026-11-20)
+**Release Title:** GUI Hotfix — `push_undo_snapshot` Defined & Multi-Step Undo, Point-in-Component Slab Picking (`_point_in_polygon` Ray-Casting & Physical Beam Rectangles), Bounded-Slab-Bays Prompt Removed, 82/82 Unit Tests, Engine Frozen from v2.4.11.
+
+### Key Features & Fixes in `v2.4.12-structural-bim-pro`:
+1. **Multi-Step Undo Snapshot Infrastructure (`push_undo_snapshot`):**
+   - Explicitly defined `push_undo_snapshot(self)` on `XpertStudioMainWindow` to capture deepcopy state of `current_story_data`.
+   - Wired directly into `AUTO_FILL_SLABS` before running `auto_fill_all_story_slabs` / `infer_story_slabs_face_based`.
+   - Bounded stack trimming to maximum 20 snapshots (`self._undo_stack.pop(0)`).
+   - Standardized `undo_action` (Ctrl+Z) to pop snapshots, restore active story memory, sync, and refresh the UI.
+2. **Point-in-Component Slab Picking (`pick_slab_at_point`):**
+   - Replaced legacy bay-detection and beam-counting logic with pure point-in-component geometric ray-casting (`_point_in_polygon` and `_point_in_beam_rect`).
+   - Priority hierarchy on canvas click in `PICK_SLAB` mode:
+     1. Openings (`00-XD-OPEN`) $\to$ `"Clicked on Opening: {id}"`.
+     2. Beams (`00-XD-BEAM`) actual physical rectangle $\to$ `"Clicked on Beam: {id} ({kind})"`.
+     3. Slabs in `story['slabs']` $\to$ Selects slab (`self.selected_items = [("slab", id)]`), renders, and displays properties: area, dimensions, and rib direction.
+     4. Boundary (`00-XD-EDGE`) $\to$ `"Clicked outside building boundary"`.
+     5. Interior fallback $\to$ Informational prompt.
+   - Completely eliminated the outdated message `"Clicked point is outside bounded slab bays."`.
+3. **AST Quality & Method Integrity Check:**
+   - Full AST verification confirms zero undefined `self.<method>()` calls in `XpertStudioMainWindow`.
+4. **Strict Engine Freeze Preserved:**
+   - `xpert_structural_engine.py` remains 100% byte-for-byte SHA-256 identical to `reference_v2_4_11` (`f7bd503a2a52979d34a289cc2b7e544e013b6fc066a5799aaa494cd773678fb8`).
+5. **Test Suite Expansion (82/82 Passed):**
+   - 78 legacy tests + 4 new behavioral GUI tests (`test_v2412_push_undo_snapshot_defined_and_callable`, `test_v2412_undo_stack_grows_and_trims`, `test_v2412_pick_point_in_slab_selects_it`, `test_v2412_pick_point_in_beam_shows_beam_message`).
+
+---
+
+## Previous Release: `v2.4.11-structural-bim-pro` (2026-11-20)
 **Release Title:** Face-Based Slab Inference Engine (2D CAD Boolean Subtraction, Slivers Policy, Roof Area Coverage Equation $\le 0.01\text{ m}^2$, Extend Beam 2-Step Workflow with 150mm OSNAP Snap & Hover Highlight, Backward Compatibility Verbatim Load, 78/78 Unit Tests, and 4 Frozen Calculation Cores).
 
 ### Key Features & Advancements in `v2.4.11-structural-bim-pro`:

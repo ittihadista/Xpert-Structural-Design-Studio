@@ -1,4 +1,4 @@
-# Xpert Structural Design Studio (v2.4.11-structural-bim-pro)
+# Xpert Structural Design Studio (v2.4.12-structural-bim-pro)
 """
 Xpert Structural Design Studio (v2.4.1-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
@@ -1477,6 +1477,44 @@ class SlabRibDesignDialog(QDialog):
         self.sec_view.fitInView(bounds, Qt.AspectRatioMode.KeepAspectRatio)
 
 
+def _point_in_polygon(px: float, py: float, poly: Any) -> bool:
+    """Ray-casting algorithm to test whether (px, py) lies inside a 2D polygon."""
+    if not poly or len(poly) < 3:
+        return False
+    inside = False
+    n = len(poly)
+    p1x, p1y = float(poly[0][0]), float(poly[0][1])
+    for i in range(1, n + 1):
+        p2x, p2y = float(poly[i % n][0]), float(poly[i % n][1])
+        if min(p1y, p2y) <= py <= max(p1y, p2y):
+            if px <= max(p1x, p2x):
+                if p1y != p2y:
+                    xinters = (py - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or px <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+
+def _point_in_beam_rect(px: float, py: float, bm: Dict[str, Any]) -> bool:
+    """Checks whether (px, py) lies inside the actual physical rectangle of a beam."""
+    kind = str(bm.get("beam_kind", bm.get("kind", "drop"))).lower()
+    def_w = 0.30 if "hid" in kind else 0.20
+    w = float(bm.get("width_m", def_w))
+    hw = w / 2.0
+    sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+    ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+    dx, dy = ex - sx, ey - sy
+    L = math.hypot(dx, dy)
+    if L < 1e-6:
+        return False
+    ux, uy = dx / L, dy / L
+    vx, vy = px - sx, py - sy
+    t = vx * ux + vy * uy
+    d = abs(vx * uy - vy * ux)
+    return (-0.01 <= t <= L + 0.01) and (d <= hw + 0.01)
+
+
 class StructuralCadCanvas2D(QGraphicsView):
     """
     Revit + AutoCAD Hybrid 2D Structural BIM Canvas:
@@ -2358,6 +2396,74 @@ class StructuralCadCanvas2D(QGraphicsView):
 
         return best[1] if best else None
 
+    def point_in_polygon(self, px: float, py: float, poly: Any) -> bool:
+        return _point_in_polygon(px, py, poly)
+
+    def point_in_beam_rect(self, px: float, py: float, bm: Dict[str, Any]) -> bool:
+        return _point_in_beam_rect(px, py, bm)
+
+    def pick_slab_at_point(self, raw_x: float, raw_y: float) -> str:
+        """
+        v2.4.12 Point-in-Component Pick Slab Workflow:
+        1. Checks Openings (00-XD-OPEN) -> 'Clicked on Opening: {id}'
+        2. Checks Beams (00-XD-BEAM) actual physical rectangle -> 'Clicked on Beam: {id} ({kind})'
+        3. Checks Slabs in story['slabs'] -> Selects slab and formats properties message
+        4. Checks Building Boundary (00-XD-EDGE) -> 'Clicked outside building boundary'
+        5. Inside boundary but no slab component -> Informational fallback
+        """
+        story = self.studio.current_story_data
+        px, py = float(raw_x), float(raw_y)
+
+        # 1. Openings
+        for op in story.get("openings", []):
+            poly = op.get("polygon", [])
+            if len(poly) >= 3 and _point_in_polygon(px, py, poly):
+                op_id = op.get("id", "OP")
+                msg = f"Clicked on Opening: {op_id}"
+                self.studio.update_contextual_prompt(msg)
+                self.studio.statusBar().showMessage(msg, 5000)
+                return msg
+
+        # 2. Beams (actual physical rectangle)
+        for bm in story.get("beams", []):
+            if _point_in_beam_rect(px, py, bm):
+                b_id = bm.get("id", "B")
+                b_kind = str(bm.get("beam_kind", bm.get("kind", "drop"))).lower()
+                msg = f"Clicked on Beam: {b_id} ({b_kind})"
+                self.studio.update_contextual_prompt(msg)
+                self.studio.statusBar().showMessage(msg, 5000)
+                return msg
+
+        # 3. Slabs in story['slabs']
+        for slb in story.get("slabs", []):
+            poly = slb.get("polygon", [])
+            if len(poly) >= 3 and _point_in_polygon(px, py, poly):
+                s_id = str(slb.get("id", "S"))
+                self.selected_items = [("slab", s_id)]
+                area = float(slb.get("area_m2", 0.0))
+                lx = float(slb.get("lx_m", 0.0))
+                ly = float(slb.get("ly_m", 0.0))
+                rib_ang = int(round(float(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))))
+                msg = f"Selected Slab {s_id}: Area={area:.2f} m², {lx:.2f}×{ly:.2f} m, Ribs={rib_ang}°"
+                self.render_story(story)
+                self.studio.update_contextual_prompt(msg)
+                self.studio.statusBar().showMessage(msg, 5000)
+                return msg
+
+        # 4. Outside boundary
+        bnd = story.get("slab_edge_polygon", [])
+        if len(bnd) >= 3 and not _point_in_polygon(px, py, bnd):
+            msg = "Clicked outside building boundary"
+            self.studio.update_contextual_prompt(msg)
+            self.studio.statusBar().showMessage(msg, 5000)
+            return msg
+
+        # 5. Inside boundary but no slab panel found
+        msg = f"Clicked inside building boundary at ({px:.2f}, {py:.2f}): no slab panel found."
+        self.studio.update_contextual_prompt(msg)
+        self.studio.statusBar().showMessage(msg, 5000)
+        return msg
+
     def _handle_left_click_at(self, sx: float, sy: float, raw_x: float, raw_y: float, snap_type: str) -> None:
         story = self.studio.current_story_data
         tool = self.active_tool
@@ -2773,15 +2879,19 @@ class StructuralCadCanvas2D(QGraphicsView):
                     self._commit_new_opening([p1, (sx, sy)], is_polygon=False)
             return
 
-        # STEP 4: Pick Area (Slab / Opening Toggle)
-        if tool in ("PICK_SLAB", "PICK_OPENING"):
-            mode_str = "SLAB" if tool == "PICK_SLAB" else "TOGGLE_OPENING"
+        # STEP 4A: Pick Slab (Point-in-Component Logic - v2.4.12)
+        if tool == "PICK_SLAB":
+            self.pick_slab_at_point(raw_x, raw_y)
+            return
+
+        # STEP 4C: Pick Opening Toggle
+        if tool == "PICK_OPENING":
             ok, msg, _ = pick_area_create_or_update_slab(
-                story, raw_x, raw_y, target_mode=mode_str
+                story, raw_x, raw_y, target_mode="TOGGLE_OPENING"
             )
             if not ok:
-                QMessageBox.warning(self, "Pick Area / Cantilever Rule", msg)
-            elif tool == "PICK_OPENING":
+                QMessageBox.warning(self, "Pick Opening Rule", msg)
+            else:
                 _, c_alerts = enforce_opening_adjacent_drop_beams_and_cascade(story)
                 if c_alerts and "--check" not in sys.argv:
                     QMessageBox.information(
@@ -5489,15 +5599,28 @@ class XpertStudioMainWindow(QMainWindow):
         self.cad_canvas.ortho_enabled = self.btn_ortho_bar.isChecked()
         self.cad_canvas.grid_snap_enabled = self.btn_grid_snap_bar.isChecked()
 
+    def push_undo_snapshot(self) -> None:
+        import copy
+        if not hasattr(self, '_undo_stack'):
+            self._undo_stack = []
+        self._undo_stack.append(copy.deepcopy(self.current_story_data))
+        if len(self._undo_stack) > 20:
+            self._undo_stack.pop(0)
+
     def undo_action(self) -> None:
-        if not self._undo_stack:
+        if not hasattr(self, '_undo_stack') or not self._undo_stack:
             self.update_contextual_prompt("Undo (Ctrl+Z): Nothing to undo on active story.")
             return
-        cur_snap = json.dumps(self.current_story_data, sort_keys=True)
-        self._redo_stack.append(cur_snap)
+        if hasattr(self, '_redo_stack'):
+            cur_snap = json.dumps(self.current_story_data, sort_keys=True)
+            self._redo_stack.append(cur_snap)
         prev_snap = self._undo_stack.pop()
-        self.current_story_data = json.loads(prev_snap)
-        self._last_saved_snapshot = prev_snap
+        if isinstance(prev_snap, str):
+            self.current_story_data = json.loads(prev_snap)
+        else:
+            import copy
+            self.current_story_data = copy.deepcopy(prev_snap)
+        self._last_saved_snapshot = json.dumps(self.current_story_data, sort_keys=True)
         self.save_and_sync_current_story(record_undo=False)
         self.refresh_story_ui()
         self.update_contextual_prompt(f"Undo complete ({len(self._undo_stack)} undo steps remaining).")
@@ -6242,7 +6365,7 @@ class XpertStudioMainWindow(QMainWindow):
             "DRAW_BEAM_HID": "Step 3A (Hidden Beam 0.30m): Click Start Column Center -> Click End Column Center.",
             "DRAW_BEAM_DROP": "Step 3B (Drop Beam 0.20×0.40m): Click Start Column Center -> Click End Column Center.",
             "DRAW_EXTEND_BEAM": "Step 3C (Extend Beam): Click beam to select -> Click target/boundary point on beam line to extend.",
-            "PICK_SLAB": "Step 4A (Pick Slab): Click inside any beam-bounded bay to create/update its Hollow-Block Slab.",
+            "PICK_SLAB": "Step 4A (Pick Slab): Click inside any slab panel to inspect or select its Hollow-Block Slab.",
             "FLIP_RIB": "Step 4B (Flip Rib): Click inside any Slab or on its yellow tag to flip its rib orientation (0° <-> 90°).",
             "PICK_OPENING": "Step 4C (Pick Opening): Click inside any bay to toggle a Void Opening (X).",
             "DRAW_OPENING": "Step 4D (Draw Slab Opening): Click 2 opposite corners (Rectangle) or press [Space] for Polyline Loop (auto-merges adjacent openings).",
