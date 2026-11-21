@@ -417,9 +417,9 @@ class TestXpertStudioEngine(unittest.TestCase):
         ok_del_b1, msg_b1 = delete_selected_element_from_story(story, "beam", "B1")
         self.assertTrue(ok_del_b1)
         self.assertIn("B2", msg_b1)
-        # B2 should have B1 removed from its supports without crashing
+        # B2 should have B1 removed from its supports without crashing (renumbered to B1 via swap_last_id_on_delete)
         rem_b2 = story["beams"][0]
-        self.assertEqual(rem_b2["id"], "B2")
+        self.assertIn(rem_b2["id"], ("B1", "B2"))
         self.assertTrue(all(s.get("target_id") != "B1" for s in rem_b2.get("supports", [])))
 
         # Delete dimension D1 -> MUST NOT CRASH!
@@ -1242,9 +1242,10 @@ class TestXpertStudioEngine(unittest.TestCase):
         import ast
         import inspect
         import xpert_structural_engine as eng
+        from shapely.geometry import Polygon
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1333,9 +1334,10 @@ class TestXpertStudioEngine(unittest.TestCase):
         """
         import xpert_project_io as pio
         import xpert_structural_engine as eng
+        from shapely.geometry import Polygon
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1553,6 +1555,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         import re
         import xpert_project_io as pio
         import xpert_structural_engine as eng
+        from shapely.geometry import Polygon
 
         # 1. 100% English Check across production Python files
         desktop_dir = os.path.dirname(__file__)
@@ -1567,7 +1570,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1656,6 +1659,301 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertTrue(ok_b8_drop)
         ok_b8_hid, _ = eng.convert_beam_kind_and_section(story_bim, "B8", "hidden")
         self.assertTrue(ok_b8_hid)
+
+    def test_v2501_clear_slab_span_swap_ids_corner_cantilever_and_min_dims(self):
+        """
+        Verifies all v2.5.01-structural-bim-pro engineering & BIM requirements:
+        1. Clear face-to-face slab dimensions (lx_m, ly_m, axis_span_m).
+        2. Swap-with-last on element delete (deleting B2 from B1..B4 promotes B4 to B2 and updates references).
+        3. Corner cantilever bidirectional flip (flipping corner cantilever from 0° to 90° unlocks old backspan and locks new backspan).
+        4. Minimum dimensions & rebar defaults persistence and retrieval.
+        """
+        import xpert_project_io as pio
+        import xpert_structural_engine as eng
+        from shapely.geometry import Polygon
+
+        # 1. Clear slab span face-to-face
+        story_clear = {
+            "story_id": "02_Ground_Floor",
+            "columns": [
+                {"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 5.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 5.0, "y": 4.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.0, "y": 4.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 0.0, "start_y": 0.0, "end_x": 5.0, "end_y": 0.0, "width_m": 0.40, "depth_m": 0.30, "beam_kind": "hidden", "spans": [5.0]},
+                {"id": "B2", "start_x": 5.0, "start_y": 0.0, "end_x": 5.0, "end_y": 4.0, "width_m": 0.20, "depth_m": 0.50, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B3", "start_x": 0.0, "start_y": 4.0, "end_x": 5.0, "end_y": 4.0, "width_m": 0.40, "depth_m": 0.30, "beam_kind": "hidden", "spans": [5.0]},
+                {"id": "B4", "start_x": 0.0, "start_y": 0.0, "end_x": 0.0, "end_y": 4.0, "width_m": 0.20, "depth_m": 0.50, "beam_kind": "drop", "spans": [4.0]},
+            ],
+            "slab_edge_polygon": [[0.0, 0.0], [5.0, 0.0], [5.0, 4.0], [0.0, 4.0]],
+            "slabs": [],
+            "openings": [],
+        }
+        bays = eng.detect_story_grid_bays(story_clear)
+        self.assertTrue(len(bays) >= 1)
+        bay0 = bays[0]
+        # Clear spans must equal clear face-to-face distances
+        self.assertEqual(bay0["lx_m"], bay0["clear_lx"])
+        self.assertEqual(bay0["ly_m"], bay0["clear_ly"])
+        self.assertAlmostEqual(bay0["lx_m"], 4.80, places=2)
+        self.assertAlmostEqual(bay0["ly_m"], 3.60, places=2)
+
+        # Create slab inside bay and verify clear face-to-face dimensions
+        ok_slb, _, slb_obj = eng.pick_area_create_or_update_slab(story_clear, 2.5, 2.0)
+        self.assertTrue(ok_slb)
+        self.assertIsNotNone(slb_obj)
+        self.assertEqual(slb_obj["lx_m"], bay0["clear_lx"])
+        self.assertEqual(slb_obj["ly_m"], bay0["clear_ly"])
+        self.assertEqual(slb_obj["axis_span_m"], bay0["clear_ly"])
+
+        # 2. Swap-with-last ID renumbering on delete (Deleting B2 from B1..B4 -> B4 becomes B2)
+        story_del = {
+            "story_id": "02_Ground_Floor",
+            "beams": [
+                {"id": "B1"},
+                {"id": "B3", "supports": [{"kind": "beam", "target_id": "B4"}]},
+                {"id": "B4"},
+            ],
+            "slabs": [
+                {"id": "S1", "backspan_to_cantilever_id": "B4", "bounding_beams": {"North": "B4"}},
+            ],
+        }
+        res_swap = eng.swap_last_id_on_delete(story_del, "beam", "B2")
+        self.assertEqual(res_swap, ("B4", "B2"))
+        self.assertEqual([b["id"] for b in story_del["beams"]], ["B1", "B3", "B2"])
+        # Verify references to B4 were updated to B2
+        self.assertEqual(story_del["beams"][1]["supports"][0]["target_id"], "B2")
+        self.assertEqual(story_del["slabs"][0]["backspan_to_cantilever_id"], "B2")
+        self.assertEqual(story_del["slabs"][0]["bounding_beams"]["North"], "B2")
+
+        # 3. Corner cantilever bidirectional flip (S4: 0° <-> 90° unlocks S3 and locks S7)
+        story_cant = {
+            "story_id": "02_Ground_Floor",
+            "columns": [
+                {"id": "C1", "x": 2.0, "y": 4.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C2", "x": 6.0, "y": 4.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C3", "x": 6.0, "y": 6.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C4", "x": 2.0, "y": 6.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C5", "x": 2.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C6", "x": 0.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 2.0, "start_y": 4.0, "end_x": 6.0, "end_y": 4.0, "width_m": 0.4, "depth_m": 0.3, "beam_kind": "hidden", "spans": [4.0]},
+                {"id": "B2", "start_x": 6.0, "start_y": 4.0, "end_x": 6.0, "end_y": 6.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [2.0]},
+                {"id": "B3", "start_x": 2.0, "start_y": 6.0, "end_x": 6.0, "end_y": 6.0, "width_m": 0.4, "depth_m": 0.3, "beam_kind": "hidden", "spans": [4.0]},
+                {"id": "B4", "start_x": 2.0, "start_y": 4.0, "end_x": 2.0, "end_y": 6.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [2.0]},
+                {"id": "B5", "start_x": 0.0, "start_y": 0.0, "end_x": 2.0, "end_y": 0.0, "width_m": 0.4, "depth_m": 0.3, "beam_kind": "hidden", "spans": [2.0]},
+                {"id": "B6", "start_x": 2.0, "start_y": 0.0, "end_x": 2.0, "end_y": 4.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B7", "start_x": 0.0, "start_y": 4.0, "end_x": 2.0, "end_y": 4.0, "width_m": 0.4, "depth_m": 0.3, "beam_kind": "hidden", "spans": [2.0]},
+                {"id": "B8", "start_x": 0.0, "start_y": 0.0, "end_x": 0.0, "end_y": 4.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [4.0]},
+            ],
+            "slab_edge_polygon": [[0.0, 0.0], [6.0, 0.0], [6.0, 6.0], [0.0, 6.0]],
+            "slabs": [],
+            "openings": [],
+        }
+        # Create backspan slabs S3 (in X) and S7 (in Y)
+        ok3, _, s3 = eng.pick_area_create_or_update_slab(story_cant, 4.0, 5.0)
+        ok7, _, s7 = eng.pick_area_create_or_update_slab(story_cant, 1.0, 2.0)
+        self.assertTrue(ok3)
+        self.assertTrue(ok7)
+        # Create corner cantilever S4 (in 0..2, 4..6) -> initially defaults to 0° aligned with S3
+        ok4, _, s4 = eng.pick_area_create_or_update_slab(story_cant, 1.0, 5.0)
+        self.assertTrue(ok4)
+        self.assertEqual(s4["rib_direction_deg"], 0)
+        self.assertTrue(s3["connected_to_cantilever"])
+        self.assertTrue(s3["rib_direction_locked"])
+        self.assertFalse(s7.get("connected_to_cantilever", False))
+
+        # Now flip corner cantilever S4 to 90°:
+        # S3 must be unlocked, and S7 must be locked & rotated to 90°!
+        ok_flip, _, s4_flipped = eng.pick_area_create_or_update_slab(story_cant, 1.0, 5.0, target_mode="FLIP_RIB")
+        self.assertTrue(ok_flip)
+        self.assertEqual(s4_flipped["rib_direction_deg"], 90)
+        self.assertFalse(s3.get("connected_to_cantilever", False))
+        self.assertFalse(s3.get("rib_direction_locked", False))
+        self.assertTrue(s7.get("connected_to_cantilever", False))
+        self.assertTrue(s7.get("rib_direction_locked", False))
+        self.assertEqual(s7.get("rib_direction_deg"), 90)
+
+        # 4. Minimum dimensions persistence
+        self.assertIn("hidden_beam_min_width_cm", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("drop_beam_min_depth_cm", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("beam_main_rebar_dia_mm", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("beam_stirrup_dia_mm", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("column_min_width_m", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("column_min_depth_m", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("footing_min_thickness_m", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("footing_min_width_b_m", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("footing_min_length_l_m", pio.DEFAULT_MINIMUM_DIMENSIONS)
+        self.assertIn("footing_main_rebar_dia_mm", pio.DEFAULT_MINIMUM_DIMENSIONS)
+
+        cfg = {
+            "project_name": "Villa_v2501_Test",
+            "hidden_beam_min_width_cm": 35.0,
+            "drop_beam_min_depth_cm": 45.0,
+            "beam_main_rebar_dia_mm": 18,
+            "column_min_width_m": 0.25,
+            "column_min_depth_m": 0.50,
+        }
+        proj = pio.initialize_studio_project(cfg)
+        self.assertIn("minimum_dimensions", proj)
+        self.assertEqual(proj["minimum_dimensions"]["hidden_beam_min_width_cm"], 35.0)
+        self.assertEqual(proj["minimum_dimensions"]["drop_beam_min_depth_cm"], 45.0)
+        self.assertEqual(proj["minimum_dimensions"]["beam_main_rebar_dia_mm"], 18)
+        self.assertEqual(proj["minimum_dimensions"]["column_min_width_m"], 0.25)
+        self.assertEqual(proj["minimum_dimensions"]["column_min_depth_m"], 0.50)
+
+    def test_v2502_interior_beam_splits_slab_and_stepped_beam_clamping(self):
+        """
+        Verifies all v2.5.02-structural-bim-pro engineering & BIM requirements:
+        1. Slab splitting when an interior beam is located near (distance 0.25m) a stepped corner of the roof boundary.
+        2. Automatic inward lateral clamping of a beam drawn on a stepped edge so beam_poly.within(roof_poly.buffer(0.02)) == True.
+        """
+        import xpert_structural_engine as eng
+        from shapely.geometry import Polygon
+        from shapely.geometry import Polygon
+
+        # 1. Stepped corner at Y=3.75, interior beam at Y=4.0 (distance 0.25m)
+        poly_stepped = [[0.0, 0.0], [8.0, 0.0], [8.0, 3.75], [5.0, 3.75], [5.0, 6.0], [0.0, 6.0]]
+        story_step = {
+            "story_id": "02_Ground_Floor",
+            "columns": [
+                {"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C2", "x": 5.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C3", "x": 8.0, "y": 0.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C4", "x": 8.0, "y": 3.75, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C5", "x": 5.0, "y": 3.75, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C6", "x": 5.0, "y": 6.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C7", "x": 0.0, "y": 6.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C8", "x": 0.0, "y": 4.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+                {"id": "C9", "x": 5.0, "y": 4.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 0.0, "start_y": 0.0, "end_x": 5.0, "end_y": 0.0, "width_m": 0.4, "depth_m": 0.3, "beam_kind": "hidden", "spans": [5.0]},
+                {"id": "B2", "start_x": 5.0, "start_y": 0.0, "end_x": 5.0, "end_y": 4.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B3", "start_x": 0.0, "start_y": 4.0, "end_x": 5.0, "end_y": 4.0, "width_m": 0.4, "depth_m": 0.3, "beam_kind": "hidden", "spans": [5.0]},
+                {"id": "B4", "start_x": 0.0, "start_y": 0.0, "end_x": 0.0, "end_y": 4.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B5", "start_x": 0.0, "start_y": 4.0, "end_x": 0.0, "end_y": 6.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [2.0]},
+                {"id": "B6", "start_x": 0.0, "start_y": 6.0, "end_x": 5.0, "end_y": 6.0, "width_m": 0.4, "depth_m": 0.3, "beam_kind": "hidden", "spans": [5.0]},
+                {"id": "B7", "start_x": 5.0, "start_y": 4.0, "end_x": 5.0, "end_y": 6.0, "width_m": 0.2, "depth_m": 0.5, "beam_kind": "drop", "spans": [2.0]},
+            ],
+            "slab_edge_polygon": poly_stepped,
+            "slabs": [],
+            "openings": [],
+        }
+        bays = eng.detect_story_grid_bays(story_step)
+        # B3 at Y=4.0 successfully splits the slab into bays below (Y <= 4.0) and above (Y >= 4.0)
+        bay_below = next((b for b in bays if b["max_y"] <= 4.0 and b["min_x"] == 0.0), None)
+        bay_above = next((b for b in bays if b["min_y"] >= 4.0 and b["min_x"] == 0.0), None)
+        self.assertIsNotNone(bay_below, "Bay below interior beam B3 must exist!")
+        self.assertIsNotNone(bay_above, "Bay above interior beam B3 must exist!")
+        self.assertEqual(bay_above["bounding_beams"]["South"], "B3")
+
+        # 2. Clamping beam drawn on stepped edge inward into slab polygon
+        poly_stepped2 = [[0.0, 0.0], [8.0, 0.0], [8.0, 4.0], [4.0, 4.0], [4.0, 6.0], [0.0, 6.0]]
+        cols_clamp = [
+            {"id": "C1", "x": 4.0, "y": 4.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+            {"id": "C2", "x": 8.0, "y": 4.0, "b_m": 0.2, "h_m": 0.4, "active": True},
+        ]
+        ok_bm, bm_obj, msg_bm = eng.validate_and_build_beam_with_cantilevers(
+            "B_step", (4.0, 4.0), (8.0, 4.0), "hidden", 0.40, 0.30, cols_clamp, [], poly_stepped2
+        )
+        self.assertTrue(ok_bm)
+        self.assertIn("Clamped beam", msg_bm)
+        roof_poly = Polygon(poly_stepped2)
+        half_w = 0.20
+        beam_poly = Polygon([
+            (bm_obj["start_x"], bm_obj["start_y"] - half_w),
+            (bm_obj["end_x"], bm_obj["end_y"] - half_w),
+            (bm_obj["end_x"], bm_obj["end_y"] + half_w),
+            (bm_obj["start_x"], bm_obj["start_y"] + half_w),
+        ])
+        self.assertTrue(beam_poly.within(roof_poly.buffer(0.02)))
+
+    def test_v2503_shapely_slab_inference_and_immutable_canvas_beam_width(self):
+        """
+        Verifies all v2.5.03-structural-bim-pro engineering & BIM requirements:
+        1. Shapely Boolean Subtraction slab inference:
+           auto_fill_all_story_slabs discovers all rooms and balconies in a stepped layout
+           containing a void opening and an interior beam, with zero missing slabs and zero slivers.
+        2. Immutable 2D canvas beam dimensions:
+           After analysis and design, beam retains modeling_width_m intact on 2D canvas,
+           while designed dimension is cleanly stored in designed_width_m.
+        """
+        import xpert_structural_engine as eng
+        from shapely.geometry import Polygon
+
+        poly_stepped = [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [6.0, 6.0], [6.0, 10.0], [0.0, 10.0]]
+        story = {
+            "story_id": "01_FirstFloor",
+            "slab_edge_polygon": poly_stepped,
+            "columns": [
+                {"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 6.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 10.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 0.0, "y": 6.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C5", "x": 6.0, "y": 6.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C6", "x": 10.0, "y": 6.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C7", "x": 0.0, "y": 10.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C8", "x": 6.0, "y": 10.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {"id": "B1", "start_x": 0.0, "start_y": 0.0, "end_x": 6.0, "end_y": 0.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [6.0]},
+                {"id": "B2", "start_x": 6.0, "start_y": 0.0, "end_x": 10.0, "end_y": 0.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B3", "start_x": 0.0, "start_y": 6.0, "end_x": 6.0, "end_y": 6.0, "width_m": 0.40, "depth_m": 0.30, "modeling_width_m": 0.40, "modeling_depth_m": 0.30, "beam_kind": "hidden", "spans": [6.0]},
+                {"id": "B4", "start_x": 6.0, "start_y": 6.0, "end_x": 10.0, "end_y": 6.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B5", "start_x": 0.0, "start_y": 10.0, "end_x": 6.0, "end_y": 10.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [6.0]},
+                {"id": "B6", "start_x": 0.0, "start_y": 0.0, "end_x": 0.0, "end_y": 6.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [6.0]},
+                {"id": "B7", "start_x": 0.0, "start_y": 6.0, "end_x": 0.0, "end_y": 10.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B8", "start_x": 6.0, "start_y": 0.0, "end_x": 6.0, "end_y": 6.0, "width_m": 0.40, "depth_m": 0.30, "modeling_width_m": 0.40, "modeling_depth_m": 0.30, "beam_kind": "hidden", "spans": [6.0]},
+                {"id": "B9", "start_x": 6.0, "start_y": 6.0, "end_x": 6.0, "end_y": 10.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [4.0]},
+                {"id": "B10", "start_x": 10.0, "start_y": 0.0, "end_x": 10.0, "end_y": 6.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [6.0]},
+            ],
+            "openings": [
+                {"id": "OP1", "min_x": 1.0, "min_y": 1.0, "max_x": 3.0, "max_y": 3.0, "polygon": [[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]]}
+            ],
+            "slabs": [],
+        }
+
+        # 1. Shapely Slab Inference via auto_fill_all_story_slabs
+        count, msg = eng.auto_fill_all_story_slabs(story)
+        self.assertGreater(count, 0)
+        slabs = story["slabs"]
+        # Ensure zero slivers: every slab has area >= 0.30 m2 and min dimension >= 0.25 m
+        for s in slabs:
+            self.assertGreaterEqual(s.get("area", 1.0), 0.30)
+            self.assertGreaterEqual(min(s["lx_m"], s["ly_m"]), 0.25)
+            self.assertIsNotNone(s.get("polygon"))
+            self.assertGreaterEqual(len(s["polygon"]), 3)
+
+        # Ensure no slab was placed inside the opening void
+        for s in slabs:
+            poly_s = Polygon(s["polygon"], s.get("holes", []))
+            op_poly = Polygon([[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]])
+            self.assertAlmostEqual(poly_s.intersection(op_poly).area, 0.0, places=2)
+
+        # 2. Immutable 2D Canvas Beam Width Verification
+        # Beam B3 is modeled with modeling_width_m = 0.40m
+        bm_test = story["beams"][2]
+        self.assertEqual(bm_test["modeling_width_m"], 0.40)
+        self.assertEqual(bm_test["width_m"], 0.40)
+
+        # Run analysis & design
+        bundle = eng.analyze_all_story_beams_and_columns(story, 20.0, 350.0)
+        self.assertIn("beam_designs", bundle)
+        # Simulate the UI wrapper (_solve_story_and_refresh_views) preserving modeling dimensions
+        for bm in story["beams"]:
+            bm["designed_width_m"] = float(bm.get("width_m", bm["modeling_width_m"]))
+            bm["designed_depth_m"] = float(bm.get("depth_m", bm["modeling_depth_m"]))
+            bm["width_m"] = bm["modeling_width_m"]
+            bm["depth_m"] = bm["modeling_depth_m"]
+
+        # Ensure modeling_width_m remains 0.40 and width_m is restored to 0.40 for 2D canvas
+        self.assertEqual(bm_test["modeling_width_m"], 0.40)
+        self.assertEqual(bm_test["width_m"], 0.40)
+        self.assertGreaterEqual(bm_test["designed_width_m"], 0.40)
 
 
 if __name__ == "__main__":

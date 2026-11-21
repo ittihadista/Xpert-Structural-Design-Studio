@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.5.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.5.03-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
@@ -14,7 +14,7 @@ import traceback
 from typing import Dict, Any, List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer
-from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPen, QBrush, QPolygonF
+from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QBrush, QPolygonF
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -56,6 +56,7 @@ from xpert_project_io import (
     STUDIO_VERSION,
     MASTER_FILE_EXT,
     DEFAULT_REBAR_DIAMETERS_TABLE,
+    DEFAULT_MINIMUM_DIMENSIONS,
     load_studio_global_settings,
     save_studio_global_settings,
     initialize_studio_project,
@@ -91,6 +92,8 @@ from xpert_structural_engine import (
     toggle_slab_rib_by_label_click,
     flip_slab_rib_by_id,
     delete_selected_element_from_story,
+    swap_last_id_on_delete,
+    _next_sequential_id,
     move_column_and_sync_connected_beams,
     move_beam_within_slab_boundary,
     select_elements_by_box,
@@ -518,6 +521,167 @@ class StudioOptionsDialog(QDialog):
                 "factored_wu_kpa": hb_data["slab_factored_wu_kpa"],
             }
 
+        self.accept()
+
+
+class MinimumDimensionsDialog(QDialog):
+    """
+    Minimum Dimensions & Reinforcement Defaults Dialog:
+    1. Hidden Beam Min Width (cm) (default 30.0 cm)
+    2. Drop Beam Min Depth (cm) (default 40.0 cm)
+    3. Beam Main Rebar Diameter (mm) (default 16 mm)
+    4. Beam Stirrup Diameter (mm) (default 8 mm)
+    5. Column Min Width b (m) & Depth h (m) (default 0.20 m x 0.40 m)
+    6. Column Main Rebar Diameter (mm) (default 16 mm)
+    7. Column Stirrup Diameter (mm) (default 8 mm)
+    8. Footing Min Thickness (m) (default 0.30 m)
+    9. Footing Min Width B (m) & Length L (m) (default 0.80 m x 0.80 m)
+    10. Footing Main Rebar Diameter (mm) (default 14 mm)
+    """
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        master_project: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Minimum Dimensions & Reinforcement Defaults")
+        self.setMinimumWidth(540)
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.master_project = master_project
+        self.settings = load_studio_global_settings()
+
+        min_dims = dict(DEFAULT_MINIMUM_DIMENSIONS)
+        if self.master_project and "minimum_dimensions" in self.master_project:
+            min_dims.update(self.master_project["minimum_dimensions"])
+        elif "minimum_dimensions" in self.settings:
+            min_dims.update(self.settings["minimum_dimensions"])
+
+        vbox = QVBoxLayout(self)
+
+        hdr = QLabel("<b>Minimum Cross-Section Dimensions & Reinforcement Defaults</b>")
+        hdr.setStyleSheet("color: #0F172A; font-size: 13px; margin-bottom: 6px;")
+        vbox.addWidget(hdr)
+
+        form_box = QGroupBox("Structural Elements Minimum Dimensions & Rebar")
+        flay = QFormLayout(form_box)
+
+        # 1. Hidden Beam Min Width (cm)
+        self.sp_hid_w = QDoubleSpinBox()
+        self.sp_hid_w.setRange(15.0, 150.0)
+        self.sp_hid_w.setSingleStep(5.0)
+        self.sp_hid_w.setSuffix(" cm")
+        self.sp_hid_w.setValue(float(min_dims.get("hidden_beam_min_width_cm", 30.0)))
+        flay.addRow("Hidden Beam Min Width (cm):", self.sp_hid_w)
+
+        # 2. Drop Beam Min Depth (cm)
+        self.sp_drop_d = QDoubleSpinBox()
+        self.sp_drop_d.setRange(20.0, 150.0)
+        self.sp_drop_d.setSingleStep(5.0)
+        self.sp_drop_d.setSuffix(" cm")
+        self.sp_drop_d.setValue(float(min_dims.get("drop_beam_min_depth_cm", 40.0)))
+        flay.addRow("Drop Beam Min Depth (cm):", self.sp_drop_d)
+
+        # 3. Beam Main Rebar Diameter (mm)
+        self.sp_beam_main_rebar = QSpinBox()
+        self.sp_beam_main_rebar.setRange(10, 40)
+        self.sp_beam_main_rebar.setSuffix(" mm")
+        self.sp_beam_main_rebar.setValue(int(min_dims.get("beam_main_rebar_dia_mm", 16)))
+        flay.addRow("Beam Main Rebar Diameter (mm):", self.sp_beam_main_rebar)
+
+        # 4. Beam Stirrup Diameter (mm)
+        self.sp_beam_stirrup = QSpinBox()
+        self.sp_beam_stirrup.setRange(6, 16)
+        self.sp_beam_stirrup.setSuffix(" mm")
+        self.sp_beam_stirrup.setValue(int(min_dims.get("beam_stirrup_dia_mm", 8)))
+        flay.addRow("Beam Stirrup Diameter (mm):", self.sp_beam_stirrup)
+
+        # 5. Column Min Width b (m) & Depth h (m)
+        self.sp_col_w = QDoubleSpinBox()
+        self.sp_col_w.setRange(0.15, 2.00)
+        self.sp_col_w.setSingleStep(0.05)
+        self.sp_col_w.setSuffix(" m")
+        self.sp_col_w.setValue(float(min_dims.get("column_min_width_m", 0.20)))
+        flay.addRow("Column Min Width b (m):", self.sp_col_w)
+
+        self.sp_col_h = QDoubleSpinBox()
+        self.sp_col_h.setRange(0.15, 3.00)
+        self.sp_col_h.setSingleStep(0.05)
+        self.sp_col_h.setSuffix(" m")
+        self.sp_col_h.setValue(float(min_dims.get("column_min_depth_m", 0.40)))
+        flay.addRow("Column Min Depth h (m):", self.sp_col_h)
+
+        # 6. Column Main Rebar Diameter (mm)
+        self.sp_col_main_rebar = QSpinBox()
+        self.sp_col_main_rebar.setRange(10, 40)
+        self.sp_col_main_rebar.setSuffix(" mm")
+        self.sp_col_main_rebar.setValue(int(min_dims.get("column_main_rebar_dia_mm", 16)))
+        flay.addRow("Column Main Rebar Diameter (mm):", self.sp_col_main_rebar)
+
+        # 7. Column Stirrup Diameter (mm)
+        self.sp_col_stirrup = QSpinBox()
+        self.sp_col_stirrup.setRange(6, 16)
+        self.sp_col_stirrup.setSuffix(" mm")
+        self.sp_col_stirrup.setValue(int(min_dims.get("column_stirrup_dia_mm", 8)))
+        flay.addRow("Column Stirrup Diameter (mm):", self.sp_col_stirrup)
+
+        # 8. Footing Min Thickness (m)
+        self.sp_ftg_t = QDoubleSpinBox()
+        self.sp_ftg_t.setRange(0.20, 2.00)
+        self.sp_ftg_t.setSingleStep(0.05)
+        self.sp_ftg_t.setSuffix(" m")
+        self.sp_ftg_t.setValue(float(min_dims.get("footing_min_thickness_m", 0.30)))
+        flay.addRow("Footing Min Thickness (m):", self.sp_ftg_t)
+
+        # 9. Footing Min Width B (m) & Length L (m)
+        self.sp_ftg_b = QDoubleSpinBox()
+        self.sp_ftg_b.setRange(0.40, 5.00)
+        self.sp_ftg_b.setSingleStep(0.05)
+        self.sp_ftg_b.setSuffix(" m")
+        self.sp_ftg_b.setValue(float(min_dims.get("footing_min_width_b_m", 0.80)))
+        flay.addRow("Footing Min Width B (m):", self.sp_ftg_b)
+
+        self.sp_ftg_l = QDoubleSpinBox()
+        self.sp_ftg_l.setRange(0.40, 5.00)
+        self.sp_ftg_l.setSingleStep(0.05)
+        self.sp_ftg_l.setSuffix(" m")
+        self.sp_ftg_l.setValue(float(min_dims.get("footing_min_length_l_m", 0.80)))
+        flay.addRow("Footing Min Length L (m):", self.sp_ftg_l)
+
+        # 10. Footing Main Rebar Diameter (mm)
+        self.sp_ftg_rebar = QSpinBox()
+        self.sp_ftg_rebar.setRange(10, 32)
+        self.sp_ftg_rebar.setSuffix(" mm")
+        self.sp_ftg_rebar.setValue(int(min_dims.get("footing_main_rebar_dia_mm", 14)))
+        flay.addRow("Footing Main Rebar Diameter (mm):", self.sp_ftg_rebar)
+
+        vbox.addWidget(form_box)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(self._save_and_accept)
+        btn_box.rejected.connect(self.reject)
+        vbox.addWidget(btn_box)
+
+    def _save_and_accept(self) -> None:
+        new_dims = {
+            "hidden_beam_min_width_cm": round(float(self.sp_hid_w.value()), 1),
+            "drop_beam_min_depth_cm": round(float(self.sp_drop_d.value()), 1),
+            "beam_main_rebar_dia_mm": int(self.sp_beam_main_rebar.value()),
+            "beam_stirrup_dia_mm": int(self.sp_beam_stirrup.value()),
+            "column_min_width_m": round(float(self.sp_col_w.value()), 2),
+            "column_min_depth_m": round(float(self.sp_col_h.value()), 2),
+            "column_main_rebar_dia_mm": int(self.sp_col_main_rebar.value()),
+            "column_stirrup_dia_mm": int(self.sp_col_stirrup.value()),
+            "footing_min_thickness_m": round(float(self.sp_ftg_t.value()), 2),
+            "footing_min_width_b_m": round(float(self.sp_ftg_b.value()), 2),
+            "footing_min_length_l_m": round(float(self.sp_ftg_l.value()), 2),
+            "footing_main_rebar_dia_mm": int(self.sp_ftg_rebar.value()),
+        }
+        if self.master_project is not None:
+            self.master_project["minimum_dimensions"] = dict(new_dims)
+        self.settings["minimum_dimensions"] = dict(new_dims)
+        self.settings.setdefault("options", {})["minimum_dimensions"] = dict(new_dims)
+        save_studio_global_settings(self.settings)
         self.accept()
 
 
@@ -1594,6 +1758,9 @@ class StructuralCadCanvas2D(QGraphicsView):
             "CENTER": True,
             "INTERSECTION": True,
             "PERPENDICULAR": True,
+            "GEOCEN": True,
+            "CIRCLE": True,
+            "EXTENSION": True,
         }
         self.ortho_enabled = True
         self.grid_snap_enabled = True
@@ -1970,6 +2137,88 @@ class StructuralCadCanvas2D(QGraphicsView):
                             d_a = math.hypot(raw_x - ax, raw_y - ay)
                             if d_a <= snap_radius * 0.75:
                                 candidates.append((d_a + 0.08, ax, ay, "ARCH_END", f"OSNAP [Arch DXF]: ({ax:.2f}, {ay:.2f})"))
+
+            # 1. INTERSECTION (Int: Intersection of two beams)
+            if self.osnap_modes.get("INTERSECTION", True):
+                beams = story_data.get("beams", [])
+                for i in range(len(beams)):
+                    b1 = beams[i]
+                    sx1, sy1 = float(b1.get("start_x", 0.0)), float(b1.get("start_y", 0.0))
+                    ex1, ey1 = float(b1.get("end_x", 0.0)), float(b1.get("end_y", 0.0))
+                    for j in range(i + 1, len(beams)):
+                        b2 = beams[j]
+                        sx2, sy2 = float(b2.get("start_x", 0.0)), float(b2.get("start_y", 0.0))
+                        ex2, ey2 = float(b2.get("end_x", 0.0)), float(b2.get("end_y", 0.0))
+                        denom = (ex1 - sx1) * (ey2 - sy2) - (ey1 - sy1) * (ex2 - sx2)
+                        if abs(denom) > 1e-5:
+                            t1 = ((sx2 - sx1) * (ey2 - sy2) - (sy2 - sy1) * (ex2 - sx2)) / denom
+                            t2 = ((sx2 - sx1) * (ey1 - sy1) - (sy2 - sy1) * (ex1 - sx1)) / denom
+                            if -0.05 <= t1 <= 1.05 and -0.05 <= t2 <= 1.05:
+                                ix = round(sx1 + t1 * (ex1 - sx1), 3)
+                                iy = round(sy1 + t1 * (ey1 - sy1), 3)
+                                d_int = math.hypot(raw_x - ix, raw_y - iy)
+                                if d_int <= snap_radius:
+                                    candidates.append((d_int - 0.05, ix, iy, "INTERSECTION", f"OSNAP [Intersection]: {b1.get('id')} × {b2.get('id')} ({ix:.2f}, {iy:.2f})"))
+
+            # 2. GEOCEN (GeoCen: Geometric Center of any slab bay or opening)
+            if self.osnap_modes.get("GEOCEN", True):
+                for slb in story_data.get("slabs", []):
+                    smin_x, smax_x = float(slb.get("min_x", 0.0)), float(slb.get("max_x", 0.0))
+                    smin_y, smax_y = float(slb.get("min_y", 0.0)), float(slb.get("max_y", 0.0))
+                    if smax_x > smin_x and smax_y > smin_y:
+                        gcx, gcy = round((smin_x + smax_x) / 2.0, 3), round((smin_y + smax_y) / 2.0, 3)
+                        d_gc = math.hypot(raw_x - gcx, raw_y - gcy)
+                        if d_gc <= snap_radius:
+                            candidates.append((d_gc, gcx, gcy, "GEOCEN", f"OSNAP [Geometric Center]: {slb.get('id', 'Slab')} ({gcx:.2f}, {gcy:.2f})"))
+                for op in story_data.get("openings", []):
+                    if op.get("is_polygon") and op.get("polygon_pts"):
+                        pts = op["polygon_pts"]
+                        if pts:
+                            gcx = round(sum(p[0] for p in pts) / len(pts), 3)
+                            gcy = round(sum(p[1] for p in pts) / len(pts), 3)
+                        else:
+                            continue
+                    else:
+                        omin_x, omax_x = float(op.get("min_x", 0.0)), float(op.get("max_x", 0.0))
+                        omin_y, omax_y = float(op.get("min_y", 0.0)), float(op.get("max_y", 0.0))
+                        gcx, gcy = round((omin_x + omax_x) / 2.0, 3), round((omin_y + omax_y) / 2.0, 3)
+                    d_gc = math.hypot(raw_x - gcx, raw_y - gcy)
+                    if d_gc <= snap_radius:
+                        candidates.append((d_gc, gcx, gcy, "GEOCEN", f"OSNAP [Geometric Center]: {op.get('id', 'Opening')} ({gcx:.2f}, {gcy:.2f})"))
+
+            # 3. CIRCLE (Cir: Center of circle from architectural underlay)
+            if self.osnap_modes.get("CIRCLE", True):
+                arch_block = story_data.get("arch_underlay_block")
+                if isinstance(arch_block, dict):
+                    circles = arch_block.get("circles", [])
+                    for c_info in circles:
+                        if isinstance(c_info, (list, tuple)) and len(c_info) >= 2:
+                            cx, cy = float(c_info[0]), float(c_info[1])
+                        elif isinstance(c_info, dict):
+                            cx = float(c_info.get("center_x", c_info.get("x", 0.0)))
+                            cy = float(c_info.get("center_y", c_info.get("y", 0.0)))
+                        else:
+                            continue
+                        d_cir = math.hypot(raw_x - cx, raw_y - cy)
+                        if d_cir <= snap_radius * 1.2:
+                            candidates.append((d_cir, round(cx, 3), round(cy, 3), "CIRCLE", f"OSNAP [Circle Center]: ({cx:.2f}, {cy:.2f})"))
+
+            # 4. EXTENSION (Ext: Collinear extension of beam line)
+            if self.osnap_modes.get("EXTENSION", True):
+                for bm in story_data.get("beams", []):
+                    sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+                    ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+                    dx, dy = ex - sx, ey - sy
+                    L = math.hypot(dx, dy)
+                    if L > 0.30:
+                        nx, ny = dx / L, dy / L
+                        proj = (raw_x - sx) * nx + (raw_y - sy) * ny
+                        if (-4.0 <= proj < -0.05) or (L + 0.05 < proj <= L + 4.0):
+                            ext_x = round(sx + proj * nx, 3)
+                            ext_y = round(sy + proj * ny, 3)
+                            d_ext = math.hypot(raw_x - ext_x, raw_y - ext_y)
+                            if d_ext <= snap_radius * 0.75:
+                                candidates.append((d_ext + 0.10, ext_x, ext_y, "EXTENSION", f"OSNAP [Extension]: {bm.get('id')} ({ext_x:.2f}, {ext_y:.2f})"))
 
             if candidates:
                 candidates.sort(key=lambda item: item[0])
@@ -2656,11 +2905,14 @@ class StructuralCadCanvas2D(QGraphicsView):
 
             cols = story.setdefault("columns", [])
             is_vert = self.studio.cb_col_orient.currentIndex() == 0
-            b_m = 0.20 if is_vert else 0.40
-            h_m = 0.40 if is_vert else 0.20
+            min_dims = self.studio.master_project.get("minimum_dimensions", {}) if self.studio.master_project else {}
+            col_min_w = float(min_dims.get("column_min_width_m", 0.20))
+            col_min_h = float(min_dims.get("column_min_depth_m", 0.40))
+            b_m = col_min_w if is_vert else col_min_h
+            h_m = col_min_h if is_vert else col_min_w
             boundary_mode = "clamp" if self.studio.cb_col_boundary_rule.currentIndex() == 0 else "expand"
             active_cols = [c for c in cols if c.get("active", True) and not (c.get("neck") or c.get("is_neck_column"))]
-            next_id = f"C{len(active_cols) + 1}"
+            next_id = _next_sequential_id(active_cols, "C")
             new_col = {
                 "id": next_id,
                 "x": sx,
@@ -2753,8 +3005,10 @@ class StructuralCadCanvas2D(QGraphicsView):
                 return
             cols = story.setdefault("columns", [])
             neck_cols = [c for c in cols if c.get("neck") or c.get("is_neck_column")]
-            next_id = f"NC{len(neck_cols) + 1}"
-            b_m, h_m = 0.20, 0.20
+            next_id = _next_sequential_id(neck_cols, "NC")
+            min_dims = self.studio.master_project.get("minimum_dimensions", {}) if self.studio.master_project else {}
+            b_m = float(min_dims.get("column_min_width_m", 0.20))
+            h_m = float(min_dims.get("column_min_width_m", 0.20))
             new_neck = {
                 "id": next_id,
                 "x": round(sx, 3),
@@ -2809,10 +3063,16 @@ class StructuralCadCanvas2D(QGraphicsView):
                 start_pt = self._first_click_pt
                 end_pt = (sx, sy)
                 beams = story.setdefault("beams", [])
-                next_bid = f"B{len(beams) + 1}"
+                prefix = "TB" if is_tie_story else "B"
+                next_bid = _next_sequential_id(beams, prefix)
                 b_kind = "hidden" if (tool == "DRAW_BEAM_HID" and not is_tie_story) else "drop"
-                w_m = 0.40 if b_kind == "hidden" else 0.20
-                d_m = round(self.studio.sp_adopted_thick.value() / 100.0, 2) if b_kind == "hidden" else 0.40
+                min_dims = self.studio.master_project.get("minimum_dimensions", {}) if self.studio.master_project else {}
+                if b_kind == "hidden":
+                    w_m = float(min_dims.get("hidden_beam_min_width_cm", 30.0)) / 100.0
+                    d_m = round(self.studio.sp_adopted_thick.value() / 100.0, 2)
+                else:
+                    w_m = float(min_dims.get("column_min_width_m", 0.20))
+                    d_m = float(min_dims.get("drop_beam_min_depth_cm", 40.0)) / 100.0
                 ok, bm_obj, msg = validate_and_build_beam_with_cantilevers(
                     next_bid,
                     start_pt,
@@ -2832,6 +3092,8 @@ class StructuralCadCanvas2D(QGraphicsView):
                     self.studio.update_contextual_prompt(f"Rejected Beam: {msg}")
                     self.render_story(story)
                     return
+                bm_obj["modeling_width_m"] = w_m
+                bm_obj["modeling_depth_m"] = d_m
                 beams.append(bm_obj)
                 reconcile_all_story_beams_supports_and_spans(story)
                 cascade_alerts: List[str] = []
@@ -3078,36 +3340,99 @@ class StructuralCadCanvas2D(QGraphicsView):
         openings_list = story_data.get("openings", [])
         if self.layer_show_slabs:
             for slb in story_data.get("slabs", []):
-                if "min_x" not in slb:
+                if "min_x" not in slb and "polygon" not in slb:
                     continue
-                cmin_x = float(slb.get("clear_min_x", slb["min_x"]))
-                cmax_x = float(slb.get("clear_max_x", slb["max_x"]))
-                cmin_y = float(slb.get("clear_min_y", slb["min_y"]))
-                cmax_y = float(slb.get("clear_max_y", slb["max_y"]))
+                cmin_x = float(slb.get("clear_min_x", slb.get("min_x", 0.0)))
+                cmax_x = float(slb.get("clear_max_x", slb.get("max_x", 0.0)))
+                cmin_y = float(slb.get("clear_min_y", slb.get("min_y", 0.0)))
+                cmax_y = float(slb.get("clear_max_y", slb.get("max_y", 0.0)))
                 if cmax_x <= cmin_x or cmax_y <= cmin_y:
                     continue
                 scx, scy = (cmin_x + cmax_x) / 2.0, (cmin_y + cmax_y) / 2.0
                 if any(is_point_in_opening(scx, scy, op, include_edge=False, tol=0.05) for op in openings_list):
                     continue
 
-                rect = QRectF(cmin_x * s, -cmax_y * s, (cmax_x - cmin_x) * s, (cmax_y - cmin_y) * s)
                 is_cant = bool(slb.get("is_cantilever", False))
                 is_sel_slab = ("slab", str(slb.get("id"))) in self.selected_items
                 fill_col = QColor(245, 158, 11, 42) if is_cant else QColor(56, 189, 248, 22)
                 border_pen = QPen(QColor("#F8FAFC" if is_sel_slab else "#38BDF8"), 2 if is_sel_slab else 1, Qt.PenStyle.DotLine)
-                self.scene_2d.addRect(rect, border_pen, QBrush(fill_col))
+
+                poly_coords = slb.get("polygon")
+                holes_coords = slb.get("holes", [])
+                spoly = None
+                if poly_coords and len(poly_coords) >= 3:
+                    try:
+                        from shapely.geometry import Polygon as SPoly
+                        if holes_coords:
+                            spoly = SPoly(
+                                [(float(p[0]), float(p[1])) for p in poly_coords],
+                                [[(float(hp[0]), float(hp[1])) for hp in h] for h in holes_coords],
+                            ).buffer(0)
+                        else:
+                            spoly = SPoly([(float(p[0]), float(p[1])) for p in poly_coords]).buffer(0)
+                        if spoly.is_empty or not spoly.is_valid:
+                            spoly = None
+                    except Exception:
+                        spoly = None
+
+                if spoly is not None and poly_coords:
+                    path = QPainterPath()
+                    qpoly = QPolygonF([QPointF(float(pt[0]) * s, -float(pt[1]) * s) for pt in poly_coords])
+                    path.addPolygon(qpoly)
+                    for h in holes_coords:
+                        path.addPolygon(QPolygonF([QPointF(float(pt[0]) * s, -float(pt[1]) * s) for pt in h]))
+                    self.scene_2d.addPath(path, border_pen, QBrush(fill_col))
+                else:
+                    rect = QRectF(cmin_x * s, -cmax_y * s, (cmax_x - cmin_x) * s, (cmax_y - cmin_y) * s)
+                    self.scene_2d.addRect(rect, border_pen, QBrush(fill_col))
 
                 rib_dir = int(slb.get("rib_direction_deg", 0))
                 rib_pen = QPen(QColor(234, 179, 8, 75), 1, Qt.PenStyle.DashLine)
                 if rib_dir == 0:
                     y_step = cmin_y + 0.55
                     while y_step < cmax_y - 0.15:
-                        self.scene_2d.addLine((cmin_x + 0.05) * s, -y_step * s, (cmax_x - 0.05) * s, -y_step * s, rib_pen)
+                        if spoly is not None:
+                            try:
+                                from shapely.geometry import LineString as SLine
+                                seg_line = SLine([(cmin_x - 1.0, y_step), (cmax_x + 1.0, y_step)])
+                                inter = seg_line.intersection(spoly)
+                                if inter and not inter.is_empty:
+                                    if inter.geom_type == "LineString":
+                                        coords = list(inter.coords)
+                                        if len(coords) >= 2:
+                                            self.scene_2d.addLine(coords[0][0] * s, -coords[0][1] * s, coords[-1][0] * s, -coords[-1][1] * s, rib_pen)
+                                    elif inter.geom_type == "MultiLineString":
+                                        for part in inter.geoms:
+                                            coords = list(part.coords)
+                                            if len(coords) >= 2:
+                                                self.scene_2d.addLine(coords[0][0] * s, -coords[0][1] * s, coords[-1][0] * s, -coords[-1][1] * s, rib_pen)
+                            except Exception:
+                                self.scene_2d.addLine((cmin_x + 0.05) * s, -y_step * s, (cmax_x - 0.05) * s, -y_step * s, rib_pen)
+                        else:
+                            self.scene_2d.addLine((cmin_x + 0.05) * s, -y_step * s, (cmax_x - 0.05) * s, -y_step * s, rib_pen)
                         y_step += 0.55
                 else:
                     x_step = cmin_x + 0.55
                     while x_step < cmax_x - 0.15:
-                        self.scene_2d.addLine(x_step * s, -(cmin_y + 0.05) * s, x_step * s, -(cmax_y - 0.05) * s, rib_pen)
+                        if spoly is not None:
+                            try:
+                                from shapely.geometry import LineString as SLine
+                                seg_line = SLine([(x_step, cmin_y - 1.0), (x_step, cmax_y + 1.0)])
+                                inter = seg_line.intersection(spoly)
+                                if inter and not inter.is_empty:
+                                    if inter.geom_type == "LineString":
+                                        coords = list(inter.coords)
+                                        if len(coords) >= 2:
+                                            self.scene_2d.addLine(coords[0][0] * s, -coords[0][1] * s, coords[-1][0] * s, -coords[-1][1] * s, rib_pen)
+                                    elif inter.geom_type == "MultiLineString":
+                                        for part in inter.geoms:
+                                            coords = list(part.coords)
+                                            if len(coords) >= 2:
+                                                self.scene_2d.addLine(coords[0][0] * s, -coords[0][1] * s, coords[-1][0] * s, -coords[-1][1] * s, rib_pen)
+                            except Exception:
+                                self.scene_2d.addLine(x_step * s, -(cmin_y + 0.05) * s, x_step * s, -(cmax_y - 0.05) * s, rib_pen)
+                        else:
+                            self.scene_2d.addLine(x_step * s, -(cmin_y + 0.05) * s, x_step * s, -(cmax_y - 0.05) * s, rib_pen)
                         x_step += 0.55
 
                 cx = (cmin_x + cmax_x) / 2.0
@@ -3156,7 +3481,7 @@ class StructuralCadCanvas2D(QGraphicsView):
                 sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
                 ex, ey = float(bm.get("end_x", 5.0)), float(bm.get("end_y", 0.0))
                 b_kind = bm.get("beam_kind", "hidden")
-                b_width = float(bm.get("width_m", 0.40 if b_kind == "hidden" else 0.20))
+                b_width = float(bm.get("modeling_width_m") or bm.get("initial_width_m") or bm.get("width_m", 0.30 if b_kind == "hidden" else 0.20))
                 half_w = b_width / 2.0
 
                 dx, dy = ex - sx, ey - sy
@@ -5040,6 +5365,12 @@ class XpertStudioMainWindow(QMainWindow):
                 self._solve_story_and_refresh_views()
             self.update_contextual_prompt("Applied Options (Materials, Concrete/Steel Strength & Hollow-Block Slab Parameters).")
 
+    def open_minimum_dimensions_dialog(self) -> None:
+        dlg = MinimumDimensionsDialog(self, master_project=self.master_project)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.save_and_sync_current_story()
+            self.update_contextual_prompt("Saved & Applied Minimum Dimensions and Reinforcement Defaults.")
+
     def _build_classic_menu_bar(self) -> None:
         """
         Top Menu Bar strictly ordered by structural workflow stages:
@@ -5077,6 +5408,10 @@ class XpertStudioMainWindow(QMainWindow):
         act_opts = QAction("Options (Materials & Hollow-Block Data)...", self)
         act_opts.triggered.connect(self.open_studio_options_dialog)
         m_file.addAction(act_opts)
+
+        act_min_dim_file = QAction("Minimum Dimensions...", self)
+        act_min_dim_file.triggered.connect(self.open_minimum_dimensions_dialog)
+        m_file.addAction(act_min_dim_file)
 
         # 2. VIEW MENU
         m_view = mbar.addMenu("&View")
@@ -5189,6 +5524,10 @@ class XpertStudioMainWindow(QMainWindow):
         act_opt_mat = QAction("Materials && Hollow-Block Slab Options...", self)
         act_opt_mat.triggered.connect(self.open_studio_options_dialog)
         m_options.addAction(act_opt_mat)
+
+        act_opt_min_dim = QAction("Minimum Dimensions...", self)
+        act_opt_min_dim.triggered.connect(self.open_minimum_dimensions_dialog)
+        m_options.addAction(act_opt_min_dim)
 
     def _build_separated_toolbars(self) -> None:
         # ======================================================================
@@ -5588,6 +5927,18 @@ class XpertStudioMainWindow(QMainWindow):
         self.btn_osnap_perp = make_status_pill("Perp", "#0284C7")
         bot_row.addWidget(self.btn_osnap_perp)
 
+        self.btn_osnap_int = make_status_pill("Int", "#0284C7")
+        bot_row.addWidget(self.btn_osnap_int)
+
+        self.btn_osnap_geocen = make_status_pill("GeoCen", "#0284C7")
+        bot_row.addWidget(self.btn_osnap_geocen)
+
+        self.btn_osnap_cir = make_status_pill("Cir", "#0284C7")
+        bot_row.addWidget(self.btn_osnap_cir)
+
+        self.btn_osnap_ext = make_status_pill("Ext", "#0284C7")
+        bot_row.addWidget(self.btn_osnap_ext)
+
         self.btn_ortho_bar = make_status_pill("ORTHO [F8]", "#0891B2")
         bot_row.addWidget(self.btn_ortho_bar)
 
@@ -5630,6 +5981,10 @@ class XpertStudioMainWindow(QMainWindow):
         self.cad_canvas.osnap_modes["MIDPOINT"] = self.btn_osnap_mid.isChecked()
         self.cad_canvas.osnap_modes["CENTER"] = self.btn_osnap_cen.isChecked()
         self.cad_canvas.osnap_modes["PERPENDICULAR"] = self.btn_osnap_perp.isChecked()
+        self.cad_canvas.osnap_modes["INTERSECTION"] = self.btn_osnap_int.isChecked()
+        self.cad_canvas.osnap_modes["GEOCEN"] = self.btn_osnap_geocen.isChecked()
+        self.cad_canvas.osnap_modes["CIRCLE"] = self.btn_osnap_cir.isChecked()
+        self.cad_canvas.osnap_modes["EXTENSION"] = self.btn_osnap_ext.isChecked()
         self.cad_canvas.ortho_enabled = self.btn_ortho_bar.isChecked()
         self.cad_canvas.grid_snap_enabled = self.btn_grid_snap_bar.isChecked()
 
@@ -6476,9 +6831,24 @@ class XpertStudioMainWindow(QMainWindow):
         beams = self.current_story_data.get("beams", [])
         if not beams:
             return False
+
+        # Preserve modeling dimensions before analysis
+        for bm in beams:
+            m_w = float(bm.get("modeling_width_m") or bm.get("initial_width_m") or bm.get("width_m", 0.30))
+            m_d = float(bm.get("modeling_depth_m") or bm.get("initial_depth_m") or bm.get("depth_m", 0.40))
+            bm["modeling_width_m"] = m_w
+            bm["modeling_depth_m"] = m_d
+
         fc = float(self.master_project["materials_and_soil"]["fc_mpa"])
         fy = float(self.master_project["materials_and_soil"]["fy_mpa"])
         self.last_analysis_bundle = analyze_all_story_beams_and_columns(self.current_story_data, fc, fy)
+
+        # Store designed dimensions in designed_width_m/designed_depth_m and restore modeling dimensions to width_m/depth_m
+        for bm in beams:
+            bm["designed_width_m"] = float(bm.get("width_m", bm["modeling_width_m"]))
+            bm["designed_depth_m"] = float(bm.get("depth_m", bm["modeling_depth_m"]))
+            bm["width_m"] = bm["modeling_width_m"]
+            bm["depth_m"] = bm["modeling_depth_m"]
 
         self.beam_diagrams_view.populate_results(self.current_story_data, self.last_analysis_bundle, select_beam_id=select_beam_id)
         self.beam_design_view.populate_results(self.current_story_data, self.last_analysis_bundle, select_beam_id=select_beam_id)

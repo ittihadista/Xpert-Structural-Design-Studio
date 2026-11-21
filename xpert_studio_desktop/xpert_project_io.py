@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.5.0-structural-bim-pro)
+Xpert Structural Design Studio (v2.5.03-structural-bim-pro)
 Module: xpert_project_io.py
 Lead Engineer: Eng. Yousef Mohammed Keshlaf
 
@@ -30,7 +30,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.5.0-structural-bim-pro"
+STUDIO_VERSION = "v2.5.03-structural-bim-pro"
 MASTER_FILE_EXT = ".xsd"
 
 _LOG_LOCK = threading.Lock()
@@ -170,6 +170,22 @@ def _normalize_rebar_table(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [by_dia[d] for d in sorted(by_dia.keys())]
 
 
+DEFAULT_MINIMUM_DIMENSIONS: Dict[str, Any] = {
+    "hidden_beam_min_width_cm": 30.0,
+    "drop_beam_min_depth_cm": 40.0,
+    "beam_main_rebar_dia_mm": 16,
+    "beam_stirrup_dia_mm": 8,
+    "column_min_width_m": 0.20,
+    "column_min_depth_m": 0.40,
+    "column_main_rebar_dia_mm": 16,
+    "column_stirrup_dia_mm": 8,
+    "footing_min_thickness_m": 0.30,
+    "footing_min_width_b_m": 0.80,
+    "footing_min_length_l_m": 0.80,
+    "footing_main_rebar_dia_mm": 14,
+}
+
+
 def load_studio_global_settings() -> Dict[str, Any]:
     default_root = os.path.abspath("./XpertStudio_Projects")
     mat_defaults = {
@@ -214,11 +230,12 @@ def load_studio_global_settings() -> Dict[str, Any]:
     rebar_table = _normalize_rebar_table(DEFAULT_REBAR_DIAMETERS_TABLE)
 
     defaults: Dict[str, Any] = {
-        "schema_version": "2.5.0",
+        "schema_version": "2.5.03",
         "default_projects_root_folder": default_root,
         "default_stirrup_bar_mm": 6,
         "default_main_bar_mm": 16,
         "rebar_diameters_table": rebar_table,
+        "minimum_dimensions": dict(DEFAULT_MINIMUM_DIMENSIONS),
         "materials_and_soil": dict(mat_defaults),
         "hollow_block_slab_data": dict(hb_defaults),
         "startup_defaults": {
@@ -231,6 +248,7 @@ def load_studio_global_settings() -> Dict[str, Any]:
         "options": {
             "materials": dict(mat_defaults),
             "hollow_block_slab": dict(hb_defaults),
+            "minimum_dimensions": dict(DEFAULT_MINIMUM_DIMENSIONS),
         },
     }
     fpath = _get_global_settings_file_path()
@@ -248,6 +266,8 @@ def load_studio_global_settings() -> Dict[str, Any]:
                     defaults["default_main_bar_mm"] = int(saved["default_main_bar_mm"])
                 if isinstance(saved.get("rebar_diameters_table"), list):
                     defaults["rebar_diameters_table"] = _normalize_rebar_table(saved["rebar_diameters_table"])
+                if isinstance(saved.get("minimum_dimensions"), dict):
+                    defaults["minimum_dimensions"].update(saved["minimum_dimensions"])
                 if isinstance(saved.get("materials_and_soil"), dict):
                     defaults["materials_and_soil"].update(saved["materials_and_soil"])
                 if isinstance(saved.get("hollow_block_slab_data"), dict):
@@ -484,6 +504,10 @@ def load_studio_project_from_master_file(master_path: str) -> Dict[str, Any]:
     master_payload["project_dir"] = project_dir
     master_payload["master_file"] = canonical_xsd
 
+    min_dims = master_payload.setdefault("minimum_dimensions", dict(DEFAULT_MINIMUM_DIMENSIONS))
+    for k, v in DEFAULT_MINIMUM_DIMENSIONS.items():
+        min_dims.setdefault(k, v)
+
     mats = master_payload.setdefault("materials_and_soil", {})
     if float(mats.get("gamma_c_kn_m3", 24.0)) == 25.0:
         mats["gamma_c_kn_m3"] = 24.0
@@ -706,6 +730,20 @@ def initialize_studio_project(config: Dict[str, Any]) -> Dict[str, Any]:
             "drop_beam_min_depth_cm": float(config.get("drop_beam_min_depth_cm", 40.0)),
             "wall_width_cm": float(config.get("wall_width_cm", 20.0)),
             "hollow_block_defaults": hordi_defaults,
+        },
+        "minimum_dimensions": {
+            "hidden_beam_min_width_cm": float(config.get("hidden_beam_min_width_cm", 30.0)),
+            "drop_beam_min_depth_cm": float(config.get("drop_beam_min_depth_cm", 40.0)),
+            "beam_main_rebar_dia_mm": int(config.get("beam_main_rebar_dia_mm", 16)),
+            "beam_stirrup_dia_mm": int(config.get("beam_stirrup_dia_mm", 8)),
+            "column_min_width_m": float(config.get("column_min_width_m", 0.20)),
+            "column_min_depth_m": float(config.get("column_min_depth_m", 0.40)),
+            "column_main_rebar_dia_mm": int(config.get("column_main_rebar_dia_mm", 16)),
+            "column_stirrup_dia_mm": int(config.get("column_stirrup_dia_mm", 8)),
+            "footing_min_thickness_m": float(config.get("footing_min_thickness_m", 0.30)),
+            "footing_min_width_b_m": float(config.get("footing_min_width_b_m", 0.80)),
+            "footing_min_length_l_m": float(config.get("footing_min_length_l_m", 0.80)),
+            "footing_main_rebar_dia_mm": int(config.get("footing_main_rebar_dia_mm", 14)),
         },
         "stories": [],
     }

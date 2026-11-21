@@ -15,8 +15,19 @@ Core Structural Analysis, Optimization & ACI 318 Design Engine:
 """
 
 from __future__ import annotations
+import copy
 import math
 from typing import Dict, Any, List, Optional, Tuple
+
+try:
+    from shapely.geometry import Polygon, LineString, Point, MultiPolygon
+    from shapely.ops import unary_union
+except ImportError:
+    Polygon = None
+    LineString = None
+    Point = None
+    MultiPolygon = None
+    unary_union = None
 
 try:
     from xpert_project_io import log_studio_event as _io_log_studio_event
@@ -1335,8 +1346,8 @@ def analyze_all_story_beams_and_columns(
                         if s_bounds is None:
                             continue
                         smin_x, smax_x, smin_y, smax_y = s_bounds
-                        lx_0 = max(0.5, smax_x - smin_x)
-                        ly_0 = max(0.5, smax_y - smin_y)
+                        lx_0 = max(0.40, float(slb.get("clear_max_x", smax_x)) - float(slb.get("clear_min_x", smin_x)))
+                        ly_0 = max(0.40, float(slb.get("clear_max_y", smax_y)) - float(slb.get("clear_min_y", smin_y)))
                         rib_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
                         is_cant_slb = bool(slb.get("is_cantilever", False))
                         sid_lbl = str(slb.get("id", "S"))
@@ -2694,6 +2705,90 @@ def reconcile_all_story_beams_supports_and_spans(story_data: Dict[str, Any]) -> 
             ensure_beam_wall_flags(story_data, bm)
 
 
+def clamp_beam_inside_slab_polygon(
+    sx: float,
+    sy: float,
+    ex: float,
+    ey: float,
+    width_m: float,
+    slab_edge_polygon: List[List[float]],
+) -> Tuple[float, float, float, float, bool]:
+    """
+    Shifts a beam laterally inward and trims longitudinal protrusion so its ENTIRE
+    physical rectangle (`width_m`) lies strictly inside the stepped `slab_edge_polygon`.
+    Returns: (new_sx, new_sy, new_ex, new_ey, was_shifted)
+    """
+    if not slab_edge_polygon or len(slab_edge_polygon) < 3:
+        return sx, sy, ex, ey, False
+    try:
+        from shapely.geometry import Polygon, LineString
+    except ImportError:
+        return sx, sy, ex, ey, False
+
+    roof_poly = Polygon([(float(p[0]), float(p[1])) for p in slab_edge_polygon])
+    if not roof_poly.is_valid:
+        roof_poly = roof_poly.buffer(0)
+    if roof_poly.is_empty:
+        return sx, sy, ex, ey, False
+
+    roof_tol = roof_poly.buffer(0.015)
+    is_horiz = abs(ex - sx) >= abs(ey - sy)
+    half_w = float(width_m) / 2.0
+    orig_sx, orig_sy, orig_ex, orig_ey = sx, sy, ex, ey
+
+    def make_beam_poly(x1: float, y1: float, x2: float, y2: float) -> Polygon:
+        if is_horiz:
+            return Polygon([
+                (min(x1, x2), y1 - half_w), (max(x1, x2), y1 - half_w),
+                (max(x1, x2), y1 + half_w), (min(x1, x2), y1 + half_w),
+            ])
+        return Polygon([
+            (x1 - half_w, min(y1, y2)), (x1 + half_w, min(y1, y2)),
+            (x1 + half_w, max(y1, y2)), (x1 - half_w, max(y1, y2)),
+        ])
+
+    if make_beam_poly(sx, sy, ex, ey).within(roof_tol):
+        return sx, sy, ex, ey, False
+
+    # Step 1: Lateral shift inward (search +/- perpendicular up to width_m + 0.15m)
+    best_shift = 0.0
+    best_outside_area = make_beam_poly(sx, sy, ex, ey).difference(roof_tol).area
+    max_steps = int(round((width_m + 0.15) / 0.01))
+    for step in range(1, max_steps + 1):
+        delta = round(step * 0.01, 3)
+        for sign in (1.0, -1.0):
+            cand_d = sign * delta
+            bp = make_beam_poly(sx, sy + cand_d, ex, ey + cand_d) if is_horiz else make_beam_poly(sx + cand_d, sy, ex + cand_d, ey)
+            out_area = bp.difference(roof_tol).area
+            if out_area < best_outside_area - 1e-6:
+                best_outside_area = out_area
+                best_shift = cand_d
+            if out_area <= 1e-5:
+                break
+        if best_outside_area <= 1e-5:
+            break
+
+    if abs(best_shift) > 1e-4:
+        if is_horiz:
+            sy = ey = round(sy + best_shift, 3)
+        else:
+            sx = ex = round(sx + best_shift, 3)
+
+    # Step 2: Trim longitudinal endpoints strictly to roof_poly if still protruding lengthwise
+    if not make_beam_poly(sx, sy, ex, ey).within(roof_tol):
+        line = LineString([(sx, sy), (ex, ey)])
+        inter = line.intersection(roof_poly)
+        if not inter.is_empty:
+            bx1, by1, bx2, by2 = inter.bounds
+            if is_horiz and (bx2 - bx1) >= 0.40:
+                sx, ex = round(bx1, 3), round(bx2, 3)
+            elif (not is_horiz) and (by2 - by1) >= 0.40:
+                sy, ey = round(by1, 3), round(by2, 3)
+
+    changed = (abs(sx - orig_sx) > 1e-4 or abs(sy - orig_sy) > 1e-4 or abs(ex - orig_ex) > 1e-4 or abs(ey - orig_ey) > 1e-4)
+    return sx, sy, ex, ey, changed
+
+
 def validate_and_build_beam_with_cantilevers(
     beam_id: str,
     start_pt: Tuple[float, float],
@@ -2924,11 +3019,19 @@ def validate_and_build_beam_with_cantilevers(
         else:
             sx, ex, sy, ey = round(sx, 3), round(ex, 3), round(sy, 3), round(ey, 3)
 
+    # Contain full beam body inside stepped polygon using Shapely
+    if has_bnd and slab_edge_polygon and len(slab_edge_polygon) >= 3:
+        sx, sy, ex, ey, was_clamped = clamp_beam_inside_slab_polygon(
+            sx, sy, ex, ey, width_m, slab_edge_polygon
+        )
+        if was_clamped:
+            shifted_note += f" [Clamped beam {beam_id} ({width_m:.2f}m) inside stepped slab polygon]"
+
     total_len = round(math.hypot(ex - sx, ey - sy), 3)
     if total_len < 0.40:
         return False, None, "Beam length is too short (< 0.40 m)."
 
-    # Prevent Duplicate Overlapping Beams along the same axis
+    # Prevent Duplicate Overlapping Beams along the same axis (while allowing 2 collinear beams sharing a column)
     for ob in existing_beams:
         if ob.get("id") == beam_id:
             continue
@@ -2936,12 +3039,36 @@ def validate_and_build_beam_with_cantilevers(
         oex, oey = float(ob.get("end_x", 0.0)), float(ob.get("end_y", 0.0))
         ob_horiz = abs(oex - osx) >= abs(oey - osy)
         if is_horizontal and ob_horiz and abs(sy - osy) <= 0.25:
-            ov = min(ex, max(osx, oex)) - max(sx, min(osx, oex))
-            if ov > 0.35:
+            new_a, new_b = min(sx, ex), max(sx, ex)
+            old_a, old_b = min(osx, oex), max(osx, oex)
+            for s in supports_raw:
+                s_id = str(s.get("target_id", ""))
+                s_coord = float(s.get("coord", 0.0))
+                if any(str(osup.get("target_id")) == s_id for osup in ob.get("supports", [])):
+                    if old_a < s_coord < new_b and abs(old_b - new_a) <= float(s.get("width_m", 0.40)) + 0.15:
+                        old_b = s_coord
+                        new_a = s_coord
+                    elif new_a < s_coord < old_b and abs(new_b - old_a) <= float(s.get("width_m", 0.40)) + 0.15:
+                        new_b = s_coord
+                        old_a = s_coord
+            ov = min(new_b, old_b) - max(new_a, old_a)
+            if ov > 0.20:
                 return False, None, f"Duplicate Beam Prevented: Overlaps existing horizontal beam {ob['id']}."
         elif (not is_horizontal) and (not ob_horiz) and abs(sx - osx) <= 0.25:
-            ov = min(ey, max(osy, oey)) - max(sy, min(osy, oey))
-            if ov > 0.35:
+            new_a, new_b = min(sy, ey), max(sy, ey)
+            old_a, old_b = min(osy, oey), max(osy, oey)
+            for s in supports_raw:
+                s_id = str(s.get("target_id", ""))
+                s_coord = float(s.get("coord", 0.0))
+                if any(str(osup.get("target_id")) == s_id for osup in ob.get("supports", [])):
+                    if old_a < s_coord < new_b and abs(old_b - new_a) <= float(s.get("width_m", 0.40)) + 0.15:
+                        old_b = s_coord
+                        new_a = s_coord
+                    elif new_a < s_coord < old_b and abs(new_b - old_a) <= float(s.get("width_m", 0.40)) + 0.15:
+                        new_b = s_coord
+                        old_a = s_coord
+            ov = min(new_b, old_b) - max(new_a, old_a)
+            if ov > 0.20:
                 return False, None, f"Duplicate Beam Prevented: Overlaps existing vertical beam {ob['id']}."
 
     start_coord = sx if is_horizontal else sy
@@ -2963,7 +3090,8 @@ def validate_and_build_beam_with_cantilevers(
 
     edge_margin = 0.45
     if has_bnd and cant_left > 0.35:
-        tip_at_boundary = (abs(sx - min_x) <= edge_margin) if is_horizontal else (abs(sy - min_y) <= edge_margin)
+        dist_left = _min_dist_to_poly_edges(sx, sy, slab_edge_polygon)
+        tip_at_boundary = (dist_left <= edge_margin) or (not _point_in_polygon_2d(sx, sy, slab_edge_polygon))
         if not tip_at_boundary:
             return (
                 False,
@@ -2972,7 +3100,8 @@ def validate_and_build_beam_with_cantilevers(
                 "A cantilever must terminate at a free outer slab boundary edge or rest on a support.",
             )
     if has_bnd and cant_right > 0.35:
-        tip_at_boundary = (abs(ex - max_x) <= edge_margin) if is_horizontal else (abs(ey - max_y) <= edge_margin)
+        dist_right = _min_dist_to_poly_edges(ex, ey, slab_edge_polygon)
+        tip_at_boundary = (dist_right <= edge_margin) or (not _point_in_polygon_2d(ex, ey, slab_edge_polygon))
         if not tip_at_boundary:
             return (
                 False,
@@ -3015,6 +3144,10 @@ def validate_and_build_beam_with_cantilevers(
         "beam_kind": beam_kind,
         "width_m": width_m,
         "depth_m": depth_m,
+        "initial_width_m": width_m,
+        "initial_depth_m": depth_m,
+        "modeling_width_m": width_m,
+        "modeling_depth_m": depth_m,
         "start_x": sx,
         "start_y": sy,
         "end_x": ex,
@@ -3076,19 +3209,19 @@ def has_beam_on_segment(story_data: Dict[str, Any], x1: float, y1: float, x2: fl
         bsx, bsy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
         bex, bey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
         b_width = float(bm.get("width_m", 0.40))
-        tol_lat = max(0.20, b_width / 2.0 + 0.08)
+        tol_lat = max(0.25, b_width / 2.0 + 0.08)
         b_horiz = abs(bex - bsx) >= abs(bey - bsy)
         if is_seg_horiz and b_horiz and abs(bsy - y1) <= tol_lat:
             b_min, b_max = min(bsx, bex), max(bsx, bex)
             s_min, s_max = min(x1, x2), max(x1, x2)
             ov = min(b_max + 0.05, s_max) - max(b_min - 0.05, s_min)
-            if ov >= seg_len * 0.60:
+            if ov >= seg_len * 0.50:
                 return bm
         elif (not is_seg_horiz) and (not b_horiz) and abs(bsx - x1) <= tol_lat:
             b_min, b_max = min(bsy, bey), max(bsy, bey)
             s_min, s_max = min(y1, y2), max(y1, y2)
             ov = min(b_max + 0.05, s_max) - max(b_min - 0.05, s_min)
-            if ov >= seg_len * 0.60:
+            if ov >= seg_len * 0.50:
                 return bm
     return None
 
@@ -3127,17 +3260,11 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     for bm in beams:
         sx, sy = round(float(bm.get("start_x", 0.0)), 3), round(float(bm.get("start_y", 0.0)), 3)
         ex, ey = round(float(bm.get("end_x", 0.0)), 3), round(float(bm.get("end_y", 0.0)), 3)
-        b_width = float(bm.get("width_m", 0.40))
-        edge_snap_margin = max(0.45, b_width + 0.15)
         if abs(ex - sx) >= abs(ey - sy):
-            if abs(sy - min_y) <= edge_snap_margin or abs(sy - max_y) <= edge_snap_margin:
-                continue
-            if min_y < sy < max_y and all(abs(sy - existing_y) > 0.45 for existing_y in ys):
+            if min_y < sy < max_y and all(abs(sy - existing_y) > 0.05 for existing_y in ys):
                 ys.append(sy)
         else:
-            if abs(sx - min_x) <= edge_snap_margin or abs(sx - max_x) <= edge_snap_margin:
-                continue
-            if min_x < sx < max_x and all(abs(sx - existing_x) > 0.45 for existing_x in xs):
+            if min_x < sx < max_x and all(abs(sx - existing_x) > 0.05 for existing_x in xs):
                 xs.append(sx)
 
     sorted_x = sorted(xs)
@@ -3172,11 +3299,11 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw_rects: List[Dict[str, Any]] = []
     for j in range(len(sorted_y) - 1):
         y_bot, y_top = sorted_y[j], sorted_y[j + 1]
-        if (y_top - y_bot) < 0.65:
+        if (y_top - y_bot) < 0.20:
             continue
         for i in range(len(sorted_x) - 1):
             x_left, x_right = sorted_x[i], sorted_x[i + 1]
-            if (x_right - x_left) < 0.65:
+            if (x_right - x_left) < 0.20:
                 continue
             cx, cy = (x_left + x_right) / 2.0, (y_bot + y_top) / 2.0
             if not _point_in_polygon_2d(cx, cy, poly):
@@ -3249,7 +3376,7 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         y_bot, y_top = rc["min_y"], rc["max_y"]
         lx = round(x_right - x_left, 3)
         ly = round(y_top - y_bot, 3)
-        if lx < 0.85 or ly < 0.85:
+        if lx < 0.60 or ly < 0.60:
             continue
 
         bm_top = has_beam_on_segment(x_left, y_top, x_right, y_top)
@@ -3304,6 +3431,9 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         else:
             clear_max_y = round(y_top - w_top_in, 3)
 
+        clear_lx = round(max(0.40, clear_max_x - clear_min_x), 3)
+        clear_ly = round(max(0.40, clear_max_y - clear_min_y), 3)
+
         bays.append({
             "bay_key": f"BAY_{round(x_left*10)}_{round(y_bot*10)}_{round(x_right*10)}_{round(y_top*10)}",
             "default_id": f"S{bay_counter}",
@@ -3317,8 +3447,12 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             "clear_max_x": clear_max_x,
             "clear_min_y": clear_min_y,
             "clear_max_y": clear_max_y,
-            "lx_m": lx,
-            "ly_m": ly,
+            "clear_lx": clear_lx,
+            "clear_ly": clear_ly,
+            "lx_m": clear_lx,
+            "ly_m": clear_ly,
+            "centerline_lx_m": lx,
+            "centerline_ly_m": ly,
             "bounding_beams": bounding_sides,
             "poly_sides": poly_sides,
             "beam_count": effective_beam_count,
@@ -3326,6 +3460,39 @@ def detect_story_grid_bays(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
         bay_counter += 1
     return bays
+
+
+def _is_adjacent_across_side(s1: Dict[str, Any], s2: Dict[str, Any], carrier_side: str) -> bool:
+    """
+    Checks if s2 is directly adjacent to s1 across carrier_side ('North', 'South', 'East', 'West')
+    using clear coordinates and boundary alignment.
+    """
+    s1_min_x = float(s1.get("clear_min_x", s1.get("min_x", 0.0)))
+    s1_max_x = float(s1.get("clear_max_x", s1.get("max_x", 0.0)))
+    s1_min_y = float(s1.get("clear_min_y", s1.get("min_y", 0.0)))
+    s1_max_y = float(s1.get("clear_max_y", s1.get("max_y", 0.0)))
+
+    s2_min_x = float(s2.get("clear_min_x", s2.get("min_x", 0.0)))
+    s2_max_x = float(s2.get("clear_max_x", s2.get("max_x", 0.0)))
+    s2_min_y = float(s2.get("clear_min_y", s2.get("min_y", 0.0)))
+    s2_max_y = float(s2.get("clear_max_y", s2.get("max_y", 0.0)))
+
+    ov_x = min(s1_max_x, s2_max_x) - max(s1_min_x, s2_min_x)
+    ov_y = min(s1_max_y, s2_max_y) - max(s1_min_y, s2_min_y)
+
+    if carrier_side == "North":
+        gap = s2_min_y - s1_max_y
+        return -0.15 <= gap <= 0.65 and ov_x >= 0.35
+    elif carrier_side == "South":
+        gap = s1_min_y - s2_max_y
+        return -0.15 <= gap <= 0.65 and ov_x >= 0.35
+    elif carrier_side == "East":
+        gap = s2_min_x - s1_max_x
+        return -0.15 <= gap <= 0.65 and ov_y >= 0.35
+    elif carrier_side == "West":
+        gap = s1_min_x - s2_max_x
+        return -0.15 <= gap <= 0.65 and ov_y >= 0.35
+    return False
 
 
 def _find_adjacent_backspan_bays(
@@ -3341,8 +3508,19 @@ def _find_adjacent_backspan_bays(
     tmin_y, tmax_y = float(target_bay["min_y"]), float(target_bay["max_y"])
     matches: List[Dict[str, Any]] = []
 
+    carrier_side = "North" if cantilever_free_side == "South" else (
+        "South" if cantilever_free_side == "North" else (
+            "West" if cantilever_free_side == "East" else "East"
+        )
+    )
+
     for b in all_bays:
-        if b["bay_key"] == target_bay["bay_key"]:
+        if b is target_bay:
+            continue
+        if target_bay.get("bay_key") and b.get("bay_key") == target_bay.get("bay_key"):
+            continue
+        if _is_adjacent_across_side(target_bay, b, carrier_side):
+            matches.append(b)
             continue
         bmin_x, bmax_x = float(b["min_x"]), float(b["max_x"])
         bmin_y, bmax_y = float(b["min_y"]), float(b["max_y"])
@@ -3351,60 +3529,70 @@ def _find_adjacent_backspan_bays(
 
         if cantilever_free_side == "South":
             # Supporting carrier beam is on the North edge of target_bay (y = tmax_y)
-            if abs(bmin_y - tmax_y) <= 0.35 and ov_x >= 0.40:
+            if abs(bmin_y - tmax_y) <= 0.45 and ov_x >= 0.35:
                 matches.append(b)
         elif cantilever_free_side == "North":
             # Supporting carrier beam is on the South edge of target_bay (y = tmin_y)
-            if abs(bmax_y - tmin_y) <= 0.35 and ov_x >= 0.40:
+            if abs(bmax_y - tmin_y) <= 0.45 and ov_x >= 0.35:
                 matches.append(b)
         elif cantilever_free_side == "East":
             # Supporting carrier beam is on the West edge of target_bay (x = tmin_x)
-            if abs(bmax_x - tmin_x) <= 0.35 and ov_y >= 0.40:
+            if abs(bmax_x - tmin_x) <= 0.45 and ov_y >= 0.35:
                 matches.append(b)
         elif cantilever_free_side == "West":
             # Supporting carrier beam is on the East edge of target_bay (x = tmax_x)
-            if abs(bmin_x - tmax_x) <= 0.35 and ov_y >= 0.40:
+            if abs(bmin_x - tmax_x) <= 0.45 and ov_y >= 0.35:
                 matches.append(b)
     return matches
 
 
-def _detect_cantilever_free_side(
+def _detect_all_cantilever_free_sides(
     story_data: Dict[str, Any],
     target_bay: Dict[str, Any],
     all_bays: List[Dict[str, Any]],
-) -> Optional[str]:
+) -> List[str]:
     """
-    Determines if `target_bay` is a structural cantilever overhang (and returns which outer edge is free:
-    'South', 'North', 'East', or 'West').
-    Handles:
-    1. 3-Beam Bays where one perimeter side has no beam (`sides[side] is None`).
-    2. Pure Cantilever Balcony Bays bounded by 1 carrier beam + 3 building boundary edges.
-    3. Overhanging Cantilever Bays that project beyond the outer column line (where side beams have
-       cantilever overhangs or no columns exist along the outer perimeter edge while a carrier beam
-       separates it from an interior back-span bay).
+    Returns ALL outer free perimeter edges for `target_bay` (e.g. ['East', 'South'] for a Corner Cantilever).
     """
-    sides = target_bay["bounding_beams"]
-    raw_bc = int(target_bay.get("raw_beam_count", target_bay["beam_count"]))
+    if target_bay.get("cantilever_free_edges"):
+        return list(target_bay["cantilever_free_edges"])
+
+    sides = target_bay.get("bounding_beams", {})
+    poly_sides = target_bay.get("poly_sides", {})
+    free_sides: List[str] = []
+
+    # 1. Sides with no beam and an outer polygon edge, with supporting beam on opposite side
+    for free_side, opp_side in (("West", "East"), ("East", "West"), ("South", "North"), ("North", "South")):
+        if sides.get(free_side) is None and poly_sides.get(free_side, False) and sides.get(opp_side) is not None:
+            if free_side not in free_sides:
+                free_sides.append(free_side)
+
+    # 2. 3-beam bays or 2-beam corner bays where beam is missing
+    raw_bc = int(target_bay.get("raw_beam_count", target_bay.get("beam_count", 4)))
     if raw_bc == 3:
         for side_name in ("South", "North", "East", "West"):
-            if sides.get(side_name) is None:
-                return side_name
+            if sides.get(side_name) is None and side_name not in free_sides:
+                free_sides.append(side_name)
     elif raw_bc == 1:
         if sides.get("North") is not None and _find_adjacent_backspan_bays(target_bay, all_bays, "South"):
-            return "South"
+            if "South" not in free_sides:
+                free_sides.append("South")
         if sides.get("South") is not None and _find_adjacent_backspan_bays(target_bay, all_bays, "North"):
-            return "North"
+            if "North" not in free_sides:
+                free_sides.append("North")
         if sides.get("West") is not None and _find_adjacent_backspan_bays(target_bay, all_bays, "East"):
-            return "East"
+            if "East" not in free_sides:
+                free_sides.append("East")
         if sides.get("East") is not None and _find_adjacent_backspan_bays(target_bay, all_bays, "West"):
-            return "West"
+            if "West" not in free_sides:
+                free_sides.append("West")
 
-    # Check if this bay is an overhanging balcony/cantilever projecting on the OUTER perimeter of the building
-    # (meaning there is NO bay on the free side, it lies on the outer building perimeter, and an interior back-span bay exists on the opposite side).
+    # 3. Check perimeter overhang
     cols = [c for c in story_data.get("columns", []) if c.get("active", True)]
     tmin_x, tmax_x = float(target_bay["min_x"]), float(target_bay["max_x"])
     tmin_y, tmax_y = float(target_bay["min_y"]), float(target_bay["max_y"])
-    lx, ly = float(target_bay["lx_m"]), float(target_bay["ly_m"])
+    lx = float(target_bay.get("clear_lx", target_bay["lx_m"]))
+    ly = float(target_bay.get("clear_ly", target_bay["ly_m"]))
     has_bnd, poly_min_x, poly_min_y, poly_max_x, poly_max_y = get_slab_bounding_box(
         story_data.get("slab_edge_polygon", [])
     )
@@ -3426,14 +3614,16 @@ def _detect_cantilever_free_side(
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "North")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "South")
         ):
-            return "South"
+            if "South" not in free_sides:
+                free_sides.append("South")
         if (
             (not has_bnd or abs(tmax_y - poly_max_y) <= 0.35)
             and not has_col_near_edge(tmin_x, tmax_y, tmax_x, tmax_y)
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "South")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "North")
         ):
-            return "North"
+            if "North" not in free_sides:
+                free_sides.append("North")
     if lx <= 2.60:
         if (
             (not has_bnd or abs(tmax_x - poly_max_x) <= 0.35)
@@ -3441,15 +3631,31 @@ def _detect_cantilever_free_side(
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "West")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "East")
         ):
-            return "East"
+            if "East" not in free_sides:
+                free_sides.append("East")
         if (
             (not has_bnd or abs(tmin_x - poly_min_x) <= 0.35)
             and not has_col_near_edge(tmin_x, tmin_y, tmin_x, tmax_y)
             and not _find_adjacent_backspan_bays(target_bay, all_bays, "East")
             and _find_adjacent_backspan_bays(target_bay, all_bays, "West")
         ):
-            return "West"
-    return None
+            if "West" not in free_sides:
+                free_sides.append("West")
+
+    return free_sides
+
+
+def _detect_cantilever_free_side(
+    story_data: Dict[str, Any],
+    target_bay: Dict[str, Any],
+    all_bays: List[Dict[str, Any]],
+) -> Optional[str]:
+    """
+    Determines if `target_bay` is a structural cantilever overhang (and returns which outer edge is free:
+    'South', 'North', 'East', or 'West').
+    """
+    all_free = _detect_all_cantilever_free_sides(story_data, target_bay, all_bays)
+    return all_free[0] if all_free else None
 
 
 def _find_controlling_cantilever_slabs_for_bay(
@@ -3627,33 +3833,293 @@ def reconcile_and_split_slabs_after_beam_change(story_data: Dict[str, Any]) -> T
         return 0, f"Slab reconciliation note: {exc}"
 
 
+def infer_story_slabs_shapely(story_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Infers all Hollow-Block Slab bays (00-XD-SLAB) by performing direct Shapely Boolean Subtraction:
+        Slabs = Boundary (00-XD-EDGE) - Openings (00-XD-OPEN) - Beams (00-XD-BEAM)
+
+    Strict Architectural & BIM Rules:
+    1. Built using exact beam modeling widths float(bm.get('modeling_width_m') or bm.get('initial_width_m') or ...).
+    2. Zero Slivers Filter: Discards any residual polygon with area < 0.30 m² or min(lx, ly) < 0.25 m.
+    3. Clear face-to-face dimensions clear_min_x, clear_max_x, clear_min_y, clear_max_y stored alongside
+       centerline coordinates min_x, max_x, min_y, max_y and polygon vertices.
+    4. Accurate Bearing Beam Detection: A beam is considered bearing for a side (North, South, East, West)
+       only if its shared contact length with the slab boundary >= 0.35 m (eliminates end-touch errors).
+    5. Automatic Cantilever Detection: Identifies single-beam balconies and corner cantilevers (>= 2 free edges)
+       and enforces Cantilever Back-Span continuity and locks.
+    """
+    edge_pts = story_data.get("slab_edge_polygon", [])
+    if not edge_pts or len(edge_pts) < 3:
+        return []
+
+    try:
+        from shapely.geometry import Polygon as SPolygon, LineString as SLineString
+        from shapely.ops import unary_union as s_unary_union
+    except ImportError:
+        return []
+
+    roof_poly = SPolygon([(float(p[0]), float(p[1])) for p in edge_pts]).buffer(0)
+    if roof_poly.is_empty or roof_poly.area < 0.30:
+        return []
+
+    # 1. Collect Void Openings
+    openings = story_data.get("openings", [])
+    op_polys: List[SPolygon] = []
+    for op in openings:
+        op_norm = normalize_opening_dict(op)
+        pts = op_norm.get("polygon", [])
+        if len(pts) >= 3:
+            opp = SPolygon(pts).buffer(0)
+            if not opp.is_empty and opp.area > 0.05:
+                op_polys.append(opp)
+    op_union = s_unary_union(op_polys).buffer(0) if op_polys else None
+
+    # 2. Collect Beams & Footprints
+    beams = story_data.get("beams", [])
+    beam_polys: List[SPolygon] = []
+    beam_meta: List[Dict[str, Any]] = []
+    for bm in beams:
+        sx, sy = float(bm.get("start_x", 0.0)), float(bm.get("start_y", 0.0))
+        ex, ey = float(bm.get("end_x", 0.0)), float(bm.get("end_y", 0.0))
+        b_w = float(bm.get("modeling_width_m") or bm.get("initial_width_m") or bm.get("width_m", 0.30))
+        half_w = b_w / 2.0
+        dx, dy = ex - sx, ey - sy
+        L = math.hypot(dx, dy)
+        if L < 0.10:
+            continue
+        nx = -dy / L * half_w
+        ny = dx / L * half_w
+        bp = SPolygon([
+            (sx + nx, sy + ny),
+            (ex + nx, ey + ny),
+            (ex - nx, ey - ny),
+            (sx - nx, sy - ny),
+        ]).buffer(0)
+        if not bp.is_empty:
+            beam_polys.append(bp)
+            beam_meta.append({
+                "id": str(bm.get("id", "")),
+                "beam": bm,
+                "poly": bp,
+                "sx": sx, "sy": sy, "ex": ex, "ey": ey,
+                "width_m": b_w,
+                "is_horiz": abs(dx) >= abs(dy),
+            })
+    beam_union = s_unary_union(beam_polys).buffer(0) if beam_polys else None
+
+    # 3. Boolean Subtraction
+    remaining = roof_poly
+    if op_union:
+        remaining = remaining.difference(op_union).buffer(0)
+    if beam_union:
+        remaining = remaining.difference(beam_union).buffer(0)
+
+    if remaining.is_empty:
+        return []
+
+    # 4. Extract constituent polygons
+    if remaining.geom_type == "Polygon":
+        raw_geoms = [remaining]
+    elif remaining.geom_type == "MultiPolygon":
+        raw_geoms = list(remaining.geoms)
+    elif remaining.geom_type == "GeometryCollection":
+        raw_geoms = [g for g in remaining.geoms if g.geom_type == "Polygon"]
+    else:
+        raw_geoms = []
+
+    # 5. Filter slivers: area >= 0.30 m² and min(lx, ly) >= 0.25 m
+    valid_polys: List[SPolygon] = []
+    for g in raw_geoms:
+        if g.area < 0.30:
+            continue
+        gx1, gy1, gx2, gy2 = g.bounds
+        if min(gx2 - gx1, gy2 - gy1) < 0.25:
+            continue
+        valid_polys.append(g)
+
+    if not valid_polys:
+        return []
+
+    # Regular sorting: Top-to-Bottom, Left-to-Right
+    valid_polys.sort(key=lambda p: (-p.centroid.y, p.centroid.x))
+
+    slabs: List[Dict[str, Any]] = []
+    for s_idx, p in enumerate(valid_polys):
+        cmin_x, cmin_y, cmax_x, cmax_y = [round(v, 3) for v in p.bounds]
+        clear_lx = round(cmax_x - cmin_x, 3)
+        clear_ly = round(cmax_y - cmin_y, 3)
+        poly_coords = [[round(pt[0], 3), round(pt[1], 3)] for pt in p.exterior.coords]
+        holes = [[[round(pt[0], 3), round(pt[1], 3)] for pt in interior.coords] for interior in p.interiors]
+
+        # Bearing beam detection: contact length >= 0.35m
+        bounding_beams: Dict[str, Optional[str]] = {"North": None, "South": None, "East": None, "West": None}
+        bounding_objs: Dict[str, Optional[Dict[str, Any]]] = {"North": None, "South": None, "East": None, "West": None}
+        p_ext = p.exterior
+        p_cx, p_cy = p.centroid.x, p.centroid.y
+        for b_info in beam_meta:
+            bp = b_info["poly"]
+            inter = p_ext.intersection(bp.buffer(0.02))
+            if inter.length >= 0.35:
+                mid_pt = inter.centroid
+                if b_info["is_horiz"]:
+                    side = "North" if mid_pt.y > p_cy else "South"
+                else:
+                    side = "East" if mid_pt.x > p_cx else "West"
+                if bounding_beams[side] is None:
+                    bounding_beams[side] = b_info["id"]
+                    bounding_objs[side] = b_info["beam"]
+
+        # Centerline coordinates
+        bm_s = bounding_objs["South"]
+        bm_n = bounding_objs["North"]
+        bm_w = bounding_objs["West"]
+        bm_e = bounding_objs["East"]
+
+        min_y = round((float(bm_s["start_y"]) + float(bm_s["end_y"])) / 2.0, 3) if bm_s else cmin_y
+        max_y = round((float(bm_n["start_y"]) + float(bm_n["end_y"])) / 2.0, 3) if bm_n else cmax_y
+        min_x = round((float(bm_w["start_x"]) + float(bm_w["end_x"])) / 2.0, 3) if bm_w else cmin_x
+        max_x = round((float(bm_e["start_x"]) + float(bm_e["end_x"])) / 2.0, 3) if bm_e else cmax_x
+
+        min_x = min(min_x, cmin_x)
+        max_x = max(max_x, cmax_x)
+        min_y = min(min_y, cmin_y)
+        max_y = max(max_y, cmax_y)
+
+        # Cantilever Free Edges on roof boundary
+        cantilever_free_edges: List[str] = []
+        active_cols = [c for c in story_data.get("columns", []) if c.get("active", True)]
+        for side in ("North", "South", "East", "West"):
+            if side == "South":
+                seg = SLineString([(cmin_x + 0.05, cmin_y), (cmax_x - 0.05, cmin_y)])
+                has_cols = any(abs(float(c["y"]) - min_y) <= 0.45 and (min_x - 0.35) <= float(c["x"]) <= (max_x + 0.35) for c in active_cols)
+            elif side == "North":
+                seg = SLineString([(cmin_x + 0.05, cmax_y), (cmax_x - 0.05, cmax_y)])
+                has_cols = any(abs(float(c["y"]) - max_y) <= 0.45 and (min_x - 0.35) <= float(c["x"]) <= (max_x + 0.35) for c in active_cols)
+            elif side == "East":
+                seg = SLineString([(cmax_x, cmin_y + 0.05), (cmax_x, cmax_y - 0.05)])
+                has_cols = any(abs(float(c["x"]) - max_x) <= 0.45 and (min_y - 0.35) <= float(c["y"]) <= (max_y + 0.35) for c in active_cols)
+            else:
+                seg = SLineString([(cmin_x, cmin_y + 0.05), (cmin_x, cmax_y - 0.05)])
+                has_cols = any(abs(float(c["x"]) - min_x) <= 0.45 and (min_y - 0.35) <= float(c["y"]) <= (max_y + 0.35) for c in active_cols)
+
+            if bounding_beams[side] is None:
+                if roof_poly.boundary.distance(seg) <= 0.06:
+                    cantilever_free_edges.append(side)
+            elif (
+                (side in ("South", "North") and clear_ly <= 2.60)
+                or (side in ("East", "West") and clear_lx <= 2.60)
+            ):
+                if not has_cols and roof_poly.boundary.distance(seg) <= 0.06:
+                    cantilever_free_edges.append(side)
+
+        beam_count = sum(1 for v in bounding_beams.values() if v is not None)
+        is_cant = len(cantilever_free_edges) >= 1
+        cant_free_side = cantilever_free_edges[0] if cantilever_free_edges else None
+
+        if len(cantilever_free_edges) == 1:
+            if cant_free_side in ("North", "South"):
+                default_dir = 90
+            else:
+                default_dir = 0
+        elif len(cantilever_free_edges) >= 2:
+            default_dir = 0 if (max_x - min_x) <= (max_y - min_y) + 0.05 else 90
+        else:
+            if bounding_beams.get("West") and bounding_beams.get("East") and not (bounding_beams.get("North") and bounding_beams.get("South")):
+                default_dir = 0
+            elif bounding_beams.get("North") and bounding_beams.get("South") and not (bounding_beams.get("West") and bounding_beams.get("East")):
+                default_dir = 90
+            else:
+                default_dir = 0 if clear_lx <= clear_ly else 90
+
+        w_left = float(bm_w.get("modeling_width_m") or bm_w.get("initial_width_m") or bm_w.get("width_m", 0.30)) if bm_w else 0.30
+        w_right = float(bm_e.get("modeling_width_m") or bm_e.get("initial_width_m") or bm_e.get("width_m", 0.30)) if bm_e else 0.30
+
+        slabs.append({
+            "id": f"S{s_idx + 1}",
+            "bay_key": f"BAY_{round(min_x*10)}_{round(min_y*10)}_{round(max_x*10)}_{round(max_y*10)}",
+            "min_x": min_x,
+            "max_x": max_x,
+            "min_y": min_y,
+            "max_y": max_y,
+            "clear_min_x": cmin_x,
+            "clear_max_x": cmax_x,
+            "clear_min_y": cmin_y,
+            "clear_max_y": cmax_y,
+            "clear_lx": clear_lx,
+            "clear_ly": clear_ly,
+            "lx_m": clear_lx,
+            "ly_m": clear_ly,
+            "centerline_lx_m": round(max_x - min_x, 3),
+            "centerline_ly_m": round(max_y - min_y, 3),
+            "polygon": poly_coords,
+            "holes": holes,
+            "rib_direction_deg": default_dir,
+            "rib_angle_deg": default_dir,
+            "axis_span_m": clear_lx if default_dir == 0 else clear_ly,
+            "left_support_w_m": w_left,
+            "right_support_w_m": w_right,
+            "is_cantilever": is_cant,
+            "cantilever_free_edge": cant_free_side if is_cant else None,
+            "cantilever_free_edges": cantilever_free_edges,
+            "connected_to_cantilever": False,
+            "rib_direction_locked": False,
+            "backspan_to_cantilever_id": None,
+            "bounding_beams": bounding_beams,
+            "beam_count": beam_count,
+            "area": round(p.area, 3),
+        })
+
+    # Second pass: Cantilever Back-Span alignment & locking
+    for s in slabs:
+        if s.get("is_cantilever"):
+            s_dir = int(s.get("rib_direction_deg", 0))
+            free_edges = s.get("cantilever_free_edges", [])
+            if s_dir == 0:
+                carrier_side = "West" if "East" in free_edges else "East"
+            else:
+                carrier_side = "North" if "South" in free_edges else "South"
+            for adj in slabs:
+                if adj is not s and _is_adjacent_across_side(s, adj, carrier_side):
+                    adj["connected_to_cantilever"] = True
+                    adj["rib_direction_locked"] = True
+                    adj["rib_direction_deg"] = s_dir
+                    adj["rib_angle_deg"] = s_dir
+                    adj["axis_span_m"] = adj["lx_m"] if s_dir == 0 else adj["ly_m"]
+                    adj["backspan_to_cantilever_id"] = s["id"]
+                    s["backspan_bay_key"] = adj.get("bay_key")
+                    s["backspan_bay_keys"] = [adj.get("bay_key")]
+
+    return slabs
+
+
 def auto_fill_all_story_slabs(story_data: Dict[str, Any]) -> Tuple[int, str]:
     """
-    1-Click Productivity Tool: Automatically populates all closed beam-bounded bays (>= 3 beams)
-    that are not Void Openings (including polygonal / merged openings) with Hollow-Block Slabs
-    using optimal default rib directions and enforces Cantilever Back-Span continuity.
+    1-Click Productivity Tool: Automatically populates all closed beam-bounded bays
+    (excluding Void Openings) with Hollow-Block Slabs using Shapely Boolean Subtraction,
+    optimal default rib directions, and bidirectional Cantilever Back-Span continuity.
     """
-    bays = detect_story_grid_bays(story_data)
-    if not bays:
-        return 0, "Draw Building Boundary and Beams first before Auto-Filling Slabs."
+    inferred = infer_story_slabs_shapely(story_data)
+    if not inferred:
+        bays = detect_story_grid_bays(story_data)
+        if not bays:
+            return 0, "Draw Building Boundary and Beams first before Auto-Filling Slabs."
+        openings = story_data.get("openings", [])
+        open_keys = {o.get("bay_key") for o in openings if o.get("bay_key")}
+        created = 0
+        for b in bays:
+            cx = (b["min_x"] + b["max_x"]) / 2.0
+            cy = (b["min_y"] + b["max_y"]) / 2.0
+            in_op = any(is_point_in_opening(cx, cy, op, include_edge=False, tol=0.05) for op in openings)
+            if b["beam_count"] >= 3 and b["bay_key"] not in open_keys and not in_op:
+                ok, _, _ = pick_area_create_or_update_slab(story_data, cx, cy, target_mode="SLAB")
+                if ok:
+                    created += 1
+        for idx, s in enumerate(story_data.get("slabs", [])):
+            s["id"] = f"S{idx + 1}"
+        return created, f"Auto-Generated {created} Slab bay(s) across the story."
 
-    openings = story_data.get("openings", [])
-    open_keys = {o.get("bay_key") for o in openings if o.get("bay_key")}
-    created = 0
-    for b in bays:
-        cx = (b["min_x"] + b["max_x"]) / 2.0
-        cy = (b["min_y"] + b["max_y"]) / 2.0
-        in_op = any(is_point_in_opening(cx, cy, op, include_edge=False, tol=0.05) for op in openings)
-        if b["beam_count"] >= 3 and b["bay_key"] not in open_keys and not in_op:
-            ok, _, _ = pick_area_create_or_update_slab(story_data, cx, cy, target_mode="SLAB")
-            if ok:
-                created += 1
-
-    # Renumber sequentially S1..Sn
-    for idx, s in enumerate(story_data.get("slabs", [])):
-        s["id"] = f"S{idx + 1}"
-
-    return created, f"Auto-Generated {created} Slab bay(s) across the story."
+    story_data["slabs"] = inferred
+    return len(inferred), f"Auto-Generated {len(inferred)} Slab bay(s) across the story."
 
 
 def rotate_column_90_deg(story_data: Dict[str, Any], column_id: str, boundary_mode: str = "clamp") -> Tuple[bool, str]:
@@ -3714,6 +4180,22 @@ def rotate_column_90_deg(story_data: Dict[str, Any], column_id: str, boundary_mo
     return True, f"Rotated Column {column_id} by 90° -> {target['b_m']:.2f} × {target['h_m']:.2f} m at ({target['x']:.2f}, {target['y']:.2f})."
 
 
+def _next_sequential_id(items: List[Dict[str, Any]], prefix: str) -> str:
+    """
+    Computes the next contiguous unique sequential ID (e.g. B1..Bn) by inspecting all existing
+    elements and taking max(existing_nums) + 1. Guarantees no duplicate IDs.
+    """
+    nums = []
+    for it in items:
+        raw_id = str(it.get("id", ""))
+        if raw_id.startswith(prefix):
+            val = raw_id[len(prefix):]
+            if val.isdigit():
+                nums.append(int(val))
+    nxt = (max(nums) + 1) if nums else 1
+    return f"{prefix}{nxt}"
+
+
 def pick_area_create_or_update_slab(
     story_data: Dict[str, Any],
     click_x: float,
@@ -3730,25 +4212,32 @@ def pick_area_create_or_update_slab(
          the adjacent Back-Span Slab (e.g. S3) is automatically aligned to the same rib direction AND strictly
          locked against flipping unless S4's ribs are first flipped onto two side beams (0°/90°) or S4 is deleted!
     """
-    bays = detect_story_grid_bays(story_data)
+    bays = infer_story_slabs_shapely(story_data) or detect_story_grid_bays(story_data)
     if not bays:
         return False, "Draw Outer Slab Boundary and Beams first before using Pick Area.", None
 
-    # Find all candidate bays containing (click_x, click_y) and prioritize:
-    # 1) strictly inside clear bounds, 2) smallest area (lx_m * ly_m), 3) closest center distance
+    click_pt = Point(click_x, click_y)
     candidate_bays: List[Tuple[int, float, float, Dict[str, Any]]] = []
     for b in bays:
-        if b["min_x"] - 0.02 <= click_x <= b["max_x"] + 0.02 and b["min_y"] - 0.02 <= click_y <= b["max_y"] + 0.02:
-            cmin_x = float(b.get("clear_min_x", b["min_x"]))
-            cmax_x = float(b.get("clear_max_x", b["max_x"]))
-            cmin_y = float(b.get("clear_min_y", b["min_y"]))
-            cmax_y = float(b.get("clear_max_y", b["max_y"]))
-            in_clear = 0 if (cmin_x <= click_x <= cmax_x and cmin_y <= click_y <= cmax_y) else 1
-            area = float(b["lx_m"]) * float(b["ly_m"])
-            bcx = (float(b["min_x"]) + float(b["max_x"])) / 2.0
-            bcy = (float(b["min_y"]) + float(b["max_y"])) / 2.0
-            dist = math.hypot(click_x - bcx, click_y - bcy)
-            candidate_bays.append((in_clear, area, dist, b))
+        poly_coords = b.get("polygon")
+        if poly_coords and len(poly_coords) >= 3:
+            spoly = Polygon(poly_coords)
+            if spoly.contains(click_pt):
+                candidate_bays.append((0, float(b["lx_m"]) * float(b["ly_m"]), spoly.centroid.distance(click_pt), b))
+            elif spoly.buffer(0.15).contains(click_pt):
+                candidate_bays.append((1, float(b["lx_m"]) * float(b["ly_m"]), spoly.centroid.distance(click_pt), b))
+        else:
+            if b["min_x"] - 0.05 <= click_x <= b["max_x"] + 0.05 and b["min_y"] - 0.05 <= click_y <= b["max_y"] + 0.05:
+                cmin_x = float(b.get("clear_min_x", b["min_x"]))
+                cmax_x = float(b.get("clear_max_x", b["max_x"]))
+                cmin_y = float(b.get("clear_min_y", b["min_y"]))
+                cmax_y = float(b.get("clear_max_y", b["max_y"]))
+                in_clear = 0 if (cmin_x <= click_x <= cmax_x and cmin_y <= click_y <= cmax_y) else 1
+                area = float(b["lx_m"]) * float(b["ly_m"])
+                bcx = (float(b["min_x"]) + float(b["max_x"])) / 2.0
+                bcy = (float(b["min_y"]) + float(b["max_y"])) / 2.0
+                dist = math.hypot(click_x - bcx, click_y - bcy)
+                candidate_bays.append((in_clear, area, dist, b))
 
     if not candidate_bays:
         return False, f"Clicked point ({click_x:.2f}, {click_y:.2f}) is outside bounded slab bays.", None
@@ -3757,7 +4246,7 @@ def pick_area_create_or_update_slab(
     target_bay = candidate_bays[0][3]
 
     beam_count = target_bay["beam_count"]
-    if beam_count < 3:
+    if beam_count < 3 and not target_bay.get("is_cantilever"):
         return (
             False,
             f"Selected region is bounded by only {beam_count} beam(s). At least 3 bounding beams are required to pick a Slab or Opening.",
@@ -3812,7 +4301,7 @@ def pick_area_create_or_update_slab(
                 slabs.remove(existing_slab)
             if not existing_open:
                 new_open = {
-                    "id": f"OP{len(openings) + 1}",
+                    "id": _next_sequential_id(openings, "OP"),
                     "bay_key": bay_key,
                     "min_x": target_bay["min_x"],
                     "max_x": target_bay["max_x"],
@@ -3829,27 +4318,29 @@ def pick_area_create_or_update_slab(
     sides = target_bay["bounding_beams"]
     lx, ly = target_bay["lx_m"], target_bay["ly_m"]
 
-    cant_free_side = _detect_cantilever_free_side(story_data, target_bay, bays)
-    cant_perp_dir: Optional[int] = None
-    if cant_free_side in ("South", "North"):
-        cant_perp_dir = 90
-    elif cant_free_side in ("East", "West"):
-        cant_perp_dir = 0
+    all_free_sides = _detect_all_cantilever_free_sides(story_data, target_bay, bays)
+    is_corner_cant = len(all_free_sides) >= 2
+    if is_corner_cant:
+        c_lx = float(target_bay.get("centerline_lx_m", target_bay["max_x"] - target_bay["min_x"]))
+        c_ly = float(target_bay.get("centerline_ly_m", target_bay["max_y"] - target_bay["min_y"]))
+        default_dir = 0 if c_lx <= c_ly + 0.05 else 90
+        cant_free_side = ("East" if "East" in all_free_sides else "West") if default_dir == 0 else ("South" if "South" in all_free_sides else "North")
+        cant_perp_dir = default_dir
+    else:
+        cant_free_side = _detect_cantilever_free_side(story_data, target_bay, bays)
+        cant_perp_dir = None
+        if cant_free_side in ("South", "North"):
+            cant_perp_dir = 90
+        elif cant_free_side in ("East", "West"):
+            cant_perp_dir = 0
 
     if controlling_cantilever_slab is not None:
         default_dir = int(controlling_cantilever_slab.get("rib_direction_deg", 90))
-    elif cant_free_side is not None and cant_perp_dir is not None:
-        adj_back_bays = _find_adjacent_backspan_bays(target_bay, bays, cant_free_side)
-        cant_span_len = ly if cant_perp_dir == 90 else lx
-        if adj_back_bays and cant_span_len <= 2.60:
-            default_dir = cant_perp_dir
-        elif beam_count == 3:
-            default_dir = 0 if (sides["West"] is not None and sides["East"] is not None) else 90
-        else:
-            default_dir = 0 if lx <= ly else 90
-    elif beam_count == 4:
+    elif not is_corner_cant and cant_free_side is not None and cant_perp_dir is not None:
+        default_dir = cant_perp_dir
+    elif not is_corner_cant and beam_count == 4:
         default_dir = 0 if lx <= ly else 90
-    else:
+    elif not is_corner_cant:
         if sides["West"] is not None and sides["East"] is not None:
             default_dir = 0
         else:
@@ -3864,10 +4355,27 @@ def pick_area_create_or_update_slab(
     else:
         chosen_dir = default_dir
 
+    if is_corner_cant:
+        if chosen_dir == 90:
+            cant_free_side = "South" if "South" in all_free_sides else ("North" if "North" in all_free_sides else cant_free_side)
+            old_free_side = "East" if "East" in all_free_sides else ("West" if "West" in all_free_sides else None)
+        else:
+            cant_free_side = "East" if "East" in all_free_sides else ("West" if "West" in all_free_sides else cant_free_side)
+            old_free_side = "South" if "South" in all_free_sides else ("North" if "North" in all_free_sides else None)
+        cant_perp_dir = chosen_dir
+
+        if old_free_side is not None:
+            for old_ab in _find_adjacent_backspan_bays(target_bay, bays, old_free_side):
+                old_slb = next((s for s in slabs if s.get("bay_key") == old_ab["bay_key"]), None)
+                if old_slb is not None:
+                    old_slb["connected_to_cantilever"] = False
+                    old_slb["rib_direction_locked"] = False
+                    old_slb["backspan_to_cantilever_id"] = None
+
     # STRICT RULE 1: If this bay is the back-span of an active Cantilever Slab,
     # it CANNOT be flipped perpendicular to the cantilever unless the cantilever slab itself is first flipped
     # onto two side drop beams or deleted!
-    if controlling_cantilever_slab is not None:
+    if not is_corner_cant and controlling_cantilever_slab is not None:
         req_c_dir = int(controlling_cantilever_slab.get("rib_direction_deg", 90))
         if chosen_dir != req_c_dir:
             if target_mode == "FLIP_RIB" or requested_rib_dir_deg is not None:
@@ -3883,7 +4391,7 @@ def pick_area_create_or_update_slab(
 
     # STRICT RULE 2: If this bay is a cantilever bay and the user wants to flip it parallel to the free edge
     # (`chosen_dir != cant_perp_dir`), verify that two opposite side beams exist to carry the ribs!
-    if cant_free_side is not None and cant_perp_dir is not None and chosen_dir != cant_perp_dir:
+    if not is_corner_cant and cant_free_side is not None and cant_perp_dir is not None and chosen_dir != cant_perp_dir:
         has_side_beams = (
             (sides.get("West") is not None and sides.get("East") is not None)
             if chosen_dir == 0
@@ -3925,6 +4433,7 @@ def pick_area_create_or_update_slab(
             backspan_bay_key = adj_bays[0]["bay_key"]
             backspan_bay_keys = [ab["bay_key"] for ab in adj_bays]
             aligned_ids: List[str] = []
+            parent_cid = str(existing_slab["id"]) if existing_slab else _next_sequential_id(slabs, "S")
 
             for adj_bay in adj_bays:
                 b_k = adj_bay["bay_key"]
@@ -3932,7 +4441,7 @@ def pick_area_create_or_update_slab(
                 adj_axis_span = adj_bay["lx_m"] if chosen_dir == 0 else adj_bay["ly_m"]
                 if adj_slab is None:
                     adj_slab = {
-                        "id": f"S{len(slabs) + 1}",
+                        "id": _next_sequential_id(slabs, "S"),
                         "bay_key": b_k,
                         "min_x": adj_bay["min_x"],
                         "max_x": adj_bay["max_x"],
@@ -3945,17 +4454,23 @@ def pick_area_create_or_update_slab(
                         "lx_m": adj_bay["lx_m"],
                         "ly_m": adj_bay["ly_m"],
                         "rib_direction_deg": chosen_dir,
+                        "rib_angle_deg": chosen_dir,
                         "axis_span_m": adj_axis_span,
                         "left_support_w_m": 0.30,
                         "right_support_w_m": 0.30,
                         "is_cantilever": False,
                         "connected_to_cantilever": True,
+                        "rib_direction_locked": True,
+                        "backspan_to_cantilever_id": parent_cid,
                     }
                     slabs.append(adj_slab)
                 else:
                     adj_slab["rib_direction_deg"] = chosen_dir
+                    adj_slab["rib_angle_deg"] = chosen_dir
                     adj_slab["axis_span_m"] = adj_axis_span
                     adj_slab["connected_to_cantilever"] = True
+                    adj_slab["rib_direction_locked"] = True
+                    adj_slab["backspan_to_cantilever_id"] = parent_cid
                 aligned_ids.append(str(adj_slab["id"]))
 
             continuity_note = (
@@ -3987,11 +4502,14 @@ def pick_area_create_or_update_slab(
             "clear_max_y": target_bay.get("clear_max_y", target_bay["max_y"]),
             "lx_m": lx,
             "ly_m": ly,
+            "polygon": target_bay.get("polygon"),
+            "holes": target_bay.get("holes", []),
             "rib_direction_deg": chosen_dir,
             "rib_angle_deg": chosen_dir,
             "axis_span_m": axis_span_m,
             "is_cantilever": is_cantilever,
             "cantilever_free_edge": cant_free_side if is_cantilever else None,
+            "cantilever_free_edges": all_free_sides,
             "connected_to_cantilever": bool(controlling_cantilever_slab is not None),
             "backspan_bay_key": backspan_bay_key,
             "backspan_bay_keys": backspan_bay_keys,
@@ -3999,7 +4517,7 @@ def pick_area_create_or_update_slab(
         slab_obj = existing_slab
     else:
         slab_obj = {
-            "id": f"S{len(slabs) + 1}",
+            "id": _next_sequential_id(slabs, "S"),
             "bay_key": bay_key,
             "min_x": target_bay["min_x"],
             "max_x": target_bay["max_x"],
@@ -4011,6 +4529,8 @@ def pick_area_create_or_update_slab(
             "clear_max_y": target_bay.get("clear_max_y", target_bay["max_y"]),
             "lx_m": lx,
             "ly_m": ly,
+            "polygon": target_bay.get("polygon"),
+            "holes": target_bay.get("holes", []),
             "rib_direction_deg": chosen_dir,
             "rib_angle_deg": chosen_dir,
             "axis_span_m": axis_span_m,
@@ -4018,6 +4538,7 @@ def pick_area_create_or_update_slab(
             "right_support_w_m": 0.30,
             "is_cantilever": is_cantilever,
             "cantilever_free_edge": cant_free_side if is_cantilever else None,
+            "cantilever_free_edges": all_free_sides,
             "connected_to_cantilever": bool(controlling_cantilever_slab is not None),
             "backspan_bay_key": backspan_bay_key,
             "backspan_bay_keys": backspan_bay_keys,
@@ -4139,6 +4660,97 @@ def toggle_slab_rib_by_label_click(
     return pick_area_create_or_update_slab(story_data, click_x, click_y, target_mode="FLIP_RIB")
 
 
+def swap_last_id_on_delete(
+    story_data: Dict[str, Any],
+    kind: str,
+    deleted_id: str,
+) -> Optional[Tuple[str, str]]:
+    """
+    Unified swap-with-last ID renumbering algorithm on element deletion.
+    When an element (e.g. B2 from B1..B4) is deleted, the last drawn element (B4)
+    takes the deleted element's ID (B2), maintaining contiguous sequential numbering
+    without gaps or duplicates, and updates all references across the story.
+    """
+    story_id = str(story_data.get("story_id", ""))
+    story_type = str(story_data.get("story_type", ""))
+
+    # Strict exception: Upper stories (03+) NEVER renumber columns
+    if kind in ("column", "columns"):
+        is_ground = (story_id == "02_Ground_Floor") or (story_type == "ground")
+        if not is_ground:
+            return None
+
+    if kind in ("neck", "neck_column"):
+        is_tie = (story_id == "00_TieBeams") or (story_type in ("tie_beams", "tie_beam"))
+        if not is_tie:
+            return None
+
+    if kind in ("beam", "beams"):
+        coll_key = "beams"
+    elif kind in ("slab", "slabs"):
+        coll_key = "slabs"
+    elif kind in ("opening", "openings"):
+        coll_key = "openings"
+    elif kind in ("neck", "neck_column", "column", "columns"):
+        coll_key = "columns"
+    else:
+        return None
+
+    items = story_data.get(coll_key, [])
+    if not items:
+        return None
+
+    import re
+    del_str = str(deleted_id)
+    m = re.match(r"^([A-Za-z]+)(\d+)$", del_str)
+    if not m:
+        return None
+    prefix, del_num = m.group(1), int(m.group(2))
+
+    best_item = None
+    max_num = -1
+    for it in items:
+        iid = str(it.get("id", ""))
+        if iid.startswith(prefix):
+            v = iid[len(prefix):]
+            if v.isdigit():
+                num = int(v)
+                if num > max_num:
+                    max_num = num
+                    best_item = it
+
+    if best_item is None or max_num <= del_num:
+        return None
+
+    old_last_id = str(best_item.get("id", ""))
+    new_id = f"{prefix}{del_num}"
+    best_item["id"] = new_id
+
+    # Update all references across the story
+    for bm in story_data.get("beams", []):
+        for sup in bm.get("supports", []):
+            if str(sup.get("target_id", "")) == old_last_id:
+                sup["target_id"] = new_id
+        if "loads" in bm and isinstance(bm["loads"], list):
+            for ld in bm["loads"]:
+                if str(ld.get("source_beam", "")) == old_last_id:
+                    ld["source_beam"] = new_id
+                if str(ld.get("source_beam_id", "")) == old_last_id:
+                    ld["source_beam_id"] = new_id
+
+    for slb in story_data.get("slabs", []):
+        if str(slb.get("backspan_to_cantilever_id", "")) == old_last_id:
+            slb["backspan_to_cantilever_id"] = new_id
+        if str(slb.get("controlling_cantilever_id", "")) == old_last_id:
+            slb["controlling_cantilever_id"] = new_id
+        if "bounding_beams" in slb and isinstance(slb["bounding_beams"], dict):
+            for s_k, s_v in slb["bounding_beams"].items():
+                if str(s_v) == old_last_id:
+                    slb["bounding_beams"][s_k] = new_id
+
+    return old_last_id, new_id
+
+
 def delete_selected_element_from_story(
     story_data: Dict[str, Any],
     kind: str,
@@ -4147,19 +4759,13 @@ def delete_selected_element_from_story(
     """
     Crash-proof universal deletion algorithm for any selected object (`column`, `beam`, `slab`, `opening`,
     `dimension`, or `slab_edge`) from `story_data`:
-    - When deleting a Column `C_del`:
-      1. Removes `C_del` from `story_data['columns']`.
-      2. Renumbers remaining active columns sequentially `C1, C2, ..., Cn` with zero gaps.
-      3. Reconciles all beams' supports & spans (`reconcile_all_story_beams_supports_and_spans`) so multi-span
-         beams (like B6) merge spans into a single span (`9.30m`) and intersecting beams (like B5) switch their
-         support to the perpendicular carrier beam (`B6`).
-    - When deleting a Beam `B_del` that has secondary beams resting on it:
-      automatically cleans up support references & transferred point loads in those secondary beams
-      and recalculates their spans safely so the app NEVER crashes!
+    - When deleting an element (column, beam, slab, opening), swaps the last drawn element
+      into the deleted ID slot (swap-with-last) to ensure contiguous numbering without gaps,
+      and updates all dependent supports and loads.
     """
     try:
         eid = str(element_id)
-        if kind == "column":
+        if kind in ("column", "columns", "neck", "neck_column"):
             cols = story_data.get("columns", [])
             target_col = next((c for c in cols if str(c.get("id")) == eid), None)
             if target_col is not None and not _col_edit_allowed(story_data, target_col):
@@ -4168,15 +4774,17 @@ def delete_selected_element_from_story(
             story_data["columns"] = [c for c in cols if str(c.get("id")) != eid]
             if len(story_data["columns"]) < before:
                 for bm in story_data.get("beams", []):
-                    sups = [s for s in bm.get("supports", []) if not (s.get("kind") == "column" and str(s.get("target_id")) == eid)]
+                    sups = [s for s in bm.get("supports", []) if not (s.get("kind") in ("column", "neck") and str(s.get("target_id")) == eid)]
                     for idx_s, s_obj in enumerate(sups):
                         s_obj["support_index"] = idx_s + 1
                     bm["supports"] = sups
-                renumber_story_columns_sequentially(story_data)
+                swap_kind = "neck" if eid.startswith("NC") else "column"
+                swap_res = swap_last_id_on_delete(story_data, swap_kind, eid)
                 reconcile_all_story_beams_supports_and_spans(story_data)
-                return True, f"Deleted Column {eid} (Renumbered remaining columns C1..C{len(story_data['columns'])} & updated connected beam spans)."
+                swap_msg = f" (Swapped {swap_res[0]} -> {swap_res[1]})" if swap_res else ""
+                return True, f"Deleted Column {eid}{swap_msg} & updated connected beam spans."
 
-        elif kind == "beam":
+        elif kind in ("beam", "beams"):
             beams = story_data.get("beams", [])
             before = len(beams)
             story_data["beams"] = [b for b in beams if str(b.get("id")) != eid]
@@ -4211,16 +4819,19 @@ def delete_selected_element_from_story(
                             if str(ld.get("source_beam", ld.get("source_beam_id", ""))) != eid
                         ]
 
+                swap_res = swap_last_id_on_delete(story_data, "beam", eid)
                 reconcile_all_story_beams_supports_and_spans(story_data)
                 reconcile_and_split_slabs_after_beam_change(story_data)
                 note = f" (Updated supported beam(s): {', '.join(detached_beams)})" if detached_beams else ""
-                return True, f"Deleted Beam {eid}{note}."
+                swap_msg = f" (Swapped {swap_res[0]} -> {swap_res[1]})" if swap_res else ""
+                return True, f"Deleted Beam {eid}{swap_msg}{note}."
 
-        elif kind == "slab":
+        elif kind in ("slab", "slabs"):
             slabs = story_data.get("slabs", [])
             before = len(slabs)
             story_data["slabs"] = [s for s in slabs if str(s.get("id")) != eid]
             if len(story_data["slabs"]) < before:
+                swap_res = swap_last_id_on_delete(story_data, "slab", eid)
                 bays = detect_story_grid_bays(story_data)
                 bay_by_key = {b["bay_key"]: b for b in bays}
                 for s_rem in story_data["slabs"]:
@@ -4228,14 +4839,17 @@ def delete_selected_element_from_story(
                     if mb:
                         ctrls = _find_controlling_cantilever_slabs_for_bay(story_data, mb, bays)
                         s_rem["connected_to_cantilever"] = bool(ctrls)
-                return True, f"Deleted Slab {eid}."
+                swap_msg = f" (Swapped {swap_res[0]} -> {swap_res[1]})" if swap_res else ""
+                return True, f"Deleted Slab {eid}{swap_msg}."
 
-        elif kind == "opening":
+        elif kind in ("opening", "openings"):
             opens = story_data.get("openings", [])
             before = len(opens)
             story_data["openings"] = [o for o in opens if str(o.get("id")) != eid]
             if len(story_data["openings"]) < before:
-                return True, f"Deleted Opening {eid}."
+                swap_res = swap_last_id_on_delete(story_data, "opening", eid)
+                swap_msg = f" (Swapped {swap_res[0]} -> {swap_res[1]})" if swap_res else ""
+                return True, f"Deleted Opening {eid}{swap_msg}."
 
         elif kind == "dimension":
             dims = story_data.get("dimensions", [])
@@ -4360,6 +4974,12 @@ def move_beam_within_slab_boundary(
             sx = ex = min(max(sx, min_x + half_w), max_x - half_w)
         else:
             ex = sx
+
+    poly = story_data.get("slab_edge_polygon", [])
+    if has_bnd and poly and len(poly) >= 3:
+        sx, sy, ex, ey, _ = clamp_beam_inside_slab_polygon(
+            sx, sy, ex, ey, float(bm.get("width_m", 0.30)), poly
+        )
 
     bm["start_x"] = round(sx, 3)
     bm["start_y"] = round(sy, 3)

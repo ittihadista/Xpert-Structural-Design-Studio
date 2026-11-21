@@ -4,7 +4,36 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.5.0-structural-bim-pro (Phase 1 Baseline)` (2026-11-20)
+## Current Release: `v2.5.03-structural-bim-pro` (2026-11-21)
+**Release Title:** Shapely Boolean Subtraction Slab Inference, Immutable 2D Canvas Beam Width, Face-to-Face Clear Spans, Swap-with-Last ID Renumbering, Minimum Dimensions & Rebar Options, Extended OSNAP, and Stepped Boundary Clamping.
+
+### Key Features & Advancements in `v2.5.03-structural-bim-pro`:
+1. **Direct Shapely Boolean Subtraction Slab Inference (`Boundary - Openings - Beams`):**
+   - Direct CAD-like boundary inference (`BO` tool behavior) computing $\text{Slabs} = \text{Boundary (00-XD-EDGE)} - \text{Openings (00-XD-OPEN)} - \text{Beams (00-XD-BEAM)}$ using `shapely.geometry.Polygon` and `unary_union` with zero slivers filter ($\text{Area} \ge 0.30\text{ m}^2$, $\min(l_x, l_y) \ge 0.25\text{ m}$).
+   - Strict bearing beam contact length threshold ($\ge 0.35\text{ m}$) preventing corner/end touch false detections.
+   - Comprehensive cantilever detection (including single-beam balconies, corner cantilevers with 2 free edges, and edge overhangs with tip beams and no columns) with bidirectional Back-Span continuity and locking.
+2. **Immutable 2D Canvas Modeling Beam Width (`modeling_width_m`):**
+   - Preserves initial modeling dimensions on the 2D CAD canvas indefinitely without graphical distortion or gaps after analysis and design.
+   - Designed dimensions are saved in `designed_width_m` and `designed_depth_m` and displayed exclusively in schedules, reports, and DXF exports.
+3. **Face-to-Face Clear Span Dimensions (`clear_lx`, `clear_ly`):**
+   - Measures clear distances between inner beam faces for all slabs, reflecting exact physical spans in rib labels (`S# (clear_lx × clear_ly m)`) and load distribution.
+4. **Unified Swap-with-Last ID Renumbering on Deletion (`swap_last_id_on_delete`):**
+   - Maintains contiguous sequential numbering without gaps or duplicates when elements are deleted (e.g. deleting B2 promotes the last beam B4 to B2 and updates references across the story).
+   - Strict safety guard protecting upper stories (`03+`) from column renumbering.
+5. **Project-Wide Minimum Dimensions & Rebar Options (`Options -> Minimum Dimensions...`):**
+   - Interactive configuration dialog in `xpert_studio_app.py` for minimum beam width, minimum beam depth, minimum column dimensions, block dimensions, and rebar diameter selection with persistent storage in `.xsd` project files.
+6. **Extended AutoCAD-Style OSNAP Modes:**
+   - Added snap targets: Intersection (`Int`), Geometric Center (`GeoCen`), Center/Circle (`Cir`), and Extension (`Ext`).
+7. **Stepped Slab Boundary Beam Clamping (`clamp_beam_inside_slab_polygon`):**
+   - Safely clips and clamps beams completely within complex non-rectangular and stepped roof polygons without causing out-of-boundary projections.
+8. **100% English-Only & Full Test Suite Verification:**
+   - 0 Arabic characters across all codebase and UI.
+   - 23/23 unit tests pass in `test_studio_engine.py` (including `test_v2503_shapely_slab_inference_and_immutable_canvas_beam_width`).
+   - `HEADLESS_STUDIO_CHECK_OK` verified.
+
+---
+
+## Previous Release: `v2.5.0-structural-bim-pro (Phase 1 Baseline)` (2026-11-20)
 **Release Title:** Clean Architectural & Structural BIM Baseline Rebuild, Zero Monkey-Patching Architecture, Multi-Story Column Continuity & Discontinuation Cascade, Rigid Boundary & Column Locks, Interactive Boundary Vertex Modification, and Dedicated Tie-Beams Neck Columns (`NC#`).
 
 ### Key Features & Advancements in `v2.5.0-structural-bim-pro (Phase 1)`:
