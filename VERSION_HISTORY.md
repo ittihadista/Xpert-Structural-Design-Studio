@@ -4,7 +4,30 @@ This file tracks all releases of **Xpert Structural Design Studio** for **Eng. Y
 
 ---
 
-## Current Release: `v2.5.03-structural-bim-pro` (2026-11-21)
+## Current Release: `v2.5.04-structural-bim-pro` (2026-11-21)
+**Release Title:** Exact Rib-Direction Cantilever Classification, Non-Doubled 3-Beam Bay Load Distribution, and Robust Multi-Span Slab Load Safeguards.
+
+### Key Features & Advancements in `v2.5.04-structural-bim-pro`:
+1. **Exact Rib-Direction Cantilever Verification (`is_slab_cantilever_in_rib_dir`):**
+   - Standardized engineering logic determining cantilever status strictly according to the active rib direction (0° vs 90°):
+     * If rib_dir = 0° (horizontal ribs spanning East-West): the slab is a cantilever ONLY IF it has a free edge at East or West and rests on a supporting beam on the opposite side. If BOTH East and West have supporting beams, `is_cantilever = False` (slab spans between two opposite supports).
+     * If rib_dir = 90° (vertical ribs spanning North-South): the slab is a cantilever ONLY IF it has a free edge at North or South and rests on a supporting beam on the opposite side. If BOTH North and South have supporting beams, `is_cantilever = False` (slab spans between two opposite supports).
+   - Integrated into `infer_story_slabs_shapely`, `pick_area_create_or_update_slab`, and `flip_slab_rib_by_id`.
+2. **Prevention of Doubled Slab Load Transfer on 3-Beam Bays:**
+   - In 3-beam bays with one free edge parallel to ribs (e.g. S9 spanning 4.90 m × 2.00 m with East free and ribs at 90° between South beam B2 and North beam B20):
+     * Properly classified as a regular two-end supported slab (`is_cantilever = False`, `cantilever_free_edge = None`).
+     * Added double-guard in `populate_all_beam_distributed_loads`: both carrier beams receive their legitimate half tributary load ($w_{\text{slab}} = W_u \times (l_y / 2)$), preventing accidental load doubling ($W_u \times l_y$) and avoiding excessive $L/8$ thickness requirements.
+3. **Automatic Back-Span Lock Reconciliation:**
+   - When a 3-beam slab or cantilever slab is flipped to span between two opposite side beams, any former back-span locking is automatically cleared and unlocked.
+4. **Comprehensive Test Suite & Zero Regressions:**
+   - Added unit test `test_v2504_3beam_bay_spanning_between_opposite_beams_not_doubled` in `test_studio_engine.py`.
+   - All 24/24 unit tests pass with zero errors.
+   - Headless check verified (`HEADLESS_STUDIO_CHECK_OK`).
+   - 100% English-only, zero monkey-patching, and analytical calculation cores strictly frozen.
+
+---
+
+## Previous Release: `v2.5.03-structural-bim-pro` (2026-11-21)
 **Release Title:** Shapely Boolean Subtraction Slab Inference, Immutable 2D Canvas Beam Width, Face-to-Face Clear Spans, Swap-with-Last ID Renumbering, Minimum Dimensions & Rebar Options, Extended OSNAP, and Stepped Boundary Clamping.
 
 ### Key Features & Advancements in `v2.5.03-structural-bim-pro`:

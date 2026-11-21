@@ -1350,6 +1350,32 @@ def analyze_all_story_beams_and_columns(
                         ly_0 = max(0.40, float(slb.get("clear_max_y", smax_y)) - float(slb.get("clear_min_y", smin_y)))
                         rib_dir = int(slb.get("rib_direction_deg", slb.get("rib_angle_deg", 0)))
                         is_cant_slb = bool(slb.get("is_cantilever", False))
+                        bb_map = slb.get("bounding_beams", {})
+                        free_edges = slb.get("cantilever_free_edges", [])
+
+                        # Guard: If supported by beams on both opposite sides in the rib direction,
+                        # it is NEVER a cantilever (it spans between two supports, each taking 0.50)!
+                        if is_cant_slb:
+                            if rib_dir == 90:
+                                has_north = (bb_map.get("North") is not None) and ("North" not in free_edges)
+                                has_south = (bb_map.get("South") is not None) and ("South" not in free_edges)
+                                if not has_north or not has_south:
+                                    if not has_north:
+                                        has_north = any(abs(float(bm.get("start_y", 0.0)) - smax_y) <= 0.45 and abs(float(bm.get("end_y", 0.0)) - smax_y) <= 0.45 and min(float(bm.get("end_x", 0.0)), smax_x) - max(float(bm.get("start_x", 0.0)), smin_x) >= 0.35 for bm in story_data.get("beams", []))
+                                    if not has_south:
+                                        has_south = any(abs(float(bm.get("start_y", 0.0)) - smin_y) <= 0.45 and abs(float(bm.get("end_y", 0.0)) - smin_y) <= 0.45 and min(float(bm.get("end_x", 0.0)), smax_x) - max(float(bm.get("start_x", 0.0)), smin_x) >= 0.35 for bm in story_data.get("beams", []))
+                                if has_north and has_south:
+                                    is_cant_slb = False
+                            elif rib_dir == 0:
+                                has_east = (bb_map.get("East") is not None) and ("East" not in free_edges)
+                                has_west = (bb_map.get("West") is not None) and ("West" not in free_edges)
+                                if not has_east or not has_west:
+                                    if not has_east:
+                                        has_east = any(abs(float(bm.get("start_x", 0.0)) - smax_x) <= 0.45 and abs(float(bm.get("end_x", 0.0)) - smax_x) <= 0.45 and min(float(bm.get("end_y", 0.0)), smax_y) - max(float(bm.get("start_y", 0.0)), smin_y) >= 0.35 for bm in story_data.get("beams", []))
+                                    if not has_west:
+                                        has_west = any(abs(float(bm.get("start_x", 0.0)) - smin_x) <= 0.45 and abs(float(bm.get("end_x", 0.0)) - smin_x) <= 0.45 and min(float(bm.get("end_y", 0.0)), smax_y) - max(float(bm.get("start_y", 0.0)), smin_y) >= 0.35 for bm in story_data.get("beams", []))
+                                if has_east and has_west:
+                                    is_cant_slb = False
                         sid_lbl = str(slb.get("id", "S"))
 
                         # Full center-to-center / boundary rib span (no L_rib reduction per Excel philosophy)
@@ -3658,6 +3684,61 @@ def _detect_cantilever_free_side(
     return all_free[0] if all_free else None
 
 
+def is_slab_cantilever_in_rib_dir(
+    rib_dir: int,
+    bounding_beams: Dict[str, Any],
+    cantilever_free_edges: List[str],
+) -> Tuple[bool, Optional[str]]:
+    """
+    Determines if a slab acts as a cantilever in its current rib direction (0° or 90°).
+    A slab is a cantilever ONLY IF ribs span toward a free perimeter edge and rest
+    on a supporting beam on the opposite side alone (not spanning between two opposite beams).
+
+    Rules:
+    - If rib_dir == 0 (horizontal ribs spanning East-West):
+      Cantilever ONLY if East or West is free AND the opposite side has a supporting beam.
+      If BOTH East and West have supporting beams, is_cantilever = False (regular 2-end supported).
+    - If rib_dir == 90 (vertical ribs spanning North-South):
+      Cantilever ONLY if North or South is free AND the opposite side has a supporting beam.
+      If BOTH North and South have supporting beams, is_cantilever = False (regular 2-end supported).
+    """
+    free_edges = set(cantilever_free_edges or [])
+    bb = bounding_beams or {}
+
+    if rib_dir == 0:
+        # Ribs span along X (East-West)
+        has_east = (bb.get("East") is not None) and ("East" not in free_edges)
+        has_west = (bb.get("West") is not None) and ("West" not in free_edges)
+
+        if has_east and has_west:
+            return False, None
+        if ("East" in free_edges) and has_west:
+            return True, "East"
+        if ("West" in free_edges) and has_east:
+            return True, "West"
+        if ("East" in free_edges) and not ("West" in free_edges):
+            return True, "East"
+        if ("West" in free_edges) and not ("East" in free_edges):
+            return True, "West"
+        return False, None
+    else:
+        # Ribs span along Y (North-South, 90°)
+        has_north = (bb.get("North") is not None) and ("North" not in free_edges)
+        has_south = (bb.get("South") is not None) and ("South" not in free_edges)
+
+        if has_north and has_south:
+            return False, None
+        if ("North" in free_edges) and has_south:
+            return True, "North"
+        if ("South" in free_edges) and has_north:
+            return True, "South"
+        if ("North" in free_edges) and not ("South" in free_edges):
+            return True, "North"
+        if ("South" in free_edges) and not ("North" in free_edges):
+            return True, "South"
+        return False, None
+
+
 def _find_controlling_cantilever_slabs_for_bay(
     story_data: Dict[str, Any],
     target_bay: Dict[str, Any],
@@ -4013,7 +4094,6 @@ def infer_story_slabs_shapely(story_data: Dict[str, Any]) -> List[Dict[str, Any]
                     cantilever_free_edges.append(side)
 
         beam_count = sum(1 for v in bounding_beams.values() if v is not None)
-        is_cant = len(cantilever_free_edges) >= 1
         cant_free_side = cantilever_free_edges[0] if cantilever_free_edges else None
 
         if len(cantilever_free_edges) == 1:
@@ -4030,6 +4110,9 @@ def infer_story_slabs_shapely(story_data: Dict[str, Any]) -> List[Dict[str, Any]
                 default_dir = 90
             else:
                 default_dir = 0 if clear_lx <= clear_ly else 90
+
+        # Exact cantilever check based on actual rib direction:
+        is_cant, cant_active_side = is_slab_cantilever_in_rib_dir(default_dir, bounding_beams, cantilever_free_edges)
 
         w_left = float(bm_w.get("modeling_width_m") or bm_w.get("initial_width_m") or bm_w.get("width_m", 0.30)) if bm_w else 0.30
         w_right = float(bm_e.get("modeling_width_m") or bm_e.get("initial_width_m") or bm_e.get("width_m", 0.30)) if bm_e else 0.30
@@ -4059,7 +4142,7 @@ def infer_story_slabs_shapely(story_data: Dict[str, Any]) -> List[Dict[str, Any]
             "left_support_w_m": w_left,
             "right_support_w_m": w_right,
             "is_cantilever": is_cant,
-            "cantilever_free_edge": cant_free_side if is_cant else None,
+            "cantilever_free_edge": cant_active_side if is_cant else None,
             "cantilever_free_edges": cantilever_free_edges,
             "connected_to_cantilever": False,
             "rib_direction_locked": False,
@@ -4409,9 +4492,12 @@ def pick_area_create_or_update_slab(
     backspan_bay_keys: List[str] = []
     continuity_note = ""
 
+    # Exact cantilever check based on actual rib direction:
+    is_cant_dir, cant_active_side = is_slab_cantilever_in_rib_dir(chosen_dir, sides, all_free_sides)
+
     # If this bay is oriented as a cantilever toward its free/overhang edge, automatically align all back-span slabs across the carrier beam!
-    if cant_free_side is not None and chosen_dir == cant_perp_dir:
-        adj_bays = _find_adjacent_backspan_bays(target_bay, bays, cant_free_side)
+    if is_cant_dir and cant_active_side is not None:
+        adj_bays = _find_adjacent_backspan_bays(target_bay, bays, cant_active_side)
         if not adj_bays and beam_count == 3:
             return (
                 False,
@@ -4430,6 +4516,7 @@ def pick_area_create_or_update_slab(
                     )
 
             is_cantilever = True
+            cant_free_side = cant_active_side
             backspan_bay_key = adj_bays[0]["bay_key"]
             backspan_bay_keys = [ab["bay_key"] for ab in adj_bays]
             aligned_ids: List[str] = []
@@ -4476,16 +4563,29 @@ def pick_area_create_or_update_slab(
             continuity_note = (
                 f" [Cantilever Slab: Back-span {', '.join(aligned_ids)} automatically rotated to {chosen_dir}° & locked for equilibrium]"
             )
-    elif cant_free_side is not None and chosen_dir != cant_perp_dir:
-        # User flipped the cantilever bay to rest on its two side beams! Unlock its former back-span slabs!
-        adj_bays = _find_adjacent_backspan_bays(target_bay, bays, cant_free_side)
+    else:
+        is_cantilever = False
+        cant_free_side = None
+        # User flipped the cantilever bay to rest on its two side beams or it spans between opposite beams! Unlock its former back-span slabs!
         unlocked_ids: List[str] = []
-        for adj_bay in adj_bays:
-            b_k = adj_bay["bay_key"]
-            adj_slab = next((s for s in slabs if s.get("bay_key") == b_k), None)
-            if adj_slab is not None:
-                adj_slab["connected_to_cantilever"] = False
-                unlocked_ids.append(str(adj_slab["id"]))
+        target_id_str = str(existing_slab["id"]) if existing_slab else None
+        if target_id_str:
+            for s in slabs:
+                if s.get("backspan_to_cantilever_id") == target_id_str:
+                    s["connected_to_cantilever"] = False
+                    s["rib_direction_locked"] = False
+                    s["backspan_to_cantilever_id"] = None
+                    unlocked_ids.append(str(s["id"]))
+        if not unlocked_ids and all_free_sides:
+            for fs in all_free_sides:
+                for adj_bay in _find_adjacent_backspan_bays(target_bay, bays, fs):
+                    b_k = adj_bay["bay_key"]
+                    adj_slab = next((s for s in slabs if s.get("bay_key") == b_k), None)
+                    if adj_slab is not None and adj_slab.get("connected_to_cantilever"):
+                        adj_slab["connected_to_cantilever"] = False
+                        adj_slab["rib_direction_locked"] = False
+                        adj_slab["backspan_to_cantilever_id"] = None
+                        unlocked_ids.append(str(adj_slab["id"]))
         if unlocked_ids:
             continuity_note = f" [Resting on Side Beams: Back-span {', '.join(unlocked_ids)} is now unlocked and can be flipped freely]"
 
@@ -4577,7 +4677,7 @@ def flip_slab_rib_by_id(
     cx = (smin_x + smax_x) / 2.0
     cy = (smin_y + smax_y) / 2.0
 
-    bays = detect_story_grid_bays(story_data)
+    bays = infer_story_slabs_shapely(story_data) or detect_story_grid_bays(story_data)
     if bays:
         slb_lx = float(target_slb.get("lx_m", smax_x - smin_x))
         slb_ly = float(target_slb.get("ly_m", smax_y - smin_y))
@@ -4613,6 +4713,13 @@ def flip_slab_rib_by_id(
     lx = float(target_slb.get("lx_m", smax_x - smin_x))
     ly = float(target_slb.get("ly_m", smax_y - smin_y))
     target_slb["axis_span_m"] = lx if new_dir == 0 else ly
+    is_cant, free_side = is_slab_cantilever_in_rib_dir(
+        new_dir,
+        target_slb.get("bounding_beams", {}),
+        target_slb.get("cantilever_free_edges", []),
+    )
+    target_slb["is_cantilever"] = is_cant
+    target_slb["cantilever_free_edge"] = free_side if is_cant else None
     return True, f"Slab {slab_id} ({lx:.2f}×{ly:.2f} m) flipped to Rib Direction = {new_dir}°.", target_slb
 
 
@@ -4832,7 +4939,7 @@ def delete_selected_element_from_story(
             story_data["slabs"] = [s for s in slabs if str(s.get("id")) != eid]
             if len(story_data["slabs"]) < before:
                 swap_res = swap_last_id_on_delete(story_data, "slab", eid)
-                bays = detect_story_grid_bays(story_data)
+                bays = infer_story_slabs_shapely(story_data) or detect_story_grid_bays(story_data)
                 bay_by_key = {b["bay_key"]: b for b in bays}
                 for s_rem in story_data["slabs"]:
                     mb = bay_by_key.get(s_rem.get("bay_key"))

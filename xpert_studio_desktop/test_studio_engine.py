@@ -1245,7 +1245,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         from shapely.geometry import Polygon
         import xpert_project_io as pio
 
-        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.2.1-structural-bim-pro", "v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro", "v2.5.04-structural-bim-pro"))
 
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
@@ -1337,7 +1337,7 @@ class TestXpertStudioEngine(unittest.TestCase):
         from shapely.geometry import Polygon
 
         # 1. Version & UI presence
-        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.3.0-structural-bim-pro", "v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro", "v2.5.04-structural-bim-pro"))
         app_path = os.path.join(os.path.dirname(__file__), "xpert_studio_app.py")
         with open(app_path, "r", encoding="utf-8") as f:
             app_src = f.read()
@@ -1570,7 +1570,7 @@ class TestXpertStudioEngine(unittest.TestCase):
             )
 
         # 2. Version Release String
-        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro"))
+        self.assertIn(pio.STUDIO_VERSION, ("v2.4.0-structural-bim-pro", "v2.5.0-structural-bim-pro", "v2.5.01-structural-bim-pro", "v2.5.02-structural-bim-pro", "v2.5.03-structural-bim-pro", "v2.5.04-structural-bim-pro"))
 
         # 3. Story Wall Load Height Philosophy
         cfg = {
@@ -1954,6 +1954,81 @@ class TestXpertStudioEngine(unittest.TestCase):
         self.assertEqual(bm_test["modeling_width_m"], 0.40)
         self.assertEqual(bm_test["width_m"], 0.40)
         self.assertGreaterEqual(bm_test["designed_width_m"], 0.40)
+
+    def test_v2504_3beam_bay_spanning_between_opposite_beams_not_doubled(self):
+        """
+        Verifies all v2.5.04-structural-bim-pro engineering & BIM requirements:
+        1. A bay bounded by 3 beams with 1 free edge whose ribs span between two opposite beams
+           (e.g., ribs at 90° spanning North-South between B_south and B_north, with East free)
+           must have is_cantilever == False and cantilever_free_edge is None.
+        2. Beams on opposite ends (B_north, B_south) must each receive half tributary load (0.50 * ly_0),
+           preventing load doubling (full tributary load Wu * ly_0).
+        """
+        import xpert_structural_engine as eng
+
+        story = {
+            "story_id": "02_Ground_Floor",
+            "slab_edge_polygon": [[0.0, 0.0], [4.90, 0.0], [4.90, 2.00], [0.0, 2.00]],
+            "columns": [
+                {"id": "C1", "x": 0.0, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C2", "x": 4.90, "y": 0.0, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C3", "x": 0.0, "y": 2.00, "b_m": 0.20, "h_m": 0.40, "active": True},
+                {"id": "C4", "x": 4.90, "y": 2.00, "b_m": 0.20, "h_m": 0.40, "active": True},
+            ],
+            "beams": [
+                {"id": "B_south", "start_x": 0.0, "start_y": 0.0, "end_x": 4.90, "end_y": 0.0, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [4.90]},
+                {"id": "B_north", "start_x": 0.0, "start_y": 2.00, "end_x": 4.90, "end_y": 2.00, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [4.90]},
+                {"id": "B_west", "start_x": 0.0, "start_y": 0.0, "end_x": 0.0, "end_y": 2.00, "width_m": 0.20, "depth_m": 0.50, "modeling_width_m": 0.20, "modeling_depth_m": 0.50, "beam_kind": "drop", "spans": [2.00]},
+            ],
+            "openings": [],
+            "slabs": [
+                {
+                    "id": "S9",
+                    "min_x": 0.0,
+                    "max_x": 4.90,
+                    "min_y": 0.0,
+                    "max_y": 2.00,
+                    "clear_min_x": 0.10,
+                    "clear_max_x": 4.90,
+                    "clear_min_y": 0.10,
+                    "clear_max_y": 1.90,
+                    "lx_m": 4.80,
+                    "ly_m": 1.80,
+                    "rib_direction_deg": 90,
+                    "rib_angle_deg": 90,
+                    "axis_span_m": 1.80,
+                    "bounding_beams": {"North": "B_north", "South": "B_south", "West": "B_west"},
+                    "cantilever_free_edges": ["East"],
+                    "polygon": [[0.0, 0.0], [4.90, 0.0], [4.90, 2.00], [0.0, 2.00]],
+                }
+            ],
+        }
+
+        s9 = story["slabs"][0]
+        # Re-check cantilever with rib_direction_deg == 90
+        is_cant, free_side = eng.is_slab_cantilever_in_rib_dir(
+            90, s9.get("bounding_beams", {}), s9.get("cantilever_free_edges", [])
+        )
+        s9["is_cantilever"] = is_cant
+        s9["cantilever_free_edge"] = free_side
+
+        # 1. Assert slab is NOT a cantilever
+        self.assertFalse(s9["is_cantilever"])
+        self.assertIsNone(s9["cantilever_free_edge"])
+
+        # 2. Run analysis & design
+        bundle = eng.analyze_all_story_beams_and_columns(story, 20.0, 350.0)
+
+        load_south = bundle["beam_results"]["B_south"]["loads_applied"][0]
+        load_north = bundle["beam_results"]["B_north"]["loads_applied"][0]
+
+        clear_ly = float(s9.get("clear_max_y", 2.0)) - float(s9.get("clear_min_y", 0.0))
+        wu_slab = float(bundle["slab_designs"]["S9"]["wu_m2_kpa"])
+        expected_w_slab = round(wu_slab * (clear_ly * 0.50), 2)
+
+        # Ensure half tributary load (NOT full clear_ly * wu_slab)
+        self.assertAlmostEqual(load_south.get("w_slab", 0.0), expected_w_slab, delta=0.5)
+        self.assertAlmostEqual(load_north.get("w_slab", 0.0), expected_w_slab, delta=0.5)
 
 
 if __name__ == "__main__":

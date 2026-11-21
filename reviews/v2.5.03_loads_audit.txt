@@ -1,0 +1,161 @@
+=========================================================================================================
+XPERT STRUCTURAL DESIGN STUDIO — LOADS & STRUCTURAL AUDIT REPORT
+Engine Release: v2.5.03-structural-bim-pro | Audit Mode: Read-Only Engineering Verification
+=========================================================================================================
+Project Name   : Villa_Yasmin (Stractural-Villa_Yasmin)
+Story Analyzed : 02_Ground_Floor (02 - Ground Floor Slab (Mandatory Start))
+Materials      : f'c = 20.0 MPa, fy = 350.0 MPa, gamma_c = 24.0 kN/m3
+Slab System    : Hollow-Block (Hordi) Slabs (Adopted Thickness = 30.0 cm)
+Wall Load      : Height = 3.00 m, Default W_wall = 10.50 kN/m
+---------------------------------------------------------------------------------------------------------
+
+SECTION 1: STORY SLABS GEOMETRIC & STRUCTURAL DEFINITION
+---------------------------------------------------------------------------------------------------------
+Slab ID  | lx (m)   | ly (m)   | Rib Dir   | Cantilever?  | Free Edges   | Supporting Beams (N, S, E, W)
+---------------------------------------------------------------------------------------------------------
+S1       | 4.80     | 3.90     | 90 deg    | NO           | None         | N:B1, S:B2, E:B5, W:B4
+S2       | 4.40     | 3.90     | 90 deg    | NO           | None         | N:B1, S:B2, E:B6, W:B5
+S3       | 4.80     | 3.80     | 90 deg    | NO           | None         | N:B2, S:B3, E:B5, W:B4
+S4       | 4.40     | 3.80     | 90 deg    | NO           | None         | N:B2, S:B3, E:B6, W:B5
+---------------------------------------------------------------------------------------------------------
+
+SECTION 2: BEAM LOADS, LOAD BREAKDOWN & STRUCTURAL ANALYSIS RESULTS
+---------------------------------------------------------------------------------------------------------
+BEAM B1 — [Drop Beam]
+  Dimensions : Initial = 200x400 mm  -->  Designed = 200x400 mm (Sufficient)
+  Geometry   : Spans = [5.1, 4.7] m | Cantilevers: Left = 0.00 m, Right = 0.00 m
+  Start/End  : (0.00, 8.40) -> (10.00, 8.40)
+  Distributed Loads (w_total = O.W + w_Slab + W_wall):
+    * [Span 1] Range 0.00m -> 5.10m (L = 5.10m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 22.83 kN/m [S1: 11.71×(3.90/2)m=22.83]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 36.72 kN/m
+    * [Span 2] Range 5.10m -> 9.80m (L = 4.70m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 22.83 kN/m [S2: 11.71×(3.90/2)m=22.83]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 36.72 kN/m
+  Concentrated / Transferred Point Loads (P):
+    (None — Beam does not carry secondary beams)
+  Analysis & Internal Force Results:
+    - Support Reactions (kN) : [71.92, 225.21, 62.73]
+    - Max Positive Moment    : Mu+ = 70.43 kN.m
+    - Max Face Negative Mom. : Mu- = -99.95 kN.m
+    - Max Critical Face Shear: Vu  = 115.35 kN
+---------------------------------------------------------------------------------------------------------
+BEAM B2 — [Hidden Beam]
+  Dimensions : Initial = 400x300 mm  -->  Designed = 600x300 mm (Auto-Enlarged)
+  Geometry   : Spans = [5.1, 4.7] m | Cantilevers: Left = 0.00 m, Right = 0.00 m
+  Start/End  : (0.00, 4.20) -> (10.00, 4.20)
+  Distributed Loads (w_total = O.W + w_Slab + W_wall):
+    * [Span 1] Range 0.00m -> 5.10m (L = 5.10m):
+        - O.W (Self-Weight) : 4.03 kN/m (O.W = 0.40 × 0.30 × 24 × 1.4 = 4.03 kN/m)
+        - w_Slab (from ribs): 45.08 kN/m [S1: 11.71×(3.90/2)m=22.83 + S3: 11.71×(3.80/2)m=22.25]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 60.31 kN/m
+    * [Span 2] Range 5.10m -> 9.80m (L = 4.70m):
+        - O.W (Self-Weight) : 4.03 kN/m (O.W = 0.40 × 0.30 × 24 × 1.4 = 4.03 kN/m)
+        - w_Slab (from ribs): 45.08 kN/m [S2: 11.71×(3.90/2)m=22.83 + S4: 11.71×(3.80/2)m=22.25]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 60.31 kN/m
+  Concentrated / Transferred Point Loads (P):
+    (None — Beam does not carry secondary beams)
+  Analysis & Internal Force Results:
+    - Support Reactions (kN) : [118.12, 369.89, 103.02]
+    - Max Positive Moment    : Mu+ = 115.67 kN.m
+    - Max Face Negative Mom. : Mu- = -164.17 kN.m
+    - Max Critical Face Shear: Vu  = 189.46 kN
+---------------------------------------------------------------------------------------------------------
+BEAM B3 — [Drop Beam]
+  Dimensions : Initial = 200x400 mm  -->  Designed = 200x400 mm (Sufficient)
+  Geometry   : Spans = [5.1, 4.7] m | Cantilevers: Left = 0.00 m, Right = 0.00 m
+  Start/End  : (0.00, 0.10) -> (10.00, 0.10)
+  Distributed Loads (w_total = O.W + w_Slab + W_wall):
+    * [Span 1] Range 0.00m -> 5.10m (L = 5.10m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 22.25 kN/m [S3: 11.71×(3.80/2)m=22.25]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 36.14 kN/m
+    * [Span 2] Range 5.10m -> 9.80m (L = 4.70m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 22.25 kN/m [S4: 11.71×(3.80/2)m=22.25]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 36.14 kN/m
+  Concentrated / Transferred Point Loads (P):
+    (None — Beam does not carry secondary beams)
+  Analysis & Internal Force Results:
+    - Support Reactions (kN) : [70.78, 221.65, 61.74]
+    - Max Positive Moment    : Mu+ = 69.32 kN.m
+    - Max Face Negative Mom. : Mu- = -98.38 kN.m
+    - Max Critical Face Shear: Vu  = 113.53 kN
+---------------------------------------------------------------------------------------------------------
+BEAM B4 — [Drop Beam]
+  Dimensions : Initial = 200x400 mm  -->  Designed = 200x400 mm (Sufficient)
+  Geometry   : Spans = [4.0, 4.1] m | Cantilevers: Left = 0.00 m, Right = 0.00 m
+  Start/End  : (0.10, 0.00) -> (0.10, 8.50)
+  Distributed Loads (w_total = O.W + w_Slab + W_wall):
+    * [Span 1] Range 0.00m -> 4.00m (L = 4.00m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 0.00 kN/m [0.00 kN/m]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 13.89 kN/m
+    * [Span 2] Range 4.00m -> 8.10m (L = 4.10m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 0.00 kN/m [0.00 kN/m]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 13.89 kN/m
+  Concentrated / Transferred Point Loads (P):
+    (None — Beam does not carry secondary beams)
+  Analysis & Internal Force Results:
+    - Support Reactions (kN) : [20.66, 70.33, 21.53]
+    - Max Positive Moment    : Mu+ = 16.68 kN.m
+    - Max Face Negative Mom. : Mu- = -21.79 kN.m
+    - Max Critical Face Shear: Vu  = 35.42 kN
+---------------------------------------------------------------------------------------------------------
+BEAM B5 — [Hidden Beam]
+  Dimensions : Initial = 400x300 mm  -->  Designed = 400x300 mm (Sufficient)
+  Geometry   : Spans = [4.0, 4.1] m | Cantilevers: Left = 0.00 m, Right = 0.00 m
+  Start/End  : (5.20, 0.00) -> (5.20, 8.50)
+  Distributed Loads (w_total = O.W + w_Slab + W_wall):
+    * [Span 1] Range 0.00m -> 4.00m (L = 4.00m):
+        - O.W (Self-Weight) : 4.03 kN/m (O.W = 0.40 × 0.30 × 24 × 1.4 = 4.03 kN/m)
+        - w_Slab (from ribs): 0.00 kN/m [0.00 kN/m]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 15.23 kN/m
+    * [Span 2] Range 4.00m -> 8.10m (L = 4.10m):
+        - O.W (Self-Weight) : 4.03 kN/m (O.W = 0.40 × 0.30 × 24 × 1.4 = 4.03 kN/m)
+        - w_Slab (from ribs): 0.00 kN/m [0.00 kN/m]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 15.23 kN/m
+  Concentrated / Transferred Point Loads (P):
+    (None — Beam does not carry secondary beams)
+  Analysis & Internal Force Results:
+    - Support Reactions (kN) : [22.65, 77.11, 23.6]
+    - Max Positive Moment    : Mu+ = 18.29 kN.m
+    - Max Face Negative Mom. : Mu- = -23.89 kN.m
+    - Max Critical Face Shear: Vu  = 38.84 kN
+---------------------------------------------------------------------------------------------------------
+BEAM B6 — [Drop Beam]
+  Dimensions : Initial = 200x400 mm  -->  Designed = 200x400 mm (Sufficient)
+  Geometry   : Spans = [4.0, 4.1] m | Cantilevers: Left = 0.00 m, Right = 0.00 m
+  Start/End  : (9.90, 0.00) -> (9.90, 8.50)
+  Distributed Loads (w_total = O.W + w_Slab + W_wall):
+    * [Span 1] Range 0.00m -> 4.00m (L = 4.00m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 0.00 kN/m [0.00 kN/m]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 13.89 kN/m
+    * [Span 2] Range 4.00m -> 8.10m (L = 4.10m):
+        - O.W (Self-Weight) : 2.69 kN/m (O.W = 0.20 × 0.40 × 24 × 1.4 = 2.69 kN/m)
+        - w_Slab (from ribs): 0.00 kN/m [0.00 kN/m]
+        - W_wall            : 11.20 kN/m (2.5×3.2×1.4 = 11.20)
+        --> w_Total         : 13.89 kN/m
+  Concentrated / Transferred Point Loads (P):
+    (None — Beam does not carry secondary beams)
+  Analysis & Internal Force Results:
+    - Support Reactions (kN) : [20.66, 70.33, 21.53]
+    - Max Positive Moment    : Mu+ = 16.68 kN.m
+    - Max Face Negative Mom. : Mu- = -21.79 kN.m
+    - Max Critical Face Shear: Vu  = 35.42 kN
+---------------------------------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.5.03-structural-bim-pro)
+Xpert Structural Design Studio (v2.5.04-structural-bim-pro)
 Module: xpert_project_io.py
 Lead Engineer: Eng. Yousef Mohammed Keshlaf
 
@@ -30,7 +30,7 @@ except ImportError:
     ezdxf = None
 
 
-STUDIO_VERSION = "v2.5.03-structural-bim-pro"
+STUDIO_VERSION = "v2.5.04-structural-bim-pro"
 MASTER_FILE_EXT = ".xsd"
 
 _LOG_LOCK = threading.Lock()

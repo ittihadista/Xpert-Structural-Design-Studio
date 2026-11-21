@@ -1,5 +1,5 @@
 """
-Xpert Structural Design Studio (v2.5.03-structural-bim-pro)
+Xpert Structural Design Studio (v2.5.04-structural-bim-pro)
 Main Desktop Application (PyQt6 + ezdxf)
 Lead Structural Engineer & Product Owner: Eng. Yousef Mohammed Keshlaf
 """
